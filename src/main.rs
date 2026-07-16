@@ -1,18 +1,39 @@
-use clap::Parser;
+mod commands;
+mod error;
+mod ui;
+
+use clap::{Parser, Subcommand};
+use commands::self_cmd::SelfCommand;
 
 #[derive(Parser, Debug)]
-#[command(name = "lpm", version, about)]
-struct Args {
-    name: String,
+#[command(name = "lpm", bin_name = "lpm", version, about, styles = ui::help_styles())]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    #[arg(short, long, default_value_t = 1)]
-    count: u8,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Create an lpm.toml manifest in the current directory
+    Init,
+    /// Manage this lpm installation
+    #[command(subcommand, name = "self")]
+    SelfManage(SelfCommand),
 }
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    for _ in 0..args.count {
-        println!("Hello, {}!", args.name);
+    let result = match cli.command {
+        Commands::Init => commands::init::run(),
+        Commands::SelfManage(command) => commands::self_cmd::run(command),
+    };
+
+    if let Err(err) = result {
+        use crossterm::style::{Color, Stylize};
+
+        let (r, g, b) = ui::ACCENT;
+        eprintln!("{}", format!("✗ {err}").with(Color::Rgb { r, g, b }));
+        std::process::exit(1);
     }
 }
