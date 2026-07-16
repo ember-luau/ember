@@ -25,6 +25,15 @@ pub fn help_styles() -> styling::Styles {
         .invalid(dimmed)
 }
 
+/// Prints an error line to stderr as "✗ message" in the accent color.
+pub fn print_error(message: &str) {
+    use crossterm::style::Stylize;
+
+    let (r, g, b) = ACCENT;
+    let accent = crossterm::style::Color::Rgb { r, g, b };
+    eprintln!("{}", format!("✗ {message}").with(accent));
+}
+
 pub fn render_config() -> RenderConfig<'static> {
     let (r, g, b) = ACCENT;
     let accent = Color::rgb(r, g, b);
