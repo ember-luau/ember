@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # `lpm self update` compares the release tag against the version compiled into
+  # the binary, so a tag that doesn't match Cargo.toml would make every install
+  # report an update forever. Refuse to release on mismatch.
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version
+        run: |
+          crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.asset }})
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        # Asset names must stay in the form lpm-{os}-{arch}[.exe] that
+        # `lpm self update` derives from std::env::consts.
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: lpm-windows-x86_64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: lpm-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: lpm-macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: lpm-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir dist
+          if [[ "${{ matrix.asset }}" == *.exe ]]; then
+            cp "target/${{ matrix.target }}/release/lpm.exe" "dist/${{ matrix.asset }}"
+          else
+            cp "target/${{ matrix.target }}/release/lpm" "dist/${{ matrix.asset }}"
+          fi
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}
+          generate_release_notes: true
+          # Semver pre-release tags (v0.1.0-alpha.1, v1.0.0-rc.2, ...) get GitHub's
+          # pre-release badge and are skipped by the releases/latest API that
+          # `lpm self update` polls.
+          prerelease: ${{ contains(github.ref_name, '-') }}
