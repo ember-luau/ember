@@ -1,11 +1,27 @@
 [package]
-name = "LPMBackend"
-version = "0.1.0"
+name = "lpm-cli"
+version = "0.1.0-alpha.1"
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
+crossterm = "0.25"
+dirs = "6.0.0"
+inquire = "0.7"
+self-replace = "1.5.0"
+semver = "1.0.28"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
 
 [[bin]]
-name = "LPMBackend"
+name = "lpm"
 path = "src/main.rs"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.56.0"
