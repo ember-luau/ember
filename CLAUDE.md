@@ -8,6 +8,8 @@ Rust CLI (`lpm`) for managing Luau packages across ecosystems: our own index
 ```
 cargo build          # builds target/debug/lpm.exe
 cargo test           # unit tests only (no network)
+cargo fmt --check    # formatting lint (cargo fmt to fix)
+cargo clippy --all-targets   # clippy lints; keep at zero warnings
 ```
 
 - **Important:** `cargo test` does NOT rebuild `target/debug/lpm.exe`. Run
