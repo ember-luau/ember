@@ -34,6 +34,15 @@ pub fn print_error(message: &str) {
     eprintln!("{}", format!("✗ {message}").with(accent));
 }
 
+/// Prints a progress line as an accent "✓" followed by the message.
+pub fn print_success(message: &str) {
+    use crossterm::style::Stylize;
+
+    let (r, g, b) = ACCENT;
+    let accent = crossterm::style::Color::Rgb { r, g, b };
+    println!("{} {message}", "✓".with(accent));
+}
+
 pub fn render_config() -> RenderConfig<'static> {
     let (r, g, b) = ACCENT;
     let accent = Color::rgb(r, g, b);

@@ -1,2 +1,4 @@
 /target
 lpm.toml
+lpm.lock
+packages/
