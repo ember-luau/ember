@@ -1,25 +1,10 @@
 use crate::error::Error;
+use crate::manifest::{Environment, Manifest, Package, Target};
 use inquire::{Select, Text, validator::Validation};
-use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Serialize)]
-struct Manifest {
-    package: Package,
-}
-
-#[derive(Serialize)]
-struct Package {
-    name: String,
-    version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    authors: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository: Option<String>,
-    license: String,
-}
+const ENVIRONMENTS: &[&str] = &["shared", "server", "lune", "luau", "lute"];
 
 const LICENSES: &[&str] = &[
     "MIT",
@@ -193,6 +178,14 @@ pub fn run() -> Result<(), Error> {
         .with_page_size(8)
         .prompt()?;
 
+    let environment = Select::new("environment:", ENVIRONMENTS.to_vec())
+        .with_help_message("Where this package's Luau code runs")
+        .prompt()?;
+    let main = Text::new("main:")
+        .with_help_message("Entry point of your package")
+        .with_default("init.luau")
+        .prompt()?;
+
     let manifest = Manifest {
         package: Package {
             name,
@@ -200,14 +193,54 @@ pub fn run() -> Result<(), Error> {
             description: non_empty(description),
             authors: parse_authors(&authors_input),
             repository: non_empty(repository),
-            license: license.to_string(),
+            license: Some(license.to_string()),
         },
+        target: Some(Target {
+            environment: Environment::from_lpm(environment)?,
+            main: non_empty(main),
+        }),
+        config: Default::default(),
+        indices: Default::default(),
+        dependencies: Default::default(),
     };
 
     std::fs::write(manifest_path, toml::to_string(&manifest)?)?;
-    println!("Created lpm.toml");
+    crate::ui::print_success("Created lpm.toml");
+
+    if let Some(message) = gitignore_lpm(Path::new(".gitignore"))? {
+        crate::ui::print_success(message);
+    }
 
     Ok(())
+}
+
+/// Makes sure the packages folder is git-ignored, creating .gitignore when
+/// missing. Returns a message describing what changed.
+fn gitignore_lpm(path: &Path) -> Result<Option<&'static str>, Error> {
+    const ENTRY: &str = "packages/";
+
+    if !path.exists() {
+        std::fs::write(path, format!("{ENTRY}\n"))?;
+        return Ok(Some("Created .gitignore with packages/"));
+    }
+
+    let contents = std::fs::read_to_string(path)?;
+    let already_ignored = contents
+        .lines()
+        .map(str::trim)
+        .any(|line| matches!(line, "packages" | "packages/" | "/packages" | "/packages/"));
+    if already_ignored {
+        return Ok(None);
+    }
+
+    let mut updated = contents;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(ENTRY);
+    updated.push('\n');
+    std::fs::write(path, updated)?;
+    Ok(Some("Added packages/ to .gitignore"))
 }
 
 fn validate_name(input: &str) -> Result<(), String> {
@@ -310,5 +343,39 @@ mod tests {
     fn sanitizes_name_parts() {
         assert_eq!(sanitize_name_part("Luau-LPM_2"), "luaulpm2");
         assert_eq!(sanitize_name_part("---"), "");
+    }
+
+    #[test]
+    fn gitignores_lpm_directory() {
+        let dir = std::env::temp_dir().join("lpm-test-gitignore");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".gitignore");
+
+        // Missing file is created.
+        assert_eq!(
+            gitignore_lpm(&path).unwrap(),
+            Some("Created .gitignore with packages/")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "packages/\n");
+
+        // Entry already present (in any common spelling) is left alone.
+        assert_eq!(gitignore_lpm(&path).unwrap(), None);
+        std::fs::write(&path, "/target\npackages\n").unwrap();
+        assert_eq!(gitignore_lpm(&path).unwrap(), None);
+
+        // Existing file without the entry gets it appended, even when the
+        // file lacks a trailing newline.
+        std::fs::write(&path, "/target").unwrap();
+        assert_eq!(
+            gitignore_lpm(&path).unwrap(),
+            Some("Added packages/ to .gitignore")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "/target\npackages/\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
