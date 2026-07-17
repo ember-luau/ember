@@ -1,5 +1,9 @@
 mod commands;
 mod error;
+mod index;
+mod lockfile;
+mod manifest;
+mod resolver;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -16,6 +20,13 @@ struct Cli {
 enum Commands {
     /// Create an lpm.toml manifest in the current directory
     Init,
+    /// Add a dependency to lpm.toml
+    Add(commands::add::AddArgs),
+    /// Install dependencies from lpm.toml into .lpm/packages
+    #[command(visible_alias = "i")]
+    Install(commands::install::InstallArgs),
+    /// Publish this package to an index
+    Publish,
     /// Manage this lpm installation
     #[command(subcommand, name = "self")]
     SelfManage(SelfCommand),
@@ -26,6 +37,9 @@ fn main() {
 
     let result = match cli.command {
         Commands::Init => commands::init::run(),
+        Commands::Add(args) => commands::add::run(args),
+        Commands::Install(args) => commands::install::run(args),
+        Commands::Publish => commands::publish::run(),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
     };
 
