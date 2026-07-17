@@ -152,9 +152,7 @@ fn download_source(
     let (Some(api), Some(target)) = (config.api.as_deref(), candidate.target.as_deref()) else {
         return Err(Error::IndexFetch {
             url: index_url.to_string(),
-            reason: format!(
-                "entry for {name} has no download url and the index config has no api"
-            ),
+            reason: format!("entry for {name} has no download url and the index config has no api"),
         });
     };
 
@@ -314,7 +312,13 @@ mod tests {
             entry: parse_entries(""),
         };
 
-        let source = download_source(&config, "https://example.com/index", "pesde/hello", &candidate).unwrap();
+        let source = download_source(
+            &config,
+            "https://example.com/index",
+            "pesde/hello",
+            &candidate,
+        )
+        .unwrap();
         let DownloadSource::TarGz { url } = source else {
             panic!("expected tarball source");
         };
@@ -338,8 +342,13 @@ mod tests {
             entry: parse_entries(r#"download = "https://example.com/pkg.tar.gz""#),
         };
 
-        let source =
-            download_source(&config, "https://example.com/index", "scope/pkg", &candidate).unwrap();
+        let source = download_source(
+            &config,
+            "https://example.com/index",
+            "scope/pkg",
+            &candidate,
+        )
+        .unwrap();
         let DownloadSource::TarGz { url } = source else {
             panic!("expected tarball source");
         };

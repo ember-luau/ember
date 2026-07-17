@@ -242,7 +242,10 @@ fn detect_environment(dir: &Path) -> Option<Environment> {
     if let Some(environment) = read_toml("lpm.toml").as_ref().and_then(target_environment) {
         return Environment::from_lpm(&environment).ok();
     }
-    if let Some(environment) = read_toml("pesde.toml").as_ref().and_then(target_environment) {
+    if let Some(environment) = read_toml("pesde.toml")
+        .as_ref()
+        .and_then(target_environment)
+    {
         return Environment::from_pesde(&environment).ok();
     }
     if let Some(realm) = read_toml("wally.toml")

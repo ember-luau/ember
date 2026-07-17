@@ -64,10 +64,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     table.insert(&alias, toml_edit::value(entry));
     fs::write(MANIFEST_FILE, document.to_string())?;
 
-    ui::print_success(&format!(
-        "Added {name}@{} as '{alias}'",
-        package.version
-    ));
+    ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
     println!("Run `lpm install` to install it");
     Ok(())
 }

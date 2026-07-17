@@ -10,7 +10,6 @@ pub const MANIFEST_FILE: &str = "lpm.toml";
 pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
     pub package: Package,
@@ -27,9 +26,15 @@ pub struct Manifest {
 /// Per-environment install locations; each defaults to "packages/<env>".
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
-    #[serde(rename = "shared-packages-out", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "shared-packages-out",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub shared_packages_out: Option<String>,
-    #[serde(rename = "server-packages-out", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "server-packages-out",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub server_packages_out: Option<String>,
     #[serde(rename = "lune-packages-out", skip_serializing_if = "Option::is_none")]
     pub lune_packages_out: Option<String>,

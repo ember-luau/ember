@@ -187,10 +187,10 @@ fn ensure_cached(url: &str, refresh: bool) -> Result<PathBuf, Error> {
     let dir = cache_dir(url)?;
 
     if dir.join(".git").exists() {
-        if refresh {
-            if let Err(reason) = run_git(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"]) {
-                eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
-            }
+        if refresh
+            && let Err(reason) = run_git(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
+        {
+            eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
         }
         return Ok(dir);
     }
