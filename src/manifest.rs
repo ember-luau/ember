@@ -21,6 +21,8 @@ pub struct Manifest {
     pub indices: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, Tool>
 }
 
 /// Per-environment install locations; each defaults to "packages/<env>".
@@ -161,6 +163,13 @@ pub struct Dependency {
     /// Key into [indices]; None means the default luaupm index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Tool {
+    pub name: String,
+    pub repository: String,
+    pub version: String
 }
 
 impl Manifest {

@@ -202,6 +202,7 @@ pub fn run() -> Result<(), Error> {
         config: Default::default(),
         indices: Default::default(),
         dependencies: Default::default(),
+        tools: Default::default()
     };
 
     std::fs::write(manifest_path, toml::to_string(&manifest)?)?;

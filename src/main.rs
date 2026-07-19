@@ -22,9 +22,15 @@ enum Commands {
     Init,
     /// Add a dependency to lpm.toml
     Add(commands::add::AddArgs),
+
+    /// Manage tooling used in the current project.
+    #[command(subcommand)]
+    Tool(commands::tool::ToolCommand),
+
     /// Install dependencies from lpm.toml into .lpm/packages
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
+
     /// Publish this package to an index
     Publish,
     /// Manage this lpm installation
@@ -41,6 +47,7 @@ fn main() {
         Commands::Install(args) => commands::install::run(args),
         Commands::Publish => commands::publish::run(),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
+        Commands::Tool(command) => commands::tool::run(command)
     };
 
     if let Err(err) = result {
