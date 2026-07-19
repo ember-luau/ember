@@ -5,6 +5,7 @@ mod lockfile;
 mod manifest;
 mod resolver;
 mod ui;
+mod http;
 
 use clap::{Parser, Subcommand};
 use commands::self_cmd::SelfCommand;
