@@ -108,7 +108,7 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(dest)?;
     match source {
         DownloadSource::Zip { url } => {
-            let bytes = http::get_bytes((url, &[("Wally-Version", WALLY_VERSION)])?;
+            let bytes = http::get_bytes(url, &[("Wally-Version", WALLY_VERSION)])?;
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
             archive.extract(dest)?;
             Ok(())

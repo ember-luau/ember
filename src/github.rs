@@ -1,5 +1,3 @@
-use reqwest_middleware::ClientWithMiddleware;
-
 const BASE_URL: &str = "https://api.github.com";
 
 // TODO:
@@ -8,5 +6,5 @@ const BASE_URL: &str = "https://api.github.com";
 // Implement version checking and updating functionality
 
 pub struct GithubAPI {
-    client: ClientWithMiddleware
+    
 }
