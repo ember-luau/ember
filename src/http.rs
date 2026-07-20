@@ -1,7 +1,19 @@
 use crate::error::Error;
 use std::io::Read;
+use serde::de::DeserializeOwned;
 
 const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
+
+
+pub fn get_json<T: DeserializeOwned>(url: &str,  headers: &[(&str, &str)]) -> Result<T, Error> {
+    let mut request = ureq::get(url);
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    
+    let response = request.call()?;
+    Ok(response.into_json::<T>()?)
+}
 
 /// GETs `url`, following redirects (ureq only auto-follows 301/302/303;
 /// some hosts, like pesde's registry or GitHub's asset redirects, use 307).
