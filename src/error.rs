@@ -13,7 +13,7 @@ pub enum Error {
     NotInstalled(PathBuf),
 
     #[error("No releases have been published for {0} yet")]
-    NoReleases(&'static str),
+    NoReleases(String),
 
     #[error("Release v{version} has no asset named {asset} for this platform")]
     MissingAsset {
@@ -85,14 +85,7 @@ pub enum Error {
     #[error(transparent)]
     Semver(#[from] semver::Error),
 
+    // Uses the http errors made
     #[error(transparent)]
-    Http(Box<ureq::Error>),
-}
-
-// Boxed by hand because ureq::Error is large enough that carrying it inline
-// would bloat every Result<_, Error>.
-impl From<ureq::Error> for Error {
-    fn from(error: ureq::Error) -> Self {
-        Error::Http(Box::new(error))
-    }
+    Http(#[from] crate::http::error::HttpError),
 }
