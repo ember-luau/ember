@@ -10,8 +10,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
-
 /// A package index: a git repository cached under ~/.lpm/index-cache.
 /// Wally indices are identified by a root config.json; pesde/lpm indices by
 /// a root config.toml (lpm entries additionally carry direct download URLs).
@@ -152,10 +150,11 @@ fn ensure_cached(url: &str, refresh: bool) -> Result<PathBuf, Error> {
     let dir = cache_dir(url)?;
 
     if dir.join(".git").exists() {
-        if refresh
-            && let Err(reason) = run_git(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
-        {
-            eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
+        if refresh {
+            if let Err(reason) = run_git(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
+            {
+                eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
+            }
         }
         return Ok(dir);
     }
