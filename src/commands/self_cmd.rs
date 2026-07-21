@@ -1,11 +1,11 @@
 use crate::error::Error;
 use crate::github::GithubAPI;
+use crate::http::responses::Release;
 use clap::Subcommand;
 use semver::Version;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::http::responses::Release;
 
 /// GitHub repository releases are fetched from.
 const REPO: &str = "luaupm/cli";
@@ -59,8 +59,6 @@ fn install() -> Result<(), Error> {
     add_to_path(&bin_dir)
 }
 
-
-
 const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
 
 fn update() -> Result<(), Error> {
@@ -93,11 +91,8 @@ fn update() -> Result<(), Error> {
 
     println!("Downloading lpm v{latest}");
     println!("Downloading lpm v{latest}");
-    
-    let bytes = crate::http::get_bytes(
-        &asset.browser_download_url,
-        &[("User-Agent", USER_AGENT)],
-    )?;
+
+    let bytes = crate::http::get_bytes(&asset.browser_download_url, &[("User-Agent", USER_AGENT)])?;
 
     let staged = env::temp_dir().join(&asset_name);
     fs::write(&staged, &bytes)?;

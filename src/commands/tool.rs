@@ -12,7 +12,7 @@ pub enum ToolCommand {
     /// Update a tool
     Update,
     /// Install a tool on your system
-    Install
+    Install,
 }
 
 pub fn run(command: ToolCommand) -> Result<(), Error> {
@@ -20,7 +20,7 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
         ToolCommand::Add => add(),
         ToolCommand::Remove => remove(),
         ToolCommand::Update => update(),
-        ToolCommand::Install => install()
+        ToolCommand::Install => install(),
     }
 }
 

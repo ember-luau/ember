@@ -1,6 +1,6 @@
-use std::io::Read;
-use serde::de::DeserializeOwned;
 use crate::http::error::HttpError;
+use serde::de::DeserializeOwned;
+use std::io::Read;
 
 pub mod error;
 pub mod responses;
@@ -42,7 +42,5 @@ pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpErr
         return Ok(bytes);
     }
 
-    Err(HttpError::TooManyRedirects {
-        url
-    })
+    Err(HttpError::TooManyRedirects { url })
 }

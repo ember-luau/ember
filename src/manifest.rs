@@ -22,7 +22,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tools: BTreeMap<String, Tool>
+    pub tools: BTreeMap<String, Tool>,
 }
 
 /// Per-environment install locations; each defaults to "packages/<env>".
@@ -169,7 +169,7 @@ pub struct Dependency {
 pub struct Tool {
     pub name: String,
     pub repository: String,
-    pub version: String
+    pub version: String,
 }
 
 impl Manifest {

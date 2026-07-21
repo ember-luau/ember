@@ -1,12 +1,12 @@
 mod commands;
 mod error;
+mod github;
+mod http;
 mod index;
 mod lockfile;
 mod manifest;
 mod resolver;
 mod ui;
-mod http;
-mod github;
 
 use clap::{Parser, Subcommand};
 use commands::self_cmd::SelfCommand;
@@ -49,7 +49,7 @@ fn main() {
         Commands::Install(args) => commands::install::run(args),
         Commands::Publish => commands::publish::run(),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
-        Commands::Tool(command) => commands::tool::run(command)
+        Commands::Tool(command) => commands::tool::run(command),
     };
 
     if let Err(err) = result {

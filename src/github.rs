@@ -6,18 +6,20 @@ const JSON_HEADER_TYPE: &str = "application/vnd.github.v3+json";
 // Implement a function to install package release versions and return them so the tool command can link and do whatever else
 // Implement version checking and updating functionality
 
+use crate::error::Error;
 use crate::http;
 use crate::http::error::HttpError;
 use http::responses;
-use crate::error::Error;
 
 pub struct GithubAPI {
-    is_authorized: bool
+    is_authorized: bool,
 }
 
 impl GithubAPI {
     pub fn new() -> Self {
-        Self { is_authorized: true }
+        Self {
+            is_authorized: true,
+        }
     }
 
     fn headers(&self) -> Vec<(&str, &str)> {
@@ -25,7 +27,7 @@ impl GithubAPI {
             ("User-Agent", http::USER_AGENT),
             ("Accept", JSON_HEADER_TYPE),
         ];
-        
+
         headers
     }
 
