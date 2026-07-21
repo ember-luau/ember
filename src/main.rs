@@ -6,6 +6,7 @@ mod manifest;
 mod resolver;
 mod ui;
 mod http;
+mod github;
 
 use clap::{Parser, Subcommand};
 use commands::self_cmd::SelfCommand;

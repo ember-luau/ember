@@ -6,22 +6,35 @@ const JSON_HEADER_TYPE: &str = "application/vnd.github.v3+json";
 // Implement a function to install package release versions and return them so the tool command can link and do whatever else
 // Implement version checking and updating functionality
 
-#[derive(Debug, Error)]
-pub enum GithubError {
-    #[error("unrecognized access token format - must begin with `ghp_` or `gho_`.")]
-    UnrecognizedAccessToken,
-    #[error("no latest release was found for tool '{0}'")]
-    LatestReleaseNotFound(Box<ToolId>),
-    #[error("no release was found for tool '{0}'")]
-    ReleaseNotFound(Box<ToolSpec>),
-    #[error("other error: {0}")]
-    Other(String),
-}
+use crate::http;
+use crate::http::error::HttpError;
+use http::responses;
+use crate::error::Error;
 
 pub struct GithubAPI {
-    auth: bool
+    is_authorized: bool
 }
 
 impl GithubAPI {
+    pub fn new() -> Self {
+        Self { is_authorized: true }
+    }
 
+    fn headers(&self) -> Vec<(&str, &str)> {
+        let headers = vec![
+            ("User-Agent", http::USER_AGENT),
+            ("Accept", JSON_HEADER_TYPE),
+        ];
+        
+        headers
+    }
+
+    pub fn get_latest_release(&self, repo: &str) -> Result<responses::Release, Error> {
+        let url = format!("{BASE_URL}/repos/{repo}/releases/latest");
+
+        http::get_json::<responses::Release>(&url, &self.headers()).map_err(|error| match error {
+            HttpError::NotFound => Error::NoReleases(repo.to_string()),
+            other => other.into(),
+        })
+    }
 }
