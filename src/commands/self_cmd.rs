@@ -1,10 +1,11 @@
 use crate::error::Error;
+use crate::github::GithubAPI;
 use clap::Subcommand;
 use semver::Version;
-use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::http::responses::Release;
 
 /// GitHub repository releases are fetched from.
 const REPO: &str = "luaupm/cli";
@@ -58,36 +59,16 @@ fn install() -> Result<(), Error> {
     add_to_path(&bin_dir)
 }
 
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
 
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-}
 
 const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
 
 fn update() -> Result<(), Error> {
-    use std::io::Read;
-
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     println!("Checking for updates (currently v{current})");
 
-    let response = ureq::get(&format!(
-        "https://api.github.com/repos/{REPO}/releases/latest"
-    ))
-    .set("User-Agent", USER_AGENT)
-    .call()
-    .map_err(|error| match error {
-        ureq::Error::Status(404, _) => Error::NoReleases(REPO),
-        other => other.into(),
-    })?;
-    let release: Release = response.into_json()?;
+    let github = GithubAPI::new();
+    let release: Release = github.get_latest_release(REPO)?;
 
     let latest = Version::parse(release.tag_name.trim_start_matches('v'))?;
     if latest <= current {
@@ -111,11 +92,12 @@ fn update() -> Result<(), Error> {
         })?;
 
     println!("Downloading lpm v{latest}");
-    let response = ureq::get(&asset.browser_download_url)
-        .set("User-Agent", USER_AGENT)
-        .call()?;
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes)?;
+    println!("Downloading lpm v{latest}");
+    
+    let bytes = crate::http::get_bytes(
+        &asset.browser_download_url,
+        &[("User-Agent", USER_AGENT)],
+    )?;
 
     let staged = env::temp_dir().join(&asset_name);
     fs::write(&staged, &bytes)?;
