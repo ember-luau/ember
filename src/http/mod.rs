@@ -1,23 +1,24 @@
-use crate::error::Error;
 use std::io::Read;
 use serde::de::DeserializeOwned;
+use crate::http::error::HttpError;
 
-const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
+pub mod error;
+pub mod responses;
+pub const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
 
-
-pub fn get_json<T: DeserializeOwned>(url: &str,  headers: &[(&str, &str)]) -> Result<T, Error> {
+pub fn get_json<T: DeserializeOwned>(url: &str, headers: &[(&str, &str)]) -> Result<T, HttpError> {
     let mut request = ureq::get(url);
     for (name, value) in headers {
         request = request.set(name, value);
     }
-    
+
     let response = request.call()?;
     Ok(response.into_json::<T>()?)
 }
 
 /// GETs `url`, following redirects (ureq only auto-follows 301/302/303;
 /// some hosts, like pesde's registry or GitHub's asset redirects, use 307).
-pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, Error> {
+pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
     let mut url = url.to_string();
     for _ in 0..5 {
         let mut request = ureq::get(&url).set("User-Agent", USER_AGENT);
@@ -41,8 +42,7 @@ pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, Error> 
         return Ok(bytes);
     }
 
-    Err(Error::IndexFetch {
-        url,
-        reason: "too many redirects".to_string(),
+    Err(HttpError::TooManyRedirects {
+        url
     })
 }
