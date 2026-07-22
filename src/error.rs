@@ -33,6 +33,12 @@ pub enum Error {
     #[error("Invalid tool spec '{0}': expected 'owner/repo@version'")]
     InvalidToolSpec(String),
 
+    #[error("No release asset of {tool}@{version} matches this platform")]
+    NoMatchingAsset { tool: String, version: String },
+
+    #[error("No executable found in the downloaded release of {0}")]
+    NoExecutableInAsset(String),
+
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
 

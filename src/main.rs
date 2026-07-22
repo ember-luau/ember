@@ -6,6 +6,7 @@ mod index;
 mod lockfile;
 mod manifest;
 mod resolver;
+mod tools;
 mod ui;
 
 use clap::{Parser, Subcommand};
