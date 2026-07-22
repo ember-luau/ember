@@ -18,6 +18,9 @@ pub enum HttpError {
     #[error("too many redirects while fetching {url}")]
     TooManyRedirects { url: String },
 
+    #[error("redirect from {url} had no Location header")]
+    RedirectMissingLocation { url: String },
+
     #[error("rate limited")]
     RateLimited,
 }

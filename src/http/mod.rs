@@ -33,7 +33,7 @@ pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpErr
                     url = location.to_string();
                     continue;
                 }
-                None => break,
+                None => return Err(HttpError::RedirectMissingLocation { url }),
             }
         }
 
