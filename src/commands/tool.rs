@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::consts::EXE_SUFFIX, fs};
+use std::{collections::HashMap, env::consts::EXE_SUFFIX, fs, path::Path};
 
 use crate::{
     error::Error,
@@ -66,6 +66,15 @@ fn split_repository(name: &str) -> Result<(&str, &str), Error> {
     }
 }
 
+/// Reads the project manifest for editing, with the friendly missing-file
+/// error instead of a raw io one (tool commands get run outside projects).
+fn read_project_manifest() -> Result<String, Error> {
+    if !Path::new(MANIFEST_FILE).exists() {
+        return Err(Error::ManifestMissing);
+    }
+    Ok(fs::read_to_string(MANIFEST_FILE)?)
+}
+
 pub fn run(command: ToolCommand) -> Result<(), Error> {
     match command {
         ToolCommand::Add { name, version } => add(name, version),
@@ -95,7 +104,7 @@ fn add(name: String, version: Option<String>) -> Result<(), Error> {
         None => github.get_latest_release(&name)?,
     };
 
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
+    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
 
     // Get the tools table, if it doesn't exist create one
     let tools = document
@@ -123,7 +132,7 @@ fn add(name: String, version: Option<String>) -> Result<(), Error> {
 }
 
 fn remove(name: String) -> Result<(), Error> {
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
+    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
 
     // We can't remove tools if there is no tools table
     let Some(tools) = document.get_mut("tools") else {
@@ -186,7 +195,7 @@ fn is_outdated(current: &str, latest: &str) -> bool {
 
 fn update() -> Result<(), Error> {
     let github = GithubAPI::new();
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
+    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
 
     // No tools table means there is simply nothing to update
     let Some(tools) = document.get_mut("tools") else {
