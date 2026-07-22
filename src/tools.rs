@@ -228,6 +228,21 @@ fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error
     Err(Error::ToolNotManaged(alias.to_string()))
 }
 
+/// Tools visible from `start` through project manifests: the union over
+/// ancestor lpm.tomls, the nearest manifest winning per alias — the same
+/// scope `run_shim` resolves aliases against.
+pub fn project_tools(start: &Path) -> Result<BTreeMap<String, Tool>, Error> {
+    let mut merged = BTreeMap::new();
+    for dir in start.ancestors() {
+        if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))? {
+            for (alias, tool) in tools {
+                merged.entry(alias).or_insert(tool);
+            }
+        }
+    }
+    Ok(merged)
+}
+
 /// Tools pinned by the global tools file; empty when it does not exist yet.
 pub fn global_tools() -> Result<BTreeMap<String, Tool>, Error> {
     Ok(tools_in(&global_manifest_path()?)?.unwrap_or_default())
@@ -688,4 +703,29 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn project_tools_merge_with_nearest_manifest_winning() {
+        let base = std::env::temp_dir().join("lpm-test-project-tools");
+        let _ = fs::remove_dir_all(&base);
+
+        let inner = base.join("project");
+        let start = inner.join("src");
+        fs::create_dir_all(&start).unwrap();
+        fs::write(
+            base.join(MANIFEST_FILE),
+            "[tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\nstylua = \"johnnymorganz/stylua@2.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            inner.join(MANIFEST_FILE),
+            "[tools]\nrojo = \"rojo-rbx/rojo@7.5.1\"\n",
+        )
+        .unwrap();
+
+        let tools = project_tools(&start).unwrap();
+        assert_eq!(tools["rojo"].version, "7.5.1");
+        assert_eq!(tools["stylua"].version, "2.0.0");
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

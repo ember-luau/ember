@@ -1,4 +1,9 @@
-use std::{collections::HashMap, env::consts::EXE_SUFFIX, fs, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    env::consts::EXE_SUFFIX,
+    fs,
+    path::Path,
+};
 
 use crate::{
     error::Error,
@@ -38,10 +43,10 @@ pub enum ToolCommand {
     /// Update a tool
     Update,
 
-    /// List tools installed on your system
+    /// List installed and pinned tools
     List,
 
-    /// Delete a tool from your system
+    /// Delete a tool's binaries from your system (its manifest pins remain)
     Delete {
         /// Name of the tool (e.g. owner/repo)
         name: String,
@@ -308,10 +313,30 @@ fn update() -> Result<(), Error> {
 }
 
 fn list() -> Result<(), Error> {
-    let tools_dir = tools::tools_dir()?;
+    // Everything known about one version of a tool: whether its binaries are
+    // stored, and which manifests pin it. Pins without storage still show up
+    // (as "not installed") so a fresh `tool add` never looks like a ghost.
+    #[derive(Default)]
+    struct VersionState {
+        installed: bool,
+        project: bool,
+        global: bool,
+    }
 
-    // Collect installed tools as (owner/repo, sorted versions)
-    let mut installed: Vec<(String, Vec<String>)> = Vec::new();
+    // Keyed by lowercased "owner/repo": manifests may spell the repository
+    // with different casing than the storage folder was created with
+    type Seen = BTreeMap<String, (String, BTreeMap<String, VersionState>)>;
+    fn state_of<'a>(seen: &'a mut Seen, name: &str, version: String) -> &'a mut VersionState {
+        let entry = seen
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| (name.to_string(), BTreeMap::new()));
+        entry.1.entry(version).or_default()
+    }
+
+    let mut seen: Seen = BTreeMap::new();
+
+    // What is stored on disk
+    let tools_dir = tools::tools_dir()?;
     if tools_dir.is_dir() {
         for entry in fs::read_dir(&tools_dir)? {
             let entry = entry?;
@@ -325,37 +350,71 @@ fn list() -> Result<(), Error> {
             let Some((owner, repo)) = dir_name.split_once('_') else {
                 continue;
             };
+            let name = format!("{owner}/{repo}");
 
-            let mut versions: Vec<String> = fs::read_dir(entry.path())?
-                .filter_map(|version| version.ok())
-                .filter(|version| version.path().is_dir())
-                .map(|version| version.file_name().to_string_lossy().into_owned())
-                .collect();
-
-            // Order versions semver-aware where possible
-            versions.sort_by(|a, b| match (Version::parse(a), Version::parse(b)) {
-                (Ok(a), Ok(b)) => a.cmp(&b),
-                _ => a.cmp(b),
-            });
-
-            installed.push((format!("{owner}/{repo}"), versions));
+            for version in fs::read_dir(entry.path())? {
+                let version = version?;
+                if version.path().is_dir() {
+                    let version = version.file_name().to_string_lossy().into_owned();
+                    state_of(&mut seen, &name, version).installed = true;
+                }
+            }
         }
     }
 
-    if installed.is_empty() {
-        println!("No tools installed");
+    // What the surrounding project and the global tools file pin
+    let project = tools::project_tools(&std::env::current_dir()?)?;
+    let global = tools::global_tools()?;
+    for (tools, is_global) in [(&project, false), (&global, true)] {
+        for tool in tools.values() {
+            let state = state_of(&mut seen, &tool.repository, tool.version.clone());
+            if is_global {
+                state.global = true;
+            } else {
+                state.project = true;
+            }
+        }
+    }
+
+    if seen.is_empty() {
+        println!("No tools installed or pinned");
         return Ok(());
     }
 
     // One accent "✓ name@version" line per tool, matching install's output;
-    // multiple installed versions share the line
-    installed.sort();
-    for (name, versions) in installed {
-        if versions.is_empty() {
-            ui::print_success(&name);
-        } else {
-            ui::print_success(&format!("{name}@{}", versions.join(", ")));
-        }
+    // multiple versions share the line, each annotated with its scopes
+    for (name, versions) in seen.into_values() {
+        let mut versions: Vec<_> = versions.into_iter().collect();
+        // Order versions semver-aware where possible
+        versions.sort_by(
+            |(a, _), (b, _)| match (Version::parse(a), Version::parse(b)) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                _ => a.cmp(b),
+            },
+        );
+
+        let versions = versions
+            .into_iter()
+            .map(|(version, state)| {
+                let mut notes = Vec::new();
+                if state.project {
+                    notes.push("project");
+                }
+                if state.global {
+                    notes.push("global");
+                }
+                if !state.installed {
+                    notes.push("not installed");
+                }
+                if notes.is_empty() {
+                    version
+                } else {
+                    format!("{version} ({})", notes.join(", "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui::print_success(&format!("{name}@{versions}"));
     }
 
     Ok(())
@@ -372,20 +431,23 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
 
     let (owner, repo) = split_repository(&name)?;
     let tool_dir = tools::tools_dir()?.join(format!("{owner}_{repo}"));
+    let version = version
+        .as_deref()
+        .map(|version| version.trim_start_matches('v'));
 
     // With --version only remove that version's subdir, otherwise the tool
-    let target = match &version {
-        Some(version) => tool_dir.join(version.trim_start_matches('v')),
+    let target = match version {
+        Some(version) => tool_dir.join(version),
         None => tool_dir.clone(),
     };
-
     if !target.exists() {
         return Err(Error::ToolMissing(name));
     }
     fs::remove_dir_all(&target)?;
 
     // When the whole tool (or its last version) is gone, drop the shim too.
-    // Best-effort: the shim name may differ if the user aliased the tool
+    // Manifest pins stay: `tool list` shows it as "not installed" and the
+    // next `lpm install` puts it back
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
             .map(|mut dir| dir.next().is_none())
@@ -397,8 +459,8 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
         }
     }
 
-    let message = match &version {
-        Some(version) => format!("Deleted tool {}@{}", &name, version.trim_start_matches('v')),
+    let message = match version {
+        Some(version) => format!("Deleted tool {}@{}", &name, version),
         None => format!("Deleted tool {}", &name),
     };
     ui::print_success(&message);
