@@ -1,11 +1,6 @@
 const BASE_URL: &str = "https://api.github.com";
 const JSON_HEADER_TYPE: &str = "application/vnd.github.v3+json";
 
-// TODO:
-// Add logic for checking tools on github via author/name
-// Implement a function to install package release versions and return them so the tool command can link and do whatever else
-// Implement version checking and updating functionality
-
 use crate::error::Error;
 use crate::http;
 use crate::http::error::HttpError;
@@ -39,14 +34,22 @@ impl GithubAPI {
         headers
     }
 
-    // pub fn get_release(&self, repo: &str, version: Version) -> Result<responses::Release, Error> {
-    //     let url = format!("{BASE_URL}/repos/{repo}/release/");
+    /// Fetches the release tagged `v{version}`, falling back to the bare
+    /// `{version}` tag for repos that don't prefix their tags.
+    /// `version` must not include a leading 'v'.
+    pub fn get_release(&self, repo: &str, version: &str) -> Result<responses::Release, Error> {
+        for tag in [format!("v{version}"), version.to_string()] {
+            let url = format!("{BASE_URL}/repos/{repo}/releases/tags/{tag}");
 
-    //     http::get_json::<responses::Release>(&url, &self.headers()).map_err(|error| match error {
-    //         HttpError::NotFound => Error::NoSuchRelease(repo.to_string(), "".to_string()),
-    //         other => other.into(),
-    //     })
-    // }
+            match http::get_json::<responses::Release>(&url, &self.headers()) {
+                Ok(release) => return Ok(release),
+                Err(HttpError::NotFound) => continue,
+                Err(other) => return Err(other.into()),
+            }
+        }
+
+        Err(Error::NoSuchRelease(repo.to_string(), version.to_string()))
+    }
 
     pub fn get_latest_release(&self, repo: &str) -> Result<responses::Release, Error> {
         let url = format!("{BASE_URL}/repos/{repo}/releases/latest");
@@ -55,5 +58,11 @@ impl GithubAPI {
             HttpError::NotFound => Error::NoReleases(repo.to_string()),
             other => other.into(),
         })
+    }
+}
+
+impl Default for GithubAPI {
+    fn default() -> Self {
+        Self::new()
     }
 }
