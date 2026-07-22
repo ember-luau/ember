@@ -59,8 +59,6 @@ fn install() -> Result<(), Error> {
     add_to_path(&bin_dir)
 }
 
-const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
-
 fn update() -> Result<(), Error> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     println!("Checking for updates (currently v{current})");
@@ -90,9 +88,8 @@ fn update() -> Result<(), Error> {
         })?;
 
     println!("Downloading lpm v{latest}");
-    println!("Downloading lpm v{latest}");
 
-    let bytes = crate::http::get_bytes(&asset.browser_download_url, &[("User-Agent", USER_AGENT)])?;
+    let bytes = crate::http::get_bytes(&asset.browser_download_url, &[])?;
 
     let staged = env::temp_dir().join(&asset_name);
     fs::write(&staged, &bytes)?;
