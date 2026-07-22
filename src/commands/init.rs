@@ -38,6 +38,8 @@ struct Defaults {
 }
 
 impl Defaults {
+    /// Best-effort prompt defaults scraped from git: `name` prefers owner/repo
+    /// from the origin remote, falling back to `<git user>/<current dir>`.
     fn guess() -> Self {
         let remote = git_output(&["remote", "get-url", "origin"]);
         let repository = remote.as_deref().and_then(https_remote_url);
@@ -194,6 +196,8 @@ pub fn run() -> Result<(), Error> {
             authors: parse_authors(&authors_input),
             repository: non_empty(repository),
             license: Some(license.to_string()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         },
         target: Some(Target {
             environment: Environment::from_lpm(environment)?,
@@ -216,7 +220,8 @@ pub fn run() -> Result<(), Error> {
 }
 
 /// Makes sure the packages folder is git-ignored, creating .gitignore when
-/// missing. Returns a message describing what changed.
+/// missing. Returns a message describing what changed, or `None` if the
+/// folder was already ignored.
 fn gitignore_lpm(path: &Path) -> Result<Option<&'static str>, Error> {
     const ENTRY: &str = "packages/";
 
