@@ -42,6 +42,19 @@ enum Commands {
 }
 
 fn main() {
+    // Tool shims are copies of lpm named after their alias; invoked under
+    // such a name, dispatch to the tool the surrounding manifest pins
+    // instead of running the CLI.
+    if let Some(alias) = tools::shim_alias() {
+        match tools::run_shim(&alias) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                ui::print_error(&err.to_string());
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cli = parse_cli();
 
     let result = match cli.command {

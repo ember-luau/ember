@@ -39,6 +39,14 @@ pub enum Error {
     #[error("No executable found in the downloaded release of {0}")]
     NoExecutableInAsset(String),
 
+    #[error(
+        "Tool '{0}' is not managed in this directory; run `lpm tool add {0}` here or add it globally with --global"
+    )]
+    ToolNotManaged(String),
+
+    #[error("Tool '{0}' is not installed; run `lpm install` to install it")]
+    ToolNotInstalled(String),
+
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
 

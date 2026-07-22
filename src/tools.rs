@@ -2,7 +2,9 @@ use crate::error::Error;
 use crate::github::GithubAPI;
 use crate::http;
 use crate::http::responses::{Asset, Release};
-use crate::manifest::Tool;
+use crate::manifest::{MANIFEST_FILE, Tool};
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,12 @@ pub fn bin_dir() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("bin"))
 }
 
+/// Tools added with `lpm tool add --global` are recorded here and resolve in
+/// any directory; project [tools] entries only resolve inside that project.
+pub fn global_manifest_path() -> Result<PathBuf, Error> {
+    Ok(lpm_dir()?.join("tools.toml"))
+}
+
 /// Where one version of a tool is stored: ~/.lpm/tools/{owner}_{repo}/{version}.
 /// GitHub owner names cannot contain '_', so the first '_' always marks the
 /// owner/repo split when reading the folder name back.
@@ -32,16 +40,13 @@ pub fn storage_dir(repository: &str, version: &str) -> Result<PathBuf, Error> {
 
 /// Installs a manifest tool, skipping all network work when the requested
 /// version is already stored. Returns true when a download happened, false
-/// when the cached copy was reused (recreating the bin shim if it was gone).
+/// when the cached copy was reused (the bin shim is refreshed either way).
 pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool, Error> {
     let storage = storage_dir(&tool.repository, &tool.version)?;
     let stored = storage.join(executable_name(repo_short_name(&tool.repository)));
 
     if stored.exists() {
-        let shim = shim_path(alias)?;
-        if !shim.exists() {
-            write_shim(&stored, &shim)?;
-        }
+        write_shim(&shim_path(alias)?)?;
         return Ok(false);
     }
 
@@ -50,13 +55,19 @@ pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool
 }
 
 /// Downloads the platform asset of an already-fetched release, extracts it,
-/// stores the executable under `storage_dir`, and copies a bin shim named
-/// after the alias. Returns true (freshly downloaded); cache checks belong to
-/// `install_tool`.
+/// stores the executable under `storage_dir`, and writes a bin shim named
+/// after the alias. Returns true when a download happened, false when this
+/// release version was already stored (the shim is refreshed either way).
 pub fn install_release(alias: &str, repository: &str, release: &Release) -> Result<bool, Error> {
     let version = release.tag_name.trim_start_matches('v');
     let storage = storage_dir(repository, version)?;
     let repo = repo_short_name(repository);
+
+    let stored = storage.join(executable_name(repo));
+    if stored.exists() {
+        write_shim(&shim_path(alias)?)?;
+        return Ok(false);
+    }
 
     let asset =
         select_asset(&release.assets, env::consts::OS, env::consts::ARCH).ok_or_else(|| {
@@ -114,7 +125,7 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
 
     let stored = storage.join(executable_name(repo));
     make_executable(&stored)?;
-    write_shim(&stored, &shim_path(alias)?)?;
+    write_shim(&shim_path(alias)?)?;
     Ok(true)
 }
 
@@ -135,10 +146,13 @@ fn shim_path(alias: &str) -> Result<PathBuf, Error> {
     Ok(bin_dir()?.join(format!("{alias}{}", env::consts::EXE_SUFFIX)))
 }
 
-/// Copies the stored executable into the bin dir under the alias name.
-fn write_shim(stored: &Path, shim: &Path) -> Result<(), Error> {
+/// Writes the alias shim: a copy of the running lpm executable named after
+/// the alias (aftman-style). Invoked under that name, lpm dispatches to
+/// whatever tool the surrounding manifest pins (see `shim_alias`/`run_shim`)
+/// instead of running the CLI, which is what scopes tools to their projects.
+fn write_shim(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
-    fs::copy(stored, shim)?;
+    fs::copy(env::current_exe()?, shim)?;
     make_executable(shim)
 }
 
@@ -162,6 +176,103 @@ fn make_executable(path: &Path) -> Result<(), Error> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<(), Error> {
     Ok(())
+}
+
+/// The alias this process was invoked under, or None when running as the
+/// real lpm CLI. Shims are copies of lpm named after their tool; anything
+/// starting with "lpm" is treated as the CLI itself because release assets
+/// are named "lpm-{os}-{arch}".
+pub fn shim_alias() -> Option<String> {
+    let exe = env::current_exe().ok()?;
+    alias_from_stem(exe.file_stem()?.to_str()?)
+}
+
+fn alias_from_stem(stem: &str) -> Option<String> {
+    let lower = stem.to_ascii_lowercase();
+    if lower == "lpm" || lower.starts_with("lpm-") {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+/// Runs `alias` as a tool shim: resolves which repo@version the surrounding
+/// project (or the global tools file) pins the alias to, then hands off to
+/// the stored binary. Only returns the tool's exit code on platforms without
+/// exec (Windows); on unix the tool replaces this process.
+pub fn run_shim(alias: &str) -> Result<i32, Error> {
+    let tool = resolve_alias(alias, &env::current_dir()?, &global_manifest_path()?)?;
+    let stored = storage_dir(&tool.repository, &tool.version)?
+        .join(executable_name(repo_short_name(&tool.repository)));
+    if !stored.exists() {
+        return Err(Error::ToolNotInstalled(alias.to_string()));
+    }
+    exec_tool(&stored)
+}
+
+/// Finds the tool an alias refers to: the nearest lpm.toml walking up from
+/// `start` whose [tools] lists the alias wins, then the global tools file.
+fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error> {
+    for dir in start.ancestors() {
+        if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))?
+            && let Some(tool) = get_tool(&tools, alias)
+        {
+            return Ok(tool.clone());
+        }
+    }
+    if let Some(tools) = tools_in(global)?
+        && let Some(tool) = get_tool(&tools, alias)
+    {
+        return Ok(tool.clone());
+    }
+    Err(Error::ToolNotManaged(alias.to_string()))
+}
+
+/// Just the [tools] table of a manifest, parsed leniently so the shim can
+/// read both project manifests and the global tools file (which has no
+/// [package] section).
+#[derive(Deserialize)]
+struct ToolsTable {
+    #[serde(default)]
+    tools: BTreeMap<String, Tool>,
+}
+
+fn tools_in(path: &Path) -> Result<Option<BTreeMap<String, Tool>>, Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let table: ToolsTable = toml::from_str(&fs::read_to_string(path)?)?;
+    Ok(Some(table.tools))
+}
+
+/// Alias lookup, exact key first; Windows resolves commands case-insensitively
+/// so a shim can be invoked as "Rojo" while the manifest key is "rojo".
+fn get_tool<'a>(tools: &'a BTreeMap<String, Tool>, alias: &str) -> Option<&'a Tool> {
+    tools.get(alias).or_else(|| {
+        tools
+            .iter()
+            .find_map(|(key, tool)| key.eq_ignore_ascii_case(alias).then_some(tool))
+    })
+}
+
+#[cfg(unix)]
+fn exec_tool(stored: &Path) -> Result<i32, Error> {
+    use std::os::unix::process::CommandExt;
+    // exec replaces this process on success, so reaching a return value at
+    // all means it failed.
+    Err(Error::Io(
+        std::process::Command::new(stored)
+            .args(env::args_os().skip(1))
+            .exec(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn exec_tool(stored: &Path) -> Result<i32, Error> {
+    let status = std::process::Command::new(stored)
+        .args(env::args_os().skip(1))
+        .status()?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// How a release asset's bytes should be unpacked.
@@ -521,4 +632,55 @@ mod tests {
         assert!(dir.starts_with(tools_dir().unwrap()));
         assert!(dir.ends_with(Path::new("tools").join("rojo-rbx_rojo").join("7.4.4")));
     }
+
+    #[test]
+    fn shim_aliases_exclude_lpm_itself() {
+        assert_eq!(alias_from_stem("lpm"), None);
+        assert_eq!(alias_from_stem("LPM"), None);
+        // Release assets run before `self install` renames them.
+        assert_eq!(alias_from_stem("lpm-windows-x86_64"), None);
+        assert_eq!(alias_from_stem("rojo"), Some("rojo".to_string()));
+        assert_eq!(alias_from_stem("StyLua"), Some("StyLua".to_string()));
+    }
+
+    #[test]
+    fn resolves_aliases_from_nearest_manifest_then_global() {
+        let base = std::env::temp_dir().join("lpm-test-resolve-alias");
+        let _ = fs::remove_dir_all(&base);
+
+        let project = base.join("project");
+        let nested = project.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            project.join(MANIFEST_FILE),
+            "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n[tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\n",
+        )
+        .unwrap();
+        let global = base.join("tools.toml");
+        fs::write(
+            &global,
+            "[tools]\nstylua = \"johnnymorganz/stylua@2.0.0\"\n",
+        )
+        .unwrap();
+
+        // Project manifests win, found from any directory below them.
+        let tool = resolve_alias("rojo", &nested, &global).unwrap();
+        assert_eq!(tool.repository, "rojo-rbx/rojo");
+        assert_eq!(tool.version, "7.4.4");
+
+        // Aliases the project does not list fall back to the global file.
+        let tool = resolve_alias("stylua", &nested, &global).unwrap();
+        assert_eq!(tool.repository, "johnnymorganz/stylua");
+
+        // Windows command lookup is case-insensitive; resolution must be too.
+        assert!(resolve_alias("Rojo", &nested, &global).is_ok());
+
+        assert!(matches!(
+            resolve_alias("wally", &nested, &global),
+            Err(Error::ToolNotManaged(_))
+        ));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
 }
