@@ -153,16 +153,16 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     let version = release.tag_name.trim_start_matches('v');
 
     // Format the toml package string
-    let value = format!("{author}/{package}@{}", &version);
+    let value = format!("{author}/{package}@{version}");
     table[package] = toml_edit::value(value);
 
     fs::create_dir_all(path.parent().expect("tools file has a parent"))?;
     fs::write(&path, document.to_string())?;
 
     if global {
-        ui::print_success(&format!("Added global tool {}@{}", &name, &version));
+        ui::print_success(&format!("Added global tool {name}@{version}"));
     } else {
-        ui::print_success(&format!("Added tool {}@{} to lpm.toml", &name, &version));
+        ui::print_success(&format!("Added tool {name}@{version} to lpm.toml"));
     }
     println!("Run `lpm install` to install it");
 
@@ -232,10 +232,7 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
     } else {
         "lpm.toml"
     };
-    ui::print_success(&format!(
-        "Successfully removed tool {} from {}",
-        &name, file
-    ));
+    ui::print_success(&format!("Successfully removed tool {name} from {file}"));
 
     Ok(())
 }
@@ -460,8 +457,8 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     }
 
     let message = match version {
-        Some(version) => format!("Deleted tool {}@{}", &name, version),
-        None => format!("Deleted tool {}", &name),
+        Some(version) => format!("Deleted tool {name}@{version}"),
+        None => format!("Deleted tool {name}"),
     };
     ui::print_success(&message);
 
