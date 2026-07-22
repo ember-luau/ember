@@ -29,6 +29,30 @@ pub fn global_manifest_path() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("tools.toml"))
 }
 
+/// The executable `alias` currently resolves to on PATH when that is NOT our
+/// shim — i.e. another toolchain manager (aftman, rokit, foreman) or a stray
+/// copy that shadows the lpm-managed tool, producing that manager's errors
+/// instead of running what lpm installed.
+pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
+    let bin = bin_dir().ok()?;
+    let file = format!("{alias}{}", env::consts::EXE_SUFFIX);
+    for dir in env::split_paths(&env::var_os("PATH")?) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(&file);
+        if candidate.is_file() {
+            // The first hit wins, mirroring OS command lookup
+            let ours = match (dir.canonicalize(), bin.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => dir == bin,
+            };
+            return if ours { None } else { Some(candidate) };
+        }
+    }
+    None
+}
+
 /// Where one version of a tool is stored: ~/.lpm/tools/{owner}_{repo}/{version}.
 /// GitHub owner names cannot contain '_', so the first '_' always marks the
 /// owner/repo split when reading the folder name back.

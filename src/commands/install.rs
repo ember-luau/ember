@@ -176,6 +176,16 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
                 "{}@{} → {alias}{notes}",
                 tool.repository, tool.version
             ));
+
+            // Another toolchain manager's shim earlier in PATH (aftman,
+            // rokit) would run instead of ours and report its own errors;
+            // surface that or the tool looks broken for no visible reason.
+            if let Some(shadow) = tools::shadowing_executable(alias) {
+                eprintln!(
+                    "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
+                    shadow.display()
+                );
+            }
         }
     }
 
