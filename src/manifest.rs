@@ -22,7 +22,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tools: BTreeMap<String, Tool>
+    pub tools: BTreeMap<String, Tool>,
 }
 
 /// Per-environment install locations; each defaults to "packages/<env>".
@@ -165,11 +165,64 @@ pub struct Dependency {
     pub index: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// A GitHub-released binary tool, written in lpm.toml as the single string
+/// "owner/repo@version" under [tools] (key = alias).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
-    pub name: String,
+    /// GitHub repository in "owner/repo" form.
     pub repository: String,
-    pub version: String
+    /// Exact release version, without a leading 'v'.
+    pub version: String,
+}
+
+impl Tool {
+    /// Parses an "owner/repo@version" tool spec. Unlike index package names
+    /// (see `split_package_name`), GitHub owners/repos may contain uppercase
+    /// letters and dots (e.g. "JohnnyMorganz/StyLua"), so only the shape is
+    /// validated here.
+    pub fn parse(spec: &str) -> Result<Self, Error> {
+        let invalid = || Error::InvalidToolSpec(spec.to_string());
+
+        let (repository, version) = spec.trim().split_once('@').ok_or_else(invalid)?;
+        if repository.is_empty() || version.is_empty() || version.contains('@') {
+            return Err(invalid());
+        }
+
+        let (owner, repo) = repository.split_once('/').ok_or_else(invalid)?;
+        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+            return Err(invalid());
+        }
+
+        Ok(Tool {
+            repository: repository.to_string(),
+            version: version.to_string(),
+        })
+    }
+}
+
+impl fmt::Display for Tool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.repository, self.version)
+    }
+}
+
+impl Serialize for Tool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let spec = String::deserialize(deserializer)?;
+        Tool::parse(&spec).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Manifest {
@@ -267,6 +320,10 @@ mod tests {
             [dependencies]
             Chief = { name = "chief/core", version = "^" }
             Other = { name = "user/other_package", version = "^", index = "wally" }
+
+            [tools]
+            stylua = "johnnymorganz/stylua@2.0.0"
+            StyLua = "JohnnyMorganz/StyLua@2.1.0"
             "#,
         )
         .unwrap();
@@ -281,6 +338,10 @@ mod tests {
             manifest.dependencies["Other"].index.as_deref(),
             Some("wally")
         );
+        assert_eq!(manifest.tools["stylua"].repository, "johnnymorganz/stylua");
+        assert_eq!(manifest.tools["stylua"].version, "2.0.0");
+        assert_eq!(manifest.tools["StyLua"].repository, "JohnnyMorganz/StyLua");
+        assert_eq!(manifest.tools["StyLua"].version, "2.1.0");
     }
 
     #[test]
@@ -392,6 +453,56 @@ mod tests {
         assert!(split_package_name("noslash").is_err());
         assert!(split_package_name("Upper/case").is_err());
         assert!(split_package_name("a/b/c").is_err());
+    }
+
+    #[test]
+    fn parses_tool_specs() {
+        let tool = Tool::parse("  JohnnyMorganz/StyLua@2.0.0  ").unwrap();
+        assert_eq!(tool.repository, "JohnnyMorganz/StyLua");
+        assert_eq!(tool.version, "2.0.0");
+        assert_eq!(tool.to_string(), "JohnnyMorganz/StyLua@2.0.0");
+    }
+
+    #[test]
+    fn rejects_invalid_tool_specs() {
+        for spec in [
+            "norepo@1.0",
+            "owner/repo",
+            "owner/repo@",
+            "a/b/c@1.0",
+            "@1.0",
+            "owner/@1.0",
+            "/repo@1.0",
+            "owner/repo@1.0@2.0",
+            "",
+        ] {
+            assert!(
+                matches!(Tool::parse(spec), Err(Error::InvalidToolSpec(_))),
+                "spec {spec:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_round_trips_through_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct Tools {
+            stylua: Tool,
+        }
+
+        let tools = Tools {
+            stylua: Tool {
+                repository: "JohnnyMorganz/StyLua".to_string(),
+                version: "2.0.0".to_string(),
+            },
+        };
+        let serialized = toml::to_string(&tools).unwrap();
+        assert_eq!(
+            serialized.trim(),
+            r#"stylua = "JohnnyMorganz/StyLua@2.0.0""#
+        );
+        let parsed: Tools = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.stylua, tools.stylua);
     }
 
     #[test]

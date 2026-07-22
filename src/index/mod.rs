@@ -2,15 +2,13 @@ pub mod pesde;
 pub mod wally;
 
 use crate::error::Error;
+use crate::http;
 use crate::manifest::Environment;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
 
 /// A package index: a git repository cached under ~/.lpm/index-cache.
 /// Wally indices are identified by a root config.json; pesde/lpm indices by
@@ -108,13 +106,13 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(dest)?;
     match source {
         DownloadSource::Zip { url } => {
-            let bytes = http_get_bytes(url, &[("Wally-Version", WALLY_VERSION)])?;
+            let bytes = http::get_bytes(url, &[("Wally-Version", WALLY_VERSION)])?;
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
             archive.extract(dest)?;
             Ok(())
         }
         DownloadSource::TarGz { url } => {
-            let bytes = http_get_bytes(url, &[])?;
+            let bytes = http::get_bytes(url, &[])?;
             // ureq transparently decodes Content-Encoding: gzip, in which
             // case the body is already the raw tar; sniff the gzip magic.
             if bytes.starts_with(&[0x1f, 0x8b]) {
@@ -126,41 +124,6 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
             Ok(())
         }
     }
-}
-
-fn http_get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, Error> {
-    // ureq only auto-follows 301/302/303; registries like pesde's redirect to
-    // object storage with a 307, so follow redirects ourselves.
-    let mut url = url.to_string();
-    for _ in 0..5 {
-        let mut request = ureq::get(&url)
-            .set("User-Agent", USER_AGENT)
-            // pesde registries require this; harmless everywhere else.
-            .set("Accept", "application/octet-stream");
-        for (name, value) in headers {
-            request = request.set(name, value);
-        }
-
-        let response = request.call()?;
-        if (300..400).contains(&response.status()) {
-            match response.header("location") {
-                Some(location) => {
-                    url = location.to_string();
-                    continue;
-                }
-                None => break,
-            }
-        }
-
-        let mut bytes = Vec::new();
-        response.into_reader().read_to_end(&mut bytes)?;
-        return Ok(bytes);
-    }
-
-    Err(Error::IndexFetch {
-        url,
-        reason: "too many redirects".to_string(),
-    })
 }
 
 fn cache_dir(url: &str) -> Result<PathBuf, Error> {

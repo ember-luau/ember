@@ -1,8 +1,10 @@
 use crate::error::Error;
+use crate::github::GithubAPI;
 use crate::index;
 use crate::lockfile::{LockedPackage, Lockfile};
-use crate::manifest::{Environment, Manifest};
+use crate::manifest::{Environment, Manifest, Tool};
 use crate::resolver;
+use crate::tools;
 use crate::ui;
 use clap::Args;
 use std::fs;
@@ -55,13 +57,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             .collect()
     };
 
-    if jobs.is_empty() {
-        println!("No dependencies to install");
-        return Ok(());
-    }
-
     // Installs are reproduced from scratch each run: every environment's
-    // configured output folder is rebuilt.
+    // configured output folder is rebuilt even when there is nothing to
+    // install, so removing the last dependency leaves no stale packages.
     for environment in Environment::ALL {
         let out = manifest.packages_out(environment);
         if out.exists() {
@@ -130,16 +128,83 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
         fs::remove_dir_all(&staging)?;
     }
 
-    let count = locked.len();
+    let package_count = locked.len();
     if !args.locked {
+        // Written even when empty, so lpm.lock always mirrors the manifest.
         Lockfile::new(locked).save()?;
     }
 
-    println!(
-        "Installed {count} package{}",
-        if count == 1 { "" } else { "s" }
-    );
+    // Tool versions are pinned exactly, so tools have no lockfile entries and
+    // install the same way on normal and --locked runs. Global tools
+    // (~/.lpm/tools.toml) install here too: `tool add` never downloads, so
+    // this is the one place every tool gets installed.
+    let mut tool_jobs: Vec<(String, Tool, bool)> = manifest
+        .tools
+        .iter()
+        .map(|(alias, tool)| (alias.clone(), tool.clone(), false))
+        .collect();
+    for (alias, tool) in tools::global_tools()? {
+        // A pin listed identically in both scopes only needs one install
+        let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
+            project.repository.eq_ignore_ascii_case(&tool.repository)
+                && project.version == tool.version
+        });
+        if !duplicate {
+            tool_jobs.push((alias, tool, true));
+        }
+    }
+
+    let tool_count = tool_jobs.len();
+    if !tool_jobs.is_empty() {
+        println!("Installing tools");
+        let github = GithubAPI::new();
+        for (alias, tool, global) in &tool_jobs {
+            let downloaded = tools::install_tool(alias, tool, &github)?;
+            let mut notes = Vec::new();
+            if *global {
+                notes.push("global");
+            }
+            if !downloaded {
+                notes.push("cached");
+            }
+            let notes = if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join(", "))
+            };
+            ui::print_success(&format!(
+                "{}@{} → {alias}{notes}",
+                tool.repository, tool.version
+            ));
+
+            // Another toolchain manager's shim earlier in PATH (aftman,
+            // rokit) would run instead of ours and report its own errors;
+            // surface that or the tool looks broken for no visible reason.
+            if let Some(shadow) = tools::shadowing_executable(alias) {
+                eprintln!(
+                    "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
+                    shadow.display()
+                );
+            }
+        }
+    }
+
+    match (package_count, tool_count) {
+        (0, 0) => println!("Nothing to install"),
+        (p, 0) => println!("Installed {p} package{}", plural(p)),
+        (0, t) => println!("Installed {t} tool{}", plural(t)),
+        (p, t) => println!(
+            "Installed {p} package{} and {t} tool{}",
+            plural(p),
+            plural(t)
+        ),
+    }
     Ok(())
+}
+
+/// "" for one, "s" for any other count — for the install summary.
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 /// Body of a generated link file, e.g. `return require("./.lpm/scope_pkg/lib")`.

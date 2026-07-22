@@ -1,9 +1,12 @@
 mod commands;
 mod error;
+mod github;
+mod http;
 mod index;
 mod lockfile;
 mod manifest;
 mod resolver;
+mod tools;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -23,11 +26,11 @@ enum Commands {
     /// Add a dependency to lpm.toml
     Add(commands::add::AddArgs),
 
-    /// Manage tooling used in the current project.
+    /// Manage tooling used in the current project
     #[command(subcommand)]
     Tool(commands::tool::ToolCommand),
 
-    /// Install dependencies from lpm.toml into .lpm/packages
+    /// Install dependencies and tools from lpm.toml
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 
@@ -39,6 +42,19 @@ enum Commands {
 }
 
 fn main() {
+    // Tool shims are copies of lpm named after their alias; invoked under
+    // such a name, dispatch to the tool the surrounding manifest pins
+    // instead of running the CLI.
+    if let Some(alias) = tools::shim_alias() {
+        match tools::run_shim(&alias) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                ui::print_error(&err.to_string());
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cli = parse_cli();
 
     let result = match cli.command {
@@ -47,7 +63,7 @@ fn main() {
         Commands::Install(args) => commands::install::run(args),
         Commands::Publish => commands::publish::run(),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
-        Commands::Tool(command) => commands::tool::run(command)
+        Commands::Tool(command) => commands::tool::run(command),
     };
 
     if let Err(err) = result {

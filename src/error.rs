@@ -13,7 +13,10 @@ pub enum Error {
     NotInstalled(PathBuf),
 
     #[error("No releases have been published for {0} yet")]
-    NoReleases(&'static str),
+    NoReleases(String),
+
+    #[error("Release {1} for repository {0} doesn't exist")]
+    NoSuchRelease(String, String),
 
     #[error("Release v{version} has no asset named {asset} for this platform")]
     MissingAsset {
@@ -23,6 +26,26 @@ pub enum Error {
 
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,
+
+    #[error("No tool exists with name '{0}'")]
+    ToolMissing(String),
+
+    #[error("Invalid tool spec '{0}': expected 'owner/repo@version'")]
+    InvalidToolSpec(String),
+
+    #[error("No release asset of {tool}@{version} matches this platform")]
+    NoMatchingAsset { tool: String, version: String },
+
+    #[error("No executable found in the downloaded release of {0}")]
+    NoExecutableInAsset(String),
+
+    #[error(
+        "Tool '{0}' is not managed in this directory; run `lpm tool add {0}` here or add it globally with --global"
+    )]
+    ToolNotManaged(String),
+
+    #[error("Tool '{0}' is not installed; run `lpm install` to install it")]
+    ToolNotInstalled(String),
 
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
@@ -85,14 +108,7 @@ pub enum Error {
     #[error(transparent)]
     Semver(#[from] semver::Error),
 
+    // Uses the http errors made
     #[error(transparent)]
-    Http(Box<ureq::Error>),
-}
-
-// Boxed by hand because ureq::Error is large enough that carrying it inline
-// would bloat every Result<_, Error>.
-impl From<ureq::Error> for Error {
-    fn from(error: ureq::Error) -> Self {
-        Error::Http(Box::new(error))
-    }
+    Http(#[from] crate::http::error::HttpError),
 }
