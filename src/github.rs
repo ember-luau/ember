@@ -31,6 +31,15 @@ impl GithubAPI {
         headers
     }
 
+    // pub fn get_release(&self, repo: &str, version: Version) -> Result<responses::Release, Error> {
+    //     let url = format!("{BASE_URL}/repos/{repo}/release/");
+
+    //     http::get_json::<responses::Release>(&url, &self.headers()).map_err(|error| match error {
+    //         HttpError::NotFound => Error::NoSuchRelease(repo.to_string(), "".to_string()),
+    //         other => other.into(),
+    //     })
+    // }
+
     pub fn get_latest_release(&self, repo: &str) -> Result<responses::Release, Error> {
         let url = format!("{BASE_URL}/repos/{repo}/releases/latest");
 
