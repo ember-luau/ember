@@ -55,13 +55,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             .collect()
     };
 
-    if jobs.is_empty() {
-        println!("No dependencies to install");
-        return Ok(());
-    }
-
     // Installs are reproduced from scratch each run: every environment's
-    // configured output folder is rebuilt.
+    // configured output folder is rebuilt even when there is nothing to
+    // install, so removing the last dependency leaves no stale packages.
     for environment in Environment::ALL {
         let out = manifest.packages_out(environment);
         if out.exists() {
