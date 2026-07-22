@@ -68,6 +68,49 @@ pub struct Package {
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Files or directories (not globs) that go into the published archive;
+    /// everything else is skipped. Empty means "everything sensible".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Paths dropped from the published archive after `include` applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+impl Package {
+    /// The `repository` field reduced to a GitHub "owner/repo" slug. Accepts
+    /// a bare slug, https:// and host-only URLs, and the git@ ssh remote,
+    /// with or without ".git". Other hosts give None: publishing uploads
+    /// release assets through the GitHub API, so only GitHub repos work.
+    pub fn repository_slug(&self) -> Option<String> {
+        let repository = self.repository.as_deref()?.trim().trim_end_matches('/');
+
+        let rest = if let Some(ssh) = repository.strip_prefix("git@github.com:") {
+            ssh
+        } else if let Some(after_scheme) = repository
+            .strip_prefix("https://")
+            .or_else(|| repository.strip_prefix("http://"))
+        {
+            after_scheme.strip_prefix("github.com/")?
+        } else if let Some(hosted) = repository.strip_prefix("github.com/") {
+            hosted
+        } else {
+            repository
+        };
+        let rest = rest.strip_suffix(".git").unwrap_or(rest);
+
+        // Charset checks (GitHub's, roughly) keep host-shaped strings like
+        // "gitlab.com/owner" or "git@host:owner" from passing as bare slugs.
+        let (owner, repo) = rest.split_once('/')?;
+        let slug_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        let owner_ok = !owner.is_empty() && owner.chars().all(slug_char);
+        let repo_ok = !repo.is_empty() && repo.chars().all(|c| slug_char(c) || c == '.');
+        if owner_ok && repo_ok {
+            Some(format!("{owner}/{repo}"))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -78,8 +121,8 @@ pub struct Target {
     pub main: Option<String>,
 }
 
-/// Where a package's Luau code runs. Directory names under .lpm/packages/
-/// use the serialized (lowercase) form.
+/// Where a package's Luau code runs. Output folders under packages/ use the
+/// serialized (lowercase) form.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -312,7 +355,7 @@ mod tests {
 
             [target]
             environment = "lune"
-            main = "init.luau"
+            main = "src/init.luau"
 
             [indices]
             wally = "https://github.com/UpliftGames/wally-index"
@@ -503,6 +546,106 @@ mod tests {
         );
         let parsed: Tools = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.stylua, tools.stylua);
+    }
+
+    fn package_with_repository(repository: Option<&str>) -> Package {
+        Package {
+            name: "scope/name".to_string(),
+            version: "0.1.0".to_string(),
+            description: None,
+            authors: Vec::new(),
+            repository: repository.map(str::to_string),
+            license: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repository_slug_normalizes_github_shapes() {
+        for repository in [
+            "owner/repo",
+            "https://github.com/owner/repo",
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo/",
+            "http://github.com/owner/repo",
+            "github.com/owner/repo",
+            "git@github.com:owner/repo",
+            "git@github.com:owner/repo.git",
+            "  owner/repo  ",
+        ] {
+            assert_eq!(
+                package_with_repository(Some(repository)).repository_slug(),
+                Some("owner/repo".to_string()),
+                "repository {repository:?} should normalize"
+            );
+        }
+        assert_eq!(
+            package_with_repository(Some("JohnnyMorganz/StyLua.git"))
+                .repository_slug()
+                .as_deref(),
+            Some("JohnnyMorganz/StyLua")
+        );
+    }
+
+    #[test]
+    fn repository_slug_rejects_everything_else() {
+        for repository in [
+            "https://gitlab.com/owner/repo",
+            "gitlab.com/owner/repo",
+            "git@gitlab.com:owner/repo",
+            "https://github.com/owner",
+            "https://github.com/owner/repo/tree/main",
+            "owner",
+            "owner/",
+            "/repo",
+            "a/b/c",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                package_with_repository(Some(repository)).repository_slug(),
+                None,
+                "repository {repository:?} should be rejected"
+            );
+        }
+        assert_eq!(package_with_repository(None).repository_slug(), None);
+    }
+
+    #[test]
+    fn include_and_exclude_round_trip() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+            include = ["src", "lpm.toml", "README.md"]
+            exclude = ["src/tests"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.package.include, ["src", "lpm.toml", "README.md"]);
+        assert_eq!(manifest.package.exclude, ["src/tests"]);
+
+        let serialized = toml::to_string(&manifest).unwrap();
+        let parsed: Manifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.package.include, manifest.package.include);
+        assert_eq!(parsed.package.exclude, manifest.package.exclude);
+
+        // Absent lists stay absent on write.
+        let bare: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+            "#,
+        )
+        .unwrap();
+        assert!(bare.package.include.is_empty());
+        let serialized = toml::to_string(&bare).unwrap();
+        assert!(!serialized.contains("include"));
+        assert!(!serialized.contains("exclude"));
     }
 
     #[test]

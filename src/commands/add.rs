@@ -16,7 +16,7 @@ pub struct AddArgs {
     /// Index key from [indices]; skips the interactive prompt
     #[arg(long)]
     index: Option<String>,
-    /// Dependency key written to [dependencies] (defaults to the package name)
+    /// Dependency key written to [dependencies] (defaults to the package's short name)
     #[arg(long)]
     alias: Option<String>,
 }
@@ -45,6 +45,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         manifest.target.as_ref().map(|target| target.environment),
     )?;
 
+    // Edit the raw document instead of re-serializing `manifest` so comments
+    // and formatting in lpm.toml survive.
     let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
     let dependencies = document
         .entry("dependencies")
@@ -69,8 +71,9 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/// Asks which index to search. Empty input means the default LPM index; any
-/// other input must be a key defined under [indices].
+/// Asks which index to search. Empty input means the default index (the
+/// `default` key under [indices] if set, otherwise LPM's); any other input
+/// must be a key defined under [indices].
 fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
     inquire::set_global_render_config(crate::ui::render_config());
 

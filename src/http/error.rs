@@ -1,4 +1,3 @@
-// http/error.rs
 use thiserror::Error;
 
 #[derive(Debug, Error)]

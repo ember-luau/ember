@@ -18,8 +18,12 @@ pub struct Config {
     /// {PACKAGE_VERSION}, and {PACKAGE_TARGET} placeholders.
     #[serde(default)]
     pub download: Option<String>,
-    #[serde(default)]
+    /// Real pesde indices spell this `github_oauth_client_id`.
+    #[serde(default, alias = "github_oauth_client_id")]
     pub github_oauth_id: Option<String>,
+    /// Downloads from this index need the user's GitHub token.
+    #[serde(default)]
+    pub private: bool,
 }
 
 pub fn load_config(root: &Path) -> Result<Config, Error> {
@@ -30,7 +34,8 @@ pub fn load_config(root: &Path) -> Result<Config, Error> {
 
 struct Candidate {
     version: semver::Version,
-    /// Raw target string from the entry key ("luau", "roblox", ...).
+    /// Raw target string ("luau", "roblox", ...) from the entry key or the
+    /// entry's own target table; fills {PACKAGE_TARGET} in download URLs.
     target: Option<String>,
     environment: Option<Environment>,
     entry: Value,
@@ -54,51 +59,50 @@ pub fn resolve(
     }
 
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    // Entries live either at the top level or under an "entries" table,
-    // keyed by "<version> <target>" (target optional in lpm indices).
+    // Newer pesde files nest entries under an "entries" table (with sibling
+    // metadata like `meta`); older ones put them at the top level. Keys are
+    // "<version> <target>", the target part optional in lpm indices.
     let entries = match file.get("entries") {
         Some(Value::Table(entries)) => entries,
-        _ => match file.as_table() {
-            Some(table) => table,
-            None => {
-                return Err(Error::PackageNotFound {
-                    name: name.to_string(),
-                    index: index_url.to_string(),
-                });
-            }
-        },
+        _ => file.as_table().ok_or_else(|| Error::PackageNotFound {
+            name: name.to_string(),
+            index: index_url.to_string(),
+        })?,
     };
 
     let mut candidates: Vec<Candidate> = Vec::new();
     for (key, entry) in entries {
-        let (version_part, target) = match key.split_once(' ') {
-            Some((version, target)) => (version, Some(target.to_string())),
+        let (version_part, key_target) = match key.split_once(' ') {
+            Some((version, target)) => (version, Some(target)),
             None => (key.as_str(), None),
         };
         let Ok(version) = semver::Version::parse(version_part) else {
-            continue; // not a version entry (e.g. metadata keys)
+            continue; // not a version entry (e.g. a metadata table)
         };
         if !req.matches(&version) {
             continue;
         }
 
-        let environment = entry
+        // The entry's own target table is authoritative; the key's target
+        // part covers entries that don't carry one.
+        let target = entry
             .get("target")
             .and_then(|target| target.get("environment"))
             .and_then(Value::as_str)
-            .or(target.as_deref())
-            .map(parse_environment)
-            .transpose()?;
+            .or(key_target);
+        let Ok(environment) = target.map(parse_environment).transpose() else {
+            continue; // published for a target lpm doesn't support
+        };
 
         candidates.push(Candidate {
             version,
-            target,
+            target: target.map(str::to_string),
             environment,
             entry: entry.clone(),
         });
     }
 
-    let Some(best_version) = candidates.iter().map(|c| c.version.clone()).max() else {
+    let Some(best_version) = candidates.iter().map(|c| &c.version).max().cloned() else {
         return Err(Error::NoMatchingVersion {
             name: name.to_string(),
             req: req.to_string(),
@@ -149,22 +153,37 @@ fn download_source(
         });
     }
 
-    let (Some(api), Some(target)) = (config.api.as_deref(), candidate.target.as_deref()) else {
-        return Err(Error::IndexFetch {
-            url: index_url.to_string(),
-            reason: format!("entry for {name} has no download url and the index config has no api"),
-        });
-    };
-
     let template = config
         .download
         .as_deref()
         .unwrap_or(DEFAULT_DOWNLOAD_TEMPLATE);
-    let url = template
-        .replace("{API_URL}", api.trim_end_matches('/'))
+    let mut url = template
         .replace("{PACKAGE}", &name.replace('/', "%2F"))
-        .replace("{PACKAGE_VERSION}", &candidate.version.to_string())
-        .replace("{PACKAGE_TARGET}", target);
+        .replace("{PACKAGE_VERSION}", &candidate.version.to_string());
+
+    // Only demand what the template actually references, so a custom lpm
+    // template can bake in its host or ignore targets entirely.
+    if url.contains("{API_URL}") {
+        let Some(api) = config.api.as_deref() else {
+            return Err(Error::IndexFetch {
+                url: index_url.to_string(),
+                reason: format!(
+                    "entry for {name} has no download url and the index config has no api"
+                ),
+            });
+        };
+        url = url.replace("{API_URL}", api.trim_end_matches('/'));
+    }
+    if url.contains("{PACKAGE_TARGET}") {
+        let Some(target) = candidate.target.as_deref() else {
+            return Err(Error::IndexFetch {
+                url: index_url.to_string(),
+                reason: format!("entry for {name} names no target for the download template"),
+            });
+        };
+        url = url.replace("{PACKAGE_TARGET}", target);
+    }
+
     Ok(DownloadSource::TarGz { url })
 }
 
@@ -175,18 +194,23 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
 
     let mut parsed = Vec::new();
     for spec in dependencies.values() {
-        // Specs are either the specifier table itself or [specifier, kind].
-        let spec = match spec {
+        // Specs are either the specifier table itself or a [specifier, kind]
+        // pair, where kind is "standard", "peer", or "dev".
+        let (spec, kind) = match spec {
             Value::Array(pair) => match pair.first() {
-                Some(first) => first,
+                Some(first) => (first, pair.get(1).and_then(Value::as_str)),
                 None => continue,
             },
-            other => other,
+            other => (other, None),
         };
 
         // Dev dependencies of upstream packages are not ours to install.
+        if kind == Some("dev") {
+            continue;
+        }
+        // Workspace/git specifiers can't be resolved from an index clone.
         if spec.get("workspace").is_some() || spec.get("repo").is_some() {
-            continue; // workspace/git specifiers can't be resolved from here
+            continue;
         }
 
         let is_wally = spec.get("wally").is_some();
@@ -197,6 +221,8 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
         else {
             continue;
         };
+        // pesde serializes wally package names with a "wally#" prefix.
+        let name = name.strip_prefix("wally#").unwrap_or(name);
         let version_req = spec
             .get("version")
             .and_then(Value::as_str)
@@ -204,8 +230,9 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
             .to_string();
         let index = spec.get("index").and_then(Value::as_str);
 
-        // In published index entries the dep's index is normally a URL.
-        let index_url = match index {
+        // Published entries name a dependency's index by URL; "default" (or
+        // nothing) means the index the entry itself came from.
+        let dep_index_url = match index {
             Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
                 Some(url.to_string())
             }
@@ -221,11 +248,11 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
             Some(alias) => return Err(Error::UnknownIndex(alias.to_string())),
         };
 
-        // Wally names may contain uppercase in old entries; normalize.
         parsed.push(TransitiveDependency {
+            // Old wally entries may carry uppercase names; normalize.
             name: name.to_lowercase(),
             version_req,
-            index_url,
+            index_url: dep_index_url,
         });
     }
 
@@ -238,6 +265,34 @@ mod tests {
 
     fn parse_entries(toml_text: &str) -> Value {
         toml::from_str(toml_text).unwrap()
+    }
+
+    /// On-disk index rooted in the system temp dir, removed on drop.
+    struct TempIndex {
+        root: std::path::PathBuf,
+    }
+
+    impl TempIndex {
+        fn new(name: &str, config: &str) -> Self {
+            let dir = format!("lpm-pesde-test-{name}-{}", std::process::id());
+            let root = std::env::temp_dir().join(dir);
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("config.toml"), config).unwrap();
+            TempIndex { root }
+        }
+
+        fn write_package(&self, name: &str, contents: &str) {
+            let path = self.root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+    }
+
+    impl Drop for TempIndex {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 
     #[test]
@@ -253,12 +308,31 @@ mod tests {
     }
 
     #[test]
+    fn config_accepts_pesde_key_names() {
+        let config: Config = toml::from_str(
+            r#"
+            api = "https://registry.example.com"
+            github_oauth_client_id = "Iv1.abc123"
+            private = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.github_oauth_id.as_deref(), Some("Iv1.abc123"));
+        assert!(config.private);
+
+        let config: Config = toml::from_str(r#"github_oauth_id = "Iv1.xyz789""#).unwrap();
+        assert_eq!(config.github_oauth_id.as_deref(), Some("Iv1.xyz789"));
+        assert!(!config.private);
+    }
+
+    #[test]
     fn parses_pesde_style_dependencies() {
         let entry = parse_entries(
             r#"
             [dependencies]
             foo = { name = "acme/foo", version = "^1.0.0" }
             bar = [{ name = "acme/bar", version = "2.0.0", index = "https://github.com/acme/index" }, "standard"]
+            dev_only = [{ name = "acme/testkit", version = "^1.0.0" }, "dev"]
             "#,
         );
 
@@ -279,7 +353,7 @@ mod tests {
         let entry = parse_entries(
             r#"
             [dependencies]
-            promise = { wally = "evaera/promise", version = "^4.0.0", index = "https://github.com/UpliftGames/wally-index" }
+            promise = { wally = "wally#evaera/Promise", version = "^4.0.0", index = "https://github.com/UpliftGames/wally-index" }
             "#,
         );
         let deps = parse_dependencies(&entry, "https://example.com/index").unwrap();
@@ -304,6 +378,7 @@ mod tests {
             api: Some("https://registry.example.com/".to_string()),
             download: None,
             github_oauth_id: None,
+            private: false,
         };
         let candidate = Candidate {
             version: semver::Version::new(1, 0, 2),
@@ -329,11 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn custom_template_needs_only_its_placeholders() {
+        let template = "https://cdn.example.com/{PACKAGE}/{PACKAGE_VERSION}.tar.gz";
+        let config = Config {
+            api: None,
+            download: Some(template.to_string()),
+            github_oauth_id: None,
+            private: false,
+        };
+        let candidate = Candidate {
+            version: semver::Version::new(1, 2, 3),
+            target: None,
+            environment: None,
+            entry: parse_entries(""),
+        };
+
+        let source = download_source(
+            &config,
+            "https://example.com/index",
+            "scope/pkg",
+            &candidate,
+        )
+        .unwrap();
+        let DownloadSource::TarGz { url } = source else {
+            panic!("expected tarball source");
+        };
+        assert_eq!(url, "https://cdn.example.com/scope%2Fpkg/1.2.3.tar.gz");
+    }
+
+    #[test]
     fn prefers_direct_download_urls() {
         let config = Config {
             api: None,
             download: None,
             github_oauth_id: None,
+            private: false,
         };
         let candidate = Candidate {
             version: semver::Version::new(0, 1, 0),
@@ -353,5 +458,99 @@ mod tests {
             panic!("expected tarball source");
         };
         assert_eq!(url, "https://example.com/pkg.tar.gz");
+    }
+
+    #[test]
+    fn resolves_lpm_entries_from_disk() {
+        let index = TempIndex::new("lpm-format", "");
+        index.write_package(
+            "scope/pkg",
+            r#"
+            ["0.1.0"]
+            download = "https://example.com/pkg-0.1.0.tar.gz"
+
+            ["0.1.0".target]
+            environment = "luau"
+            lib = "init.luau"
+
+            ["0.2.0"]
+            download = "https://example.com/pkg-0.2.0.tar.gz"
+
+            ["0.2.0".target]
+            environment = "luau"
+            lib = "init.luau"
+            "#,
+        );
+
+        let config = load_config(&index.root).unwrap();
+        let resolved = resolve(
+            &index.root,
+            "https://example.com/index",
+            &config,
+            "scope/pkg",
+            &semver::VersionReq::STAR,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.version, semver::Version::new(0, 2, 0));
+        assert_eq!(resolved.environment, Some(Environment::Luau));
+        let DownloadSource::TarGz { url } = resolved.source else {
+            panic!("expected tarball source");
+        };
+        assert_eq!(url, "https://example.com/pkg-0.2.0.tar.gz");
+    }
+
+    #[test]
+    fn resolves_nested_entries_and_prefers_environment() {
+        let index = TempIndex::new("nested", r#"api = "https://registry.example.com""#);
+        index.write_package(
+            "scope/multi",
+            r#"
+            [meta]
+
+            [entries."1.0.0 luau"]
+            name = "scope/multi"
+
+            [entries."1.0.0 luau".target]
+            environment = "luau"
+            lib = "init.luau"
+
+            [entries."1.0.0 lune"]
+            name = "scope/multi"
+
+            [entries."1.0.0 lune".target]
+            environment = "lune"
+            lib = "init.luau"
+
+            [entries."1.0.0 zune"]
+            name = "scope/multi"
+
+            [entries."1.0.0 zune".target]
+            environment = "zune"
+            lib = "init.luau"
+            "#,
+        );
+
+        let config = load_config(&index.root).unwrap();
+        let resolved = resolve(
+            &index.root,
+            "https://example.com/index",
+            &config,
+            "scope/multi",
+            &semver::VersionReq::STAR,
+            Some(Environment::Lune),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.version, semver::Version::new(1, 0, 0));
+        assert_eq!(resolved.environment, Some(Environment::Lune));
+        let DownloadSource::TarGz { url } = resolved.source else {
+            panic!("expected tarball source");
+        };
+        assert_eq!(
+            url,
+            "https://registry.example.com/v1/packages/scope%2Fmulti/1.0.0/lune/archive"
+        );
     }
 }

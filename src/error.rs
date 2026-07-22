@@ -24,6 +24,20 @@ pub enum Error {
         asset: String,
     },
 
+    #[error("GitHub authorization failed: {0}")]
+    AuthFailed(String),
+
+    #[error(
+        "Publishing needs a 'repository' under [package] in lpm.toml (a GitHub owner/repo or URL) to host release artifacts"
+    )]
+    MissingRepository,
+
+    #[error("Scope '{scope}' is owned by {owner}; publish under a scope you own")]
+    ScopeOwned { scope: String, owner: String },
+
+    #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
+    IndexNotPublishable(String),
+
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,
 
@@ -77,9 +91,6 @@ pub enum Error {
 
     #[error("lpm.lock is missing; run `lpm install` without --locked to create it")]
     LockfileMissing,
-
-    #[error("{0} is not implemented yet")]
-    Unimplemented(&'static str),
 
     #[error("Invalid lpm.toml: {0}")]
     ManifestInvalid(String),

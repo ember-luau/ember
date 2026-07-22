@@ -13,7 +13,8 @@ pub struct Config {
     pub github_oauth_id: Option<String>,
 }
 
-/// One JSON line of a wally index package file.
+/// One JSON line of a wally index package file. Dev-dependencies are left
+/// unmodeled: lpm never installs them.
 #[derive(Deserialize)]
 struct Entry {
     package: EntryPackage,
@@ -51,7 +52,8 @@ pub fn resolve(
         });
     }
 
-    // One JSON object per line, one line per published version.
+    // One JSON object per line, one line per published version; unparsable
+    // lines are skipped so a single odd entry can't sink the whole resolve.
     let best = std::fs::read_to_string(&path)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Entry>(line).ok())

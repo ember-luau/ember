@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// GitHub repository releases are fetched from.
+/// GitHub repo `self update` pulls releases from.
 const REPO: &str = "luaupm/cli";
 
 #[derive(Subcommand, Debug)]
@@ -72,6 +72,7 @@ fn update() -> Result<(), Error> {
         return Ok(());
     }
 
+    // Must match the asset names release.yml uploads: lpm-{os}-{arch}[.exe].
     let asset_name = format!(
         "lpm-{}-{}{}",
         env::consts::OS,
@@ -148,7 +149,7 @@ fn add_to_path(bin_dir: &Path) -> Result<(), Error> {
         dir.to_string()
     } else {
         // Prepended so lpm's tool shims win over other toolchain managers'
-        // (aftman/rokit) shims for the same tools later in PATH
+        // (aftman/rokit) shims for the same tools later in PATH.
         format!("{dir};{path}")
     };
     write_user_path(&env_key, &new_path)?;

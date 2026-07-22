@@ -60,8 +60,15 @@ impl Index {
         let root = ensure_cached(url, refresh)?;
         let kind = if root.join("config.json").exists() {
             Kind::Wally(wally::load_config(&root)?)
-        } else {
+        } else if root.join("config.toml").exists() {
             Kind::Pesde(pesde::load_config(&root)?)
+        } else {
+            // An empty or half-set-up index repo; a raw io error here would
+            // read as a bug in lpm rather than a problem with the index.
+            return Err(Error::IndexFetch {
+                url: url.to_string(),
+                reason: "the index has no config.json or config.toml at its root".to_string(),
+            });
         };
 
         Ok(Index {
@@ -87,12 +94,29 @@ impl Index {
         }
     }
 
-    /// GitHub OAuth client id from the index config, for future publishing.
-    #[allow(dead_code)]
+    /// GitHub OAuth client id from the index config, driving publish's
+    /// device flow.
     pub fn github_oauth_id(&self) -> Option<&str> {
         match &self.kind {
             Kind::Wally(config) => config.github_oauth_id.as_deref(),
             Kind::Pesde(config) => config.github_oauth_id.as_deref(),
+        }
+    }
+
+    /// Directory of the cached clone under ~/.lpm/index-cache.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether the index marks itself private (its downloads need auth).
+    /// Wally configs have no such flag; wally indices are never private.
+    /// Not consulted yet: downloads currently attach the token by host
+    /// instead, since --locked installs never open an index.
+    #[allow(dead_code)]
+    pub fn is_private(&self) -> bool {
+        match &self.kind {
+            Kind::Wally(_) => false,
+            Kind::Pesde(config) => config.private,
         }
     }
 }
@@ -101,18 +125,36 @@ impl Index {
 /// send a recent-enough Wally-Version header (HTTP 426 otherwise).
 const WALLY_VERSION: &str = "0.3.2";
 
-/// Downloads and extracts a resolved package into `dest`.
-pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
+/// Downloads and extracts a resolved package into `dest`. `token` is a
+/// GitHub token for private downloads; it is only ever attached for
+/// GitHub-owned hosts.
+pub fn download(source: &DownloadSource, dest: &Path, token: Option<&str>) -> Result<(), Error> {
     std::fs::create_dir_all(dest)?;
+    let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source;
+
+    // The token never goes to a non-GitHub host: an arbitrary registry url in
+    // an index entry must not be able to harvest the credential.
+    let bearer = token
+        .filter(|_| is_github_host(url))
+        .map(|token| format!("Bearer {token}"));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if matches!(source, DownloadSource::Zip { .. }) {
+        headers.push(("Wally-Version", WALLY_VERSION));
+    }
+    if let Some(bearer) = bearer.as_deref() {
+        headers.push(("Authorization", bearer));
+        // octet-stream is what makes a private release-asset API url serve
+        // the asset bytes instead of its JSON metadata.
+        headers.push(("Accept", "application/octet-stream"));
+    }
+
+    let bytes = http::get_bytes(url, &headers)?;
     match source {
-        DownloadSource::Zip { url } => {
-            let bytes = http::get_bytes(url, &[("Wally-Version", WALLY_VERSION)])?;
+        DownloadSource::Zip { .. } => {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
             archive.extract(dest)?;
-            Ok(())
         }
-        DownloadSource::TarGz { url } => {
-            let bytes = http::get_bytes(url, &[])?;
+        DownloadSource::TarGz { .. } => {
             // ureq transparently decodes Content-Encoding: gzip, in which
             // case the body is already the raw tar; sniff the gzip magic.
             if bytes.starts_with(&[0x1f, 0x8b]) {
@@ -121,9 +163,30 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
             } else {
                 tar::Archive::new(bytes.as_slice()).unpack(dest)?;
             }
-            Ok(())
         }
     }
+    Ok(())
+}
+
+/// Exact-match allowlist of GitHub-owned hosts (the only ones a download
+/// token may be sent to). https only, no suffix matching, so lookalikes such
+/// as `notgithub.com` or `github.com.evil.example` never qualify.
+fn is_github_host(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = match rest.find(['/', '?', '#']) {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    [
+        "github.com",
+        "api.github.com",
+        "uploads.github.com",
+        "objects.githubusercontent.com",
+        "raw.githubusercontent.com",
+    ]
+    .contains(&host)
 }
 
 fn cache_dir(url: &str) -> Result<PathBuf, Error> {
@@ -179,5 +242,43 @@ fn run_git(args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_github_host;
+
+    #[test]
+    fn recognizes_github_owned_hosts() {
+        assert!(is_github_host(
+            "https://github.com/luaupm/pindex/releases/download/v0.1.0/pkg.tar.gz"
+        ));
+        assert!(is_github_host(
+            "https://api.github.com/repos/luaupm/pindex/releases/assets/123"
+        ));
+        assert!(is_github_host("https://uploads.github.com/repos/a/b"));
+        assert!(is_github_host("https://objects.githubusercontent.com/blob"));
+        assert!(is_github_host(
+            "https://raw.githubusercontent.com/a/b/main/x"
+        ));
+        assert!(is_github_host("https://github.com"));
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        assert!(!is_github_host("https://registry.example.com/pkg.tar.gz"));
+        assert!(!is_github_host("https://notgithub.com/pkg.tar.gz"));
+        assert!(!is_github_host(
+            "https://github.com.evil.example/pkg.tar.gz"
+        ));
+        assert!(!is_github_host("https://gist.github.com/a/b"));
+        // Path or query mentioning github must not count as the host.
+        assert!(!is_github_host(
+            "https://evil.example/github.com/pkg.tar.gz"
+        ));
+        assert!(!is_github_host("https://evil.example/x?u=api.github.com"));
+        // Plain http would send the token in the clear.
+        assert!(!is_github_host("http://github.com/pkg.tar.gz"));
     }
 }

@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::index::{DownloadSource, Index};
-use crate::manifest::{Environment, Manifest, parse_version_req};
+use crate::manifest::{Environment, Manifest, parse_version_req, split_package_name};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// A package ready to download: the flattened result of resolution.
@@ -18,13 +18,18 @@ pub struct ResolvedInstall {
 
 /// Resolves the manifest's dependency graph breadth-first. Transitive
 /// dependencies (including cross-manager ones, e.g. a pesde package pulling a
-/// wally package) all flatten into one install set.
+/// wally package) all flatten into one install set, deduped by package name;
+/// a requirement that rejects the already-chosen version is a hard error.
 pub fn resolve(manifest: &Manifest, refresh: bool) -> Result<Vec<ResolvedInstall>, Error> {
     let prefer_environment = manifest.target.as_ref().map(|target| target.environment);
     let mut indices: HashMap<String, Index> = HashMap::new();
 
     // (package name, version requirement, index url, link name override)
     let mut queue: VecDeque<(String, String, String, Option<String>)> = VecDeque::new();
+
+    // Seeding all direct dependencies before any transitive one is discovered
+    // matters: the first entry per name wins, so a package that also shows up
+    // transitively still links under its manifest alias.
     for (alias, dependency) in &manifest.dependencies {
         let url = manifest.index_url(dependency.index.as_deref())?;
         queue.push_back((
@@ -35,7 +40,8 @@ pub fn resolve(manifest: &Manifest, refresh: bool) -> Result<Vec<ResolvedInstall
         ));
     }
 
-    // name -> (what we resolved, the requirement that won)
+    // name -> (what we resolved, the requirement that won). A BTreeMap keeps
+    // the install set (and the lockfile written from it) in name order.
     let mut resolved: BTreeMap<String, (ResolvedInstall, String)> = BTreeMap::new();
 
     while let Some((name, req_text, index_url, link)) = queue.pop_front() {
@@ -68,7 +74,7 @@ pub fn resolve(manifest: &Manifest, refresh: bool) -> Result<Vec<ResolvedInstall
         }
 
         let link = link.unwrap_or_else(|| {
-            crate::manifest::split_package_name(&name)
+            split_package_name(&name)
                 .map(|(_, short)| short.to_string())
                 .unwrap_or_else(|_| name.replace('/', "_"))
         });
