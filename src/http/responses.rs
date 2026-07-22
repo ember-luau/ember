@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
+    pub _url: String,
+    pub _id: i32,
 }
 
 #[derive(Deserialize)]
