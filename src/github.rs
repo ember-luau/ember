@@ -12,21 +12,29 @@ use crate::http::error::HttpError;
 use http::responses;
 
 pub struct GithubAPI {
-    is_authorized: bool,
+    /// Pre-formatted `Bearer <token>` value, present when GITHUB_TOKEN is set.
+    auth_header: Option<String>,
 }
 
 impl GithubAPI {
     pub fn new() -> Self {
-        Self {
-            is_authorized: true,
-        }
+        let auth_header = std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .map(|token| format!("Bearer {token}"));
+
+        Self { auth_header }
     }
 
     fn headers(&self) -> Vec<(&str, &str)> {
-        let headers = vec![
+        let mut headers = vec![
             ("User-Agent", http::USER_AGENT),
             ("Accept", JSON_HEADER_TYPE),
         ];
+
+        if let Some(auth) = &self.auth_header {
+            headers.push(("Authorization", auth));
+        }
 
         headers
     }
