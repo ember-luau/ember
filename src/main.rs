@@ -1,3 +1,4 @@
+mod auth;
 mod commands;
 mod error;
 mod github;
@@ -5,6 +6,7 @@ mod http;
 mod index;
 mod lockfile;
 mod manifest;
+mod publish;
 mod resolver;
 mod tools;
 mod ui;
@@ -30,12 +32,16 @@ enum Commands {
     #[command(subcommand)]
     Tool(commands::tool::ToolCommand),
 
+    /// Manage the package indices this project pulls from
+    #[command(subcommand)]
+    Index(commands::index::IndexCommand),
+
     /// Install dependencies and tools from lpm.toml
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 
     /// Publish this package to an index
-    Publish,
+    Publish(commands::publish::PublishArgs),
     /// Manage this lpm installation
     #[command(subcommand, name = "self")]
     SelfManage(SelfCommand),
@@ -57,18 +63,23 @@ fn main() {
 
     let cli = parse_cli();
 
+    let started = std::time::Instant::now();
     let result = match cli.command {
         Commands::Init => commands::init::run(),
         Commands::Add(args) => commands::add::run(args),
+        Commands::Index(command) => commands::index::run(command),
         Commands::Install(args) => commands::install::run(args),
-        Commands::Publish => commands::publish::run(),
+        Commands::Publish(args) => commands::publish::run(args),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),
     };
 
-    if let Err(err) = result {
-        ui::print_error(&err.to_string());
-        std::process::exit(1);
+    match result {
+        Ok(()) => ui::print_elapsed(started.elapsed()),
+        Err(err) => {
+            ui::print_error(&err.to_string());
+            std::process::exit(1);
+        }
     }
 }
 
