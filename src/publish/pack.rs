@@ -67,7 +67,10 @@ fn walk(
             .strip_prefix(root)
             .expect("walked path is under root")
             .to_path_buf();
-        if out_dirs.iter().any(|out| relative.starts_with(out)) {
+        if out_dirs
+            .iter()
+            .any(|out| starts_with_ignore_case(&relative, out))
+        {
             continue;
         }
 
@@ -79,6 +82,21 @@ fn walk(
         }
     }
     Ok(())
+}
+
+/// Component-wise, ASCII-case-insensitive `Path::starts_with`. Out-dirs are
+/// matched this way because Windows and macOS filesystems are
+/// case-insensitive: the folder on disk can carry different casing than the
+/// configured packages-out path while being the same directory.
+fn starts_with_ignore_case(path: &Path, prefix: &Path) -> bool {
+    let mut components = path.components();
+    prefix.components().all(|expected| {
+        components.next().is_some_and(|actual| {
+            actual
+                .as_os_str()
+                .eq_ignore_ascii_case(expected.as_os_str())
+        })
+    })
 }
 
 fn tar_path(file: &Path) -> String {
@@ -138,6 +156,26 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn out_dir_matching_ignores_case_per_component() {
+        assert!(starts_with_ignore_case(
+            Path::new("packages/Chief.luau"),
+            Path::new("Packages")
+        ));
+        assert!(starts_with_ignore_case(
+            Path::new("Packages/luau/Core.luau"),
+            Path::new("packages/Luau")
+        ));
+        assert!(!starts_with_ignore_case(
+            Path::new("packages-old/x.luau"),
+            Path::new("packages")
+        ));
+        assert!(!starts_with_ignore_case(
+            Path::new("src/init.luau"),
+            Path::new("Packages")
+        ));
     }
 
     #[test]
