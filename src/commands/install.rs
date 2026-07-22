@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::github::GithubAPI;
 use crate::index;
 use crate::lockfile::{LockedPackage, Lockfile};
-use crate::manifest::{Environment, Manifest};
+use crate::manifest::{Environment, Manifest, Tool};
 use crate::resolver;
 use crate::tools;
 use crate::ui;
@@ -134,19 +134,47 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
         Lockfile::new(locked).save()?;
     }
 
-    // Tool versions are pinned exactly in the manifest, so tools have no
-    // lockfile entries and install the same way on normal and --locked runs.
-    let tool_count = manifest.tools.len();
-    if !manifest.tools.is_empty() {
+    // Tool versions are pinned exactly, so tools have no lockfile entries and
+    // install the same way on normal and --locked runs. Global tools
+    // (~/.lpm/tools.toml) install here too: `tool add` never downloads, so
+    // this is the one place every tool gets installed.
+    let mut tool_jobs: Vec<(String, Tool, bool)> = manifest
+        .tools
+        .iter()
+        .map(|(alias, tool)| (alias.clone(), tool.clone(), false))
+        .collect();
+    for (alias, tool) in tools::global_tools()? {
+        // A pin listed identically in both scopes only needs one install
+        let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
+            project.repository.eq_ignore_ascii_case(&tool.repository)
+                && project.version == tool.version
+        });
+        if !duplicate {
+            tool_jobs.push((alias, tool, true));
+        }
+    }
+
+    let tool_count = tool_jobs.len();
+    if !tool_jobs.is_empty() {
         println!("Installing tools");
         let github = GithubAPI::new();
-        for (alias, tool) in &manifest.tools {
+        for (alias, tool, global) in &tool_jobs {
             let downloaded = tools::install_tool(alias, tool, &github)?;
+            let mut notes = Vec::new();
+            if *global {
+                notes.push("global");
+            }
+            if !downloaded {
+                notes.push("cached");
+            }
+            let notes = if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join(", "))
+            };
             ui::print_success(&format!(
-                "{}@{} → {alias}{}",
-                tool.repository,
-                tool.version,
-                if downloaded { "" } else { " (cached)" }
+                "{}@{} → {alias}{notes}",
+                tool.repository, tool.version
             ));
         }
     }

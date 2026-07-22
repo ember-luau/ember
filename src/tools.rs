@@ -228,6 +228,11 @@ fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error
     Err(Error::ToolNotManaged(alias.to_string()))
 }
 
+/// Tools pinned by the global tools file; empty when it does not exist yet.
+pub fn global_tools() -> Result<BTreeMap<String, Tool>, Error> {
+    Ok(tools_in(&global_manifest_path()?)?.unwrap_or_default())
+}
+
 /// Just the [tools] table of a manifest, parsed leniently so the shim can
 /// read both project manifests and the global tools file (which has no
 /// [package] section).
