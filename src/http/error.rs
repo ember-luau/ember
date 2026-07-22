@@ -26,6 +26,10 @@ pub enum HttpError {
 // would bloat every Result<_, Error>.
 impl From<ureq::Error> for HttpError {
     fn from(error: ureq::Error) -> Self {
-        HttpError::Request(Box::new(error))
+        match error {
+            ureq::Error::Status(404, _) => HttpError::NotFound,
+            ureq::Error::Status(403 | 429, _) => HttpError::RateLimited,
+            other => HttpError::Request(Box::new(other)),
+        }
     }
 }
