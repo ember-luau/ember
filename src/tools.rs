@@ -62,13 +62,16 @@ pub fn storage_dir(repository: &str, version: &str) -> Result<PathBuf, Error> {
         .join(version))
 }
 
+/// Full path a tool's executable sits at once installed.
+fn stored_executable(repository: &str, version: &str) -> Result<PathBuf, Error> {
+    Ok(storage_dir(repository, version)?.join(executable_name(repo_short_name(repository))))
+}
+
 /// Installs a manifest tool, skipping all network work when the requested
 /// version is already stored. Returns true when a download happened, false
 /// when the cached copy was reused (the bin shim is refreshed either way).
 pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool, Error> {
-    let storage = storage_dir(&tool.repository, &tool.version)?;
-    let stored = storage.join(executable_name(repo_short_name(&tool.repository)));
-
+    let stored = stored_executable(&tool.repository, &tool.version)?;
     if stored.exists() {
         write_shim(&shim_path(alias)?)?;
         return Ok(false);
@@ -203,9 +206,9 @@ fn make_executable(_path: &Path) -> Result<(), Error> {
 }
 
 /// The alias this process was invoked under, or None when running as the
-/// real lpm CLI. Shims are copies of lpm named after their tool; anything
-/// starting with "lpm" is treated as the CLI itself because release assets
-/// are named "lpm-{os}-{arch}".
+/// real lpm CLI. Shims are copies of lpm named after their tool; "lpm" itself
+/// and "lpm-*" stems count as the CLI because release assets are named
+/// "lpm-{os}-{arch}".
 pub fn shim_alias() -> Option<String> {
     let exe = env::current_exe().ok()?;
     alias_from_stem(exe.file_stem()?.to_str()?)
@@ -226,8 +229,7 @@ fn alias_from_stem(stem: &str) -> Option<String> {
 /// exec (Windows); on unix the tool replaces this process.
 pub fn run_shim(alias: &str) -> Result<i32, Error> {
     let tool = resolve_alias(alias, &env::current_dir()?, &global_manifest_path()?)?;
-    let stored = storage_dir(&tool.repository, &tool.version)?
-        .join(executable_name(repo_short_name(&tool.repository)));
+    let stored = stored_executable(&tool.repository, &tool.version)?;
     if !stored.exists() {
         return Err(Error::ToolNotInstalled(alias.to_string()));
     }
@@ -400,8 +402,8 @@ fn pick_executable(
         .map(|(path, _)| path.clone())
 }
 
-/// Checksum/signature/metadata companions that must never be picked as the
-/// tool binary.
+/// Checksum/signature/metadata companions that must never be selected as the
+/// platform asset, even when their names match the platform.
 const METADATA_SUFFIXES: &[&str] = &[
     ".sha256",
     ".sha256sum",

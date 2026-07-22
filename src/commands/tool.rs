@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env::consts::EXE_SUFFIX,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -57,6 +57,7 @@ pub enum ToolCommand {
     },
 }
 
+/// Well-known tools addable by bare name; anything else must be "owner/repo".
 fn shorthand_map() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         ("darklua", "seaofvoices/darklua"),
@@ -64,6 +65,15 @@ fn shorthand_map() -> HashMap<&'static str, &'static str> {
         ("luau-lsp", "johnnymorganz/luau-lsp"),
         ("stylua", "johnnymorganz/stylua"),
     ])
+}
+
+/// Expands a shorthand to its full repository name; names not in the table
+/// are assumed to already be "owner/repo" and pass through unchanged.
+fn expand_shorthand(name: String) -> String {
+    shorthand_map()
+        .get(name.as_str())
+        .map(|longhand| longhand.to_string())
+        .unwrap_or(name)
 }
 
 /// Splits an "owner/repo" GitHub repository name. Unlike index package names
@@ -104,16 +114,8 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
 
 fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
     let github = GithubAPI::new();
-    let shorthands = shorthand_map(); // Get the shorthands
-
-    // If the shorthand doesn't exist assume its a longhand and use it as is
-    let name = shorthands
-        .get(name.as_str())
-        .map(|longhand| longhand.to_string())
-        .unwrap_or(name);
-
-    // Seperate the author/package string
-    let (author, package) = split_repository(&name)?;
+    let name = expand_shorthand(name);
+    let (owner, repo) = split_repository(&name)?;
 
     // Resolve the release first so a bad name/version never touches the file
     let release = match &version {
@@ -132,29 +134,21 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
         };
         (path, text)
     } else {
-        (
-            std::path::PathBuf::from(MANIFEST_FILE),
-            read_project_manifest()?,
-        )
+        (PathBuf::from(MANIFEST_FILE), read_project_manifest()?)
     };
     let mut document: toml_edit::DocumentMut = text.parse()?;
 
-    // Get the tools table, if it doesn't exist create one
     let tools = document
         .entry("tools")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-
-    // If tools isn't a table then throw
     let Some(table) = tools.as_table_mut() else {
         return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
     };
 
-    // Get the version name not starting with v
+    // The alias key defaults to the repo short name; the bin shim takes the
+    // same name, which is what `delete` relies on when removing it
     let version = release.tag_name.trim_start_matches('v');
-
-    // Format the toml package string
-    let value = format!("{author}/{package}@{version}");
-    table[package] = toml_edit::value(value);
+    table[repo] = toml_edit::value(format!("{owner}/{repo}@{version}"));
 
     fs::create_dir_all(path.parent().expect("tools file has a parent"))?;
     fs::write(&path, document.to_string())?;
@@ -178,19 +172,13 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
         let text = fs::read_to_string(&path)?;
         (path, text)
     } else {
-        (
-            std::path::PathBuf::from(MANIFEST_FILE),
-            read_project_manifest()?,
-        )
+        (PathBuf::from(MANIFEST_FILE), read_project_manifest()?)
     };
     let mut document: toml_edit::DocumentMut = text.parse()?;
 
-    // We can't remove tools if there is no tools table
     let Some(tools) = document.get_mut("tools") else {
         return Err(Error::ManifestInvalid("[tools] doesn't exist".to_string()));
     };
-
-    // If tools isn't a table error
     let Some(table) = tools.as_table_mut() else {
         return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
     };
@@ -216,12 +204,11 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
         }
     }
 
-    // If the tool didn't exist then error
     if !removed {
         return Err(Error::ToolMissing(name));
     }
 
-    // Delete tool table if its empty
+    // Don't leave an empty [tools] header behind
     if table.is_empty() {
         document.remove("tools");
     }
@@ -250,13 +237,10 @@ fn update() -> Result<(), Error> {
     let github = GithubAPI::new();
     let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
 
-    // No tools table means there is simply nothing to update
     let Some(tools) = document.get_mut("tools") else {
         println!("No tools to update");
         return Ok(());
     };
-
-    // If tools isn't a table error
     let Some(table) = tools.as_table_mut() else {
         return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
     };
@@ -418,14 +402,7 @@ fn list() -> Result<(), Error> {
 }
 
 fn delete(name: String, version: Option<String>) -> Result<(), Error> {
-    let shorthands = shorthand_map(); // Get the shorthands
-
-    // If the shorthand doesn't exist assume its a longhand and use it as is
-    let name = shorthands
-        .get(name.as_str())
-        .map(|longhand| longhand.to_string())
-        .unwrap_or(name);
-
+    let name = expand_shorthand(name);
     let (owner, repo) = split_repository(&name)?;
     let tool_dir = tools::tools_dir()?.join(format!("{owner}_{repo}"));
     let version = version
