@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::error::Error;
 use crate::github::GithubAPI;
 use crate::index;
@@ -7,6 +8,7 @@ use crate::resolver;
 use crate::tools;
 use crate::ui;
 use clap::Args;
+use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
 
@@ -29,6 +31,11 @@ struct Job {
 pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
+    // Private-index downloads authenticate with the stored GitHub token. Not
+    // being logged in is not an error here: public downloads need no token,
+    // and private ones fail with the server's response instead.
+    let token = auth::load()?.map(|credentials| credentials.token);
+
     let jobs: Vec<Job> = if args.locked {
         Lockfile::load()?
             .packages
@@ -43,8 +50,10 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             })
             .collect()
     } else {
-        println!("Resolving dependencies");
-        resolver::resolve(&manifest, true)?
+        let spinner = ui::spinner("Resolving dependencies");
+        let resolved = resolver::resolve(&manifest, true);
+        spinner.finish_and_clear();
+        resolved?
             .into_iter()
             .map(|package| Job {
                 name: package.name,
@@ -71,58 +80,10 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     // folder) is always known, so stage in a project-local temp dir; a rename
     // then moves it into place (same filesystem as the outputs).
     let staging = Path::new(".lpm-staging").to_path_buf();
-    let mut locked = Vec::new();
-    for job in jobs {
-        if staging.exists() {
-            fs::remove_dir_all(&staging)?;
-        }
-        index::download(&job.source, &staging)?;
-        flatten_single_dir(&staging)?;
-
-        // Indices usually know the environment; otherwise ask the files
-        // (lpm.toml -> pesde.toml -> wally.toml).
-        let environment = match job.environment {
-            Some(environment) => environment,
-            None => detect_environment(&staging)
-                .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
-        };
-
-        // Real package contents live under <out>/.lpm/<scope>_<name>/; a
-        // <out>/<link>.luau file re-exports the package's entry point so
-        // consumers can `require(".../<link>")`.
-        let folder = job.name.replace('/', "_");
-        let out = manifest.packages_out(environment);
-        let storage = out.join(".lpm").join(&folder);
-        fs::create_dir_all(storage.parent().expect("storage dir has a parent"))?;
-        if storage.exists() {
-            fs::remove_dir_all(&storage)?;
-        }
-        fs::rename(&staging, &storage)?;
-
-        match detect_entry(&storage) {
-            Some(entry) => {
-                let link_path = out.join(format!("{}.luau", job.link));
-                fs::write(&link_path, link_contents(&folder, &entry))?;
-            }
-            None => eprintln!(
-                "warning: could not find an entry point for {}; no link file generated",
-                job.name
-            ),
-        }
-
-        ui::print_success(&format!(
-            "{}@{} → {}/{}",
-            job.name, job.version, environment, job.link
-        ));
-        locked.push(LockedPackage {
-            name: job.name,
-            version: job.version,
-            environment,
-            link: job.link,
-            index: job.index_url,
-            source: job.source,
-        });
-    }
+    let bar = ui::progress_bar(jobs.len() as u64);
+    let installed = install_packages(&manifest, jobs, &staging, token.as_deref(), &bar);
+    bar.finish_and_clear();
+    let locked = installed?;
 
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -157,36 +118,10 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     let tool_count = tool_jobs.len();
     if !tool_jobs.is_empty() {
         println!("Installing tools");
-        let github = GithubAPI::new();
-        for (alias, tool, global) in &tool_jobs {
-            let downloaded = tools::install_tool(alias, tool, &github)?;
-            let mut notes = Vec::new();
-            if *global {
-                notes.push("global");
-            }
-            if !downloaded {
-                notes.push("cached");
-            }
-            let notes = if notes.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", notes.join(", "))
-            };
-            ui::print_success(&format!(
-                "{}@{} → {alias}{notes}",
-                tool.repository, tool.version
-            ));
-
-            // Another toolchain manager's shim earlier in PATH (aftman,
-            // rokit) would run instead of ours and report its own errors;
-            // surface that or the tool looks broken for no visible reason.
-            if let Some(shadow) = tools::shadowing_executable(alias) {
-                eprintln!(
-                    "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
-                    shadow.display()
-                );
-            }
-        }
+        let bar = ui::progress_bar(tool_count as u64);
+        let result = install_tools(&tool_jobs, &bar);
+        bar.finish_and_clear();
+        result?;
     }
 
     match (package_count, tool_count) {
@@ -198,6 +133,118 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             plural(p),
             plural(t)
         ),
+    }
+    Ok(())
+}
+
+/// Downloads, stages, and links every package, reporting progress on `bar`.
+/// The caller owns the bar's lifecycle so it gets cleared on errors too.
+fn install_packages(
+    manifest: &Manifest,
+    jobs: Vec<Job>,
+    staging: &Path,
+    token: Option<&str>,
+    bar: &ProgressBar,
+) -> Result<Vec<LockedPackage>, Error> {
+    let mut locked = Vec::new();
+    for job in jobs {
+        bar.set_message(job.name.clone());
+        if staging.exists() {
+            fs::remove_dir_all(staging)?;
+        }
+        index::download(&job.source, staging, token)?;
+        flatten_single_dir(staging)?;
+
+        // Indices usually know the environment; otherwise ask the files
+        // (lpm.toml -> pesde.toml -> wally.toml).
+        let environment = match job.environment {
+            Some(environment) => environment,
+            None => detect_environment(staging)
+                .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
+        };
+
+        // Real package contents live under <out>/.lpm/<scope>_<name>/; a
+        // <out>/<link>.luau file re-exports the package's entry point so
+        // consumers can `require(".../<link>")`.
+        let folder = job.name.replace('/', "_");
+        let out = manifest.packages_out(environment);
+        let storage = out.join(".lpm").join(&folder);
+        fs::create_dir_all(storage.parent().expect("storage dir has a parent"))?;
+        if storage.exists() {
+            fs::remove_dir_all(&storage)?;
+        }
+        fs::rename(staging, &storage)?;
+
+        match detect_entry(&storage) {
+            Some(entry) => {
+                let link_path = out.join(format!("{}.luau", job.link));
+                fs::write(&link_path, link_contents(&folder, &entry))?;
+            }
+            None => bar.suspend(|| {
+                eprintln!(
+                    "warning: could not find an entry point for {}; no link file generated",
+                    job.name
+                )
+            }),
+        }
+
+        ui::bar_println(
+            bar,
+            &ui::success_line(&format!(
+                "{}@{} → {}/{}",
+                job.name, job.version, environment, job.link
+            )),
+        );
+        bar.inc(1);
+        locked.push(LockedPackage {
+            name: job.name,
+            version: job.version,
+            environment,
+            link: job.link,
+            index: job.index_url,
+            source: job.source,
+        });
+    }
+    Ok(locked)
+}
+
+fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(), Error> {
+    let github = GithubAPI::new();
+    for (alias, tool, global) in jobs {
+        bar.set_message(tool.repository.clone());
+        let downloaded = tools::install_tool(alias, tool, &github)?;
+        let mut notes = Vec::new();
+        if *global {
+            notes.push("global");
+        }
+        if !downloaded {
+            notes.push("cached");
+        }
+        let notes = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", notes.join(", "))
+        };
+        ui::bar_println(
+            bar,
+            &ui::success_line(&format!(
+                "{}@{} → {alias}{notes}",
+                tool.repository, tool.version
+            )),
+        );
+
+        // Another toolchain manager's shim earlier in PATH (aftman,
+        // rokit) would run instead of ours and report its own errors;
+        // surface that or the tool looks broken for no visible reason.
+        if let Some(shadow) = tools::shadowing_executable(alias) {
+            bar.suspend(|| {
+                eprintln!(
+                    "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
+                    shadow.display()
+                )
+            });
+        }
+        bar.inc(1);
     }
     Ok(())
 }
