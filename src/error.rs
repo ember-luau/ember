@@ -15,6 +15,9 @@ pub enum Error {
     #[error("No releases have been published for {0} yet")]
     NoReleases(String),
 
+    #[error("Release {1} for repository {0} doesn't exist")]
+    NoSuchRelease(String, String),
+
     #[error("Release v{version} has no asset named {asset} for this platform")]
     MissingAsset {
         version: semver::Version,
@@ -23,6 +26,9 @@ pub enum Error {
 
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,
+
+    #[error("No tool exists with name '{0}'")]
+    ToolMissing(String),
 
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
