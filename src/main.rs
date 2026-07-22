@@ -26,11 +26,11 @@ enum Commands {
     /// Add a dependency to lpm.toml
     Add(commands::add::AddArgs),
 
-    /// Manage tooling used in the current project.
+    /// Manage tooling used in the current project
     #[command(subcommand)]
     Tool(commands::tool::ToolCommand),
 
-    /// Install dependencies from lpm.toml into .lpm/packages
+    /// Install dependencies and tools from lpm.toml
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 

@@ -1,8 +1,10 @@
 use crate::error::Error;
+use crate::github::GithubAPI;
 use crate::index;
 use crate::lockfile::{LockedPackage, Lockfile};
 use crate::manifest::{Environment, Manifest};
 use crate::resolver;
+use crate::tools;
 use crate::ui;
 use clap::Args;
 use std::fs;
@@ -126,16 +128,45 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
         fs::remove_dir_all(&staging)?;
     }
 
-    let count = locked.len();
+    let package_count = locked.len();
     if !args.locked {
+        // Written even when empty, so lpm.lock always mirrors the manifest.
         Lockfile::new(locked).save()?;
     }
 
-    println!(
-        "Installed {count} package{}",
-        if count == 1 { "" } else { "s" }
-    );
+    // Tool versions are pinned exactly in the manifest, so tools have no
+    // lockfile entries and install the same way on normal and --locked runs.
+    let tool_count = manifest.tools.len();
+    if !manifest.tools.is_empty() {
+        println!("Installing tools");
+        let github = GithubAPI::new();
+        for (alias, tool) in &manifest.tools {
+            let downloaded = tools::install_tool(alias, tool, &github)?;
+            ui::print_success(&format!(
+                "{}@{} → {alias}{}",
+                tool.repository,
+                tool.version,
+                if downloaded { "" } else { " (cached)" }
+            ));
+        }
+    }
+
+    match (package_count, tool_count) {
+        (0, 0) => println!("Nothing to install"),
+        (p, 0) => println!("Installed {p} package{}", plural(p)),
+        (0, t) => println!("Installed {t} tool{}", plural(t)),
+        (p, t) => println!(
+            "Installed {p} package{} and {t} tool{}",
+            plural(p),
+            plural(t)
+        ),
+    }
     Ok(())
+}
+
+/// "" for one, "s" for any other count — for the install summary.
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 /// Body of a generated link file, e.g. `return require("./.lpm/scope_pkg/lib")`.
