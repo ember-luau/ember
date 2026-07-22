@@ -147,7 +147,9 @@ fn add_to_path(bin_dir: &Path) -> Result<(), Error> {
     let new_path = if path.trim().is_empty() {
         dir.to_string()
     } else {
-        format!("{path};{dir}")
+        // Prepended so lpm's tool shims win over other toolchain managers'
+        // (aftman/rokit) shims for the same tools later in PATH
+        format!("{dir};{path}")
     };
     write_user_path(&env_key, &new_path)?;
 
