@@ -19,12 +19,20 @@ pub enum ToolCommand {
         /// Specific version to add
         #[arg(short, long)]
         version: Option<String>,
+
+        /// Add to the global tools file, usable anywhere
+        #[arg(short, long)]
+        global: bool,
     },
 
     /// Remove a tool from the current project
     Remove {
         /// Name of the tool
         name: String,
+
+        /// Remove from the global tools file instead of this project
+        #[arg(short, long)]
+        global: bool,
     },
 
     /// Update a tool
@@ -77,15 +85,19 @@ fn read_project_manifest() -> Result<String, Error> {
 
 pub fn run(command: ToolCommand) -> Result<(), Error> {
     match command {
-        ToolCommand::Add { name, version } => add(name, version),
-        ToolCommand::Remove { name } => remove(name),
+        ToolCommand::Add {
+            name,
+            version,
+            global,
+        } => add(name, version, global),
+        ToolCommand::Remove { name, global } => remove(name, global),
         ToolCommand::Update => update(),
         ToolCommand::Delete { name, version } => delete(name, version),
         ToolCommand::List => list(),
     }
 }
 
-fn add(name: String, version: Option<String>) -> Result<(), Error> {
+fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
     let github = GithubAPI::new();
     let shorthands = shorthand_map(); // Get the shorthands
 
@@ -98,13 +110,29 @@ fn add(name: String, version: Option<String>) -> Result<(), Error> {
     // Seperate the author/package string
     let (author, package) = split_repository(&name)?;
 
-    // Resolve the release first so a bad name/version never touches lpm.toml
+    // Resolve the release first so a bad name/version never touches the file
     let release = match &version {
         Some(version) => github.get_release(&name, version.trim_start_matches('v'))?,
         None => github.get_latest_release(&name)?,
     };
 
-    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
+    // Global tools live in ~/.lpm/tools.toml (created on first use) and
+    // resolve in any directory; project tools only inside their project
+    let (path, text) = if global {
+        let path = tools::global_manifest_path()?;
+        let text = if path.exists() {
+            fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        (path, text)
+    } else {
+        (
+            std::path::PathBuf::from(MANIFEST_FILE),
+            read_project_manifest()?,
+        )
+    };
+    let mut document: toml_edit::DocumentMut = text.parse()?;
 
     // Get the tools table, if it doesn't exist create one
     let tools = document
@@ -123,16 +151,34 @@ fn add(name: String, version: Option<String>) -> Result<(), Error> {
     let value = format!("{author}/{package}@{}", &version);
     table[package] = toml_edit::value(value);
 
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    fs::create_dir_all(path.parent().expect("tools file has a parent"))?;
+    fs::write(&path, document.to_string())?;
 
-    ui::print_success(&format!("Added tool {}@{} to lpm.toml", &name, &version));
+    if global {
+        ui::print_success(&format!("Added global tool {}@{}", &name, &version));
+    } else {
+        ui::print_success(&format!("Added tool {}@{} to lpm.toml", &name, &version));
+    }
     println!("Run `lpm install` to install it");
 
     Ok(())
 }
 
-fn remove(name: String) -> Result<(), Error> {
-    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
+fn remove(name: String, global: bool) -> Result<(), Error> {
+    let (path, text) = if global {
+        let path = tools::global_manifest_path()?;
+        if !path.exists() {
+            return Err(Error::ToolMissing(name));
+        }
+        let text = fs::read_to_string(&path)?;
+        (path, text)
+    } else {
+        (
+            std::path::PathBuf::from(MANIFEST_FILE),
+            read_project_manifest()?,
+        )
+    };
+    let mut document: toml_edit::DocumentMut = text.parse()?;
 
     // We can't remove tools if there is no tools table
     let Some(tools) = document.get_mut("tools") else {
@@ -175,10 +221,15 @@ fn remove(name: String) -> Result<(), Error> {
         document.remove("tools");
     }
 
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    fs::write(&path, document.to_string())?;
+    let file = if global {
+        "the global tools file"
+    } else {
+        "lpm.toml"
+    };
     ui::print_success(&format!(
-        "Successfully removed tool {} from lpm.toml",
-        &name
+        "Successfully removed tool {} from {}",
+        &name, file
     ));
 
     Ok(())
