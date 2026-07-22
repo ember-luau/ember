@@ -30,6 +30,9 @@ pub enum Error {
     #[error("No tool exists with name '{0}'")]
     ToolMissing(String),
 
+    #[error("Invalid tool spec '{0}': expected 'owner/repo@version'")]
+    InvalidToolSpec(String),
+
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
 
