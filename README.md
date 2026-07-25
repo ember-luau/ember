@@ -7,7 +7,10 @@
   One CLI for your dependencies, your tools, and your scripts.</p>
 
   <p>
-    <img src="https://github.com/luaupm/cli/actions/workflows/ci.yml/badge.svg" alt="CI">
+    <a href="https://github.com/luaupm/cli/actions/workflows/ci.yml"><img src="https://github.com/luaupm/cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://crates.io/crates/luaupm"><img src="https://img.shields.io/crates/v/luaupm?label=crates.io&color=e61048" alt="crates.io"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-e61048" alt="MIT license"></a>
+    <img src="https://img.shields.io/badge/rust-1.88%2B-lightgrey" alt="Rust 1.88+">
     <img src="https://img.shields.io/badge/platforms-windows%20%7C%20macos%20%7C%20linux-lightgrey" alt="Platforms">
   </p>
 </div>
