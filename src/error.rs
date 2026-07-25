@@ -100,6 +100,54 @@ pub enum Error {
     #[error("No script named '{0}' under [scripts] in lpm.toml")]
     ScriptMissing(String),
 
+    #[error("No [studio] table in lpm.toml; run `lpm studio init` to create one")]
+    StudioMissing,
+
+    #[error(
+        "A [studio] table already exists in lpm.toml; edit it there, or remove it and re-run `lpm studio init`"
+    )]
+    StudioExists,
+
+    #[error("[studio] in lpm.toml sets both `file` and `universe`/`place`; remove one of the two")]
+    StudioConflict,
+
+    #[error(
+        "[studio] in lpm.toml sets `{has}` but not `{needs}`; opening a published place needs both IDs"
+    )]
+    StudioIncomplete {
+        has: &'static str,
+        needs: &'static str,
+    },
+
+    #[error("[studio] in lpm.toml is empty; run `lpm studio init` to fill it in")]
+    StudioUnconfigured,
+
+    #[error("`{0}` under [studio] in lpm.toml must be a non-zero ID")]
+    StudioInvalidId(&'static str),
+
+    #[error(
+        "Unknown key `{0}` under [studio] in lpm.toml; expected `universe`, `place`, or `file`"
+    )]
+    StudioUnknownKey(String),
+
+    #[error("`file` under [studio] in lpm.toml is empty; point it at a .rbxl or .rbxlx place file")]
+    StudioEmptyFile,
+
+    #[error("Place file {0} does not exist")]
+    StudioFileMissing(String),
+
+    #[error("Place file {0} is not a .rbxl or .rbxlx file")]
+    StudioFileNotAPlace(String),
+
+    #[error("Place file {0} is a folder, not a file")]
+    StudioFileIsFolder(String),
+
+    #[error("Roblox Studio doesn't appear to be installed: {0}")]
+    StudioNotInstalled(String),
+
+    #[error("Could not launch Roblox Studio: {0}")]
+    StudioLaunch(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
