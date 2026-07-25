@@ -35,8 +35,21 @@ cargo clippy --all-targets   # clippy lints; keep at zero warnings
 - `init` — interactive manifest wizard; also git-ignores `packages/`.
 - `run <name>` — runs the `[scripts]` entry of that name through the platform
   shell (sh -c / cmd /C), forwarding a non-zero exit code.
-- `studio` — launches Roblox Studio (protocol handler on Windows, `open -a`
-  on macOS, Vinegar via flatpak on Linux).
+- `studio` — launches Roblox Studio plain (protocol handler on Windows,
+  `open -a` on macOS, Vinegar via flatpak on Linux).
+- `studio init` — inquire wizard that writes the `[studio]` table: either
+  `universe` + `place` IDs or a local `file` (default guessed from a Rojo
+  `*.project.json` `name`).
+- `studio open` — opens what `[studio]` describes, validating everything
+  first: table present/complete, no unknown keys, IDs non-zero, file exists
+  and is .rbxl/.rbxlx, and Studio looks installed (registry
+  shell\open\command on Windows, RobloxStudio.app bundle on macOS, xdg-mime
+  best-effort on Linux — the opener still reports what pre-checks can't see).
+  IDs become the `roblox-studio:1+launchmode:edit+task:EditPlace+...` deep
+  link the website's Edit button uses; files go through the OS association.
+  Both launch via ShellExecuteW on Windows, `open` on macOS, `xdg-open` on
+  Linux. No credentials involved — Studio authenticates itself after handoff,
+  and post-launch errors are Studio's to show.
 - `add <scope>/<name> [--version <req>] [--index <key>] [--alias <name>]` —
   resolves first (fails before touching the manifest), then edits `lpm.toml`
   via `toml_edit` (preserves comments/formatting). Without `--index` it asks
@@ -86,6 +99,11 @@ default = "https://github.com/pesde-pkg/index"  # used by deps naming no index
 [dependencies]
 Chief = { name = "chief/core", version = "^" }                # default index
 Other = { name = "user/pkg", version = "^", index = "wally" } # named index
+
+[studio]                           # what `lpm studio open` opens; one form only
+universe = 13058                   # experience (universe) ID...
+place = 1818                       # ...plus its place ID
+# file = "game.rbxl"               # or a local place file instead of IDs
 
 [tools]
 rojo = "rojo-rbx/rojo@7.7.0"      # owner/repo@version, key is the shim alias
