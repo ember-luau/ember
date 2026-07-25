@@ -30,7 +30,7 @@ manifest, one lockfile, one binary.
 
 ## Status
 
-lpm is in beta and moving. Two things are mid-rebuild right now:
+lpm is in beta and moving. Here is what stands today and what is being built:
 
 | Area | State |
 | --- | --- |
@@ -38,10 +38,21 @@ lpm is in beta and moving. Two things are mid-rebuild right now:
 | Tools, scripts, lockfile, linker | Works |
 | lpm's own package index | Being replaced by a first-party API |
 | `lpm publish` | Packs your project, then stops. Uploading waits on that API |
+| Extensions | In design. A Rust API for extending lpm itself |
 
 Until the API lands, a dependency that does not name an index needs a
 `default` entry under `[indices]`, and publishing is unavailable. Everything
 left to build is marked `TODO(api)` in the source.
+
+### Extensions
+
+lpm will not ship every capability a project wants, so it is growing a way to
+add them. Extensions are written in Rust against an exposed lpm API, and can
+be loaded and unloaded rather than being baked into the binary: bring in what
+your project needs, drop it when you don't.
+
+The API surface is still being designed and nothing here is implemented yet,
+so take this as the direction rather than a promise.
 
 ## Install
 
