@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::manifest::{Environment, MANIFEST_FILE, Manifest};
+use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};

@@ -1,6 +1,6 @@
 use crate::error::Error;
-use crate::index::DownloadSource;
-use crate::manifest::Environment;
+use crate::project::manifest::Environment;
+use crate::registry::index::DownloadSource;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

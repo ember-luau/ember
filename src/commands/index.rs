@@ -1,11 +1,10 @@
 use crate::error::Error;
-use crate::manifest::{DEFAULT_INDEX_URL, MANIFEST_FILE, Manifest};
+use crate::project::manifest::Manifest;
+use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::ui;
 use clap::Subcommand;
 use inquire::CustomUserError;
 use inquire::autocompletion::{Autocomplete, Replacement};
-use std::fs;
-use std::path::Path;
 
 #[derive(Subcommand, Debug)]
 pub enum IndexCommand {
@@ -77,9 +76,8 @@ pub fn run(command: IndexCommand) -> Result<(), Error> {
 }
 
 fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
-    if !Path::new(MANIFEST_FILE).exists() {
-        return Err(Error::ManifestMissing);
-    }
+    // Open first so a missing or unparsable manifest fails before prompting.
+    let mut document = ManifestDoc::open(Scope::Project)?;
     inquire::set_global_render_config(ui::render_config());
 
     let name = match name {
@@ -111,7 +109,6 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
                     KNOWN_INDICES
                         .iter()
                         .map(|(_, url)| url.to_string())
-                        .chain([DEFAULT_INDEX_URL.to_string()])
                         .collect(),
                 ))
                 .with_help_message("git repository of the index")
@@ -123,18 +120,10 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
         return Err(Error::ManifestInvalid("an index needs a URL".to_string()));
     }
 
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
-    let indices = document
-        .entry("indices")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(table) = indices.as_table_mut() else {
-        return Err(Error::ManifestInvalid(
-            "[indices] is not a table".to_string(),
-        ));
-    };
+    let table = document.table_or_create("indices")?;
     let replaced = table.contains_key(&name);
     table[&name] = toml_edit::value(&url);
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    document.save()?;
 
     let verb = if replaced { "Updated" } else { "Added" };
     ui::print_success(&format!("{verb} index {name} → {url}"));
@@ -148,17 +137,11 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
 }
 
 fn remove(name: Option<String>) -> Result<(), Error> {
-    if !Path::new(MANIFEST_FILE).exists() {
-        return Err(Error::ManifestMissing);
-    }
     // Read before editing so the dependents warning below sees the same file.
     let manifest = Manifest::load()?;
 
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
-    let Some(table) = document
-        .get_mut("indices")
-        .and_then(|item| item.as_table_mut())
-    else {
+    let mut document = ManifestDoc::open(Scope::Project)?;
+    let Some(table) = document.table("indices")? else {
         println!("No indices defined in lpm.toml");
         return Ok(());
     };
@@ -179,10 +162,8 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     if table.remove(&name).is_none() {
         return Err(Error::UnknownIndex(name));
     }
-    if table.is_empty() {
-        document.remove("indices");
-    }
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    document.drop_if_empty("indices");
+    document.save()?;
     ui::print_success(&format!("Removed index {name} from lpm.toml"));
 
     // Dependencies keyed to the removed index break at the next resolve;

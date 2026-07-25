@@ -1,14 +1,13 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    env::consts::EXE_SUFFIX,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, env::consts::EXE_SUFFIX, fs};
 
 use crate::{
     error::Error,
-    github::GithubAPI,
-    manifest::{MANIFEST_FILE, Tool},
+    net::github::GithubAPI,
+    project::manifest::{
+        Tool,
+        edit::{ManifestDoc, Scope},
+    },
+    sys::paths,
     tools, ui,
 };
 use clap::Subcommand;
@@ -57,47 +56,6 @@ pub enum ToolCommand {
     },
 }
 
-/// Well-known tools addable by bare name; anything else must be "owner/repo".
-fn shorthand_map() -> HashMap<&'static str, &'static str> {
-    HashMap::from([
-        ("darklua", "seaofvoices/darklua"),
-        ("rojo", "rojo-rbx/rojo"),
-        ("luau-lsp", "johnnymorganz/luau-lsp"),
-        ("stylua", "johnnymorganz/stylua"),
-    ])
-}
-
-/// Expands a shorthand to its full repository name; names not in the table
-/// are assumed to already be "owner/repo" and pass through unchanged.
-fn expand_shorthand(name: String) -> String {
-    shorthand_map()
-        .get(name.as_str())
-        .map(|longhand| longhand.to_string())
-        .unwrap_or(name)
-}
-
-/// Splits an "owner/repo" GitHub repository name. Unlike index package names
-/// (see `manifest::split_package_name`), GitHub owners and repos may contain
-/// uppercase letters and dots (e.g. "JohnnyMorganz/StyLua"), so only the
-/// shape is validated: exactly one '/', both halves non-empty.
-fn split_repository(name: &str) -> Result<(&str, &str), Error> {
-    match name.split_once('/') {
-        Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() && !repo.contains('/') => {
-            Ok((owner, repo))
-        }
-        _ => Err(Error::InvalidToolSpec(name.to_string())),
-    }
-}
-
-/// Reads the project manifest for editing, with the friendly missing-file
-/// error instead of a raw io one (tool commands get run outside projects).
-fn read_project_manifest() -> Result<String, Error> {
-    if !Path::new(MANIFEST_FILE).exists() {
-        return Err(Error::ManifestMissing);
-    }
-    Ok(fs::read_to_string(MANIFEST_FILE)?)
-}
-
 pub fn run(command: ToolCommand) -> Result<(), Error> {
     match command {
         ToolCommand::Add {
@@ -114,8 +72,8 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
 
 fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
     let github = GithubAPI::new();
-    let name = expand_shorthand(name);
-    let (owner, repo) = split_repository(&name)?;
+    let name = tools::expand_shorthand(&name);
+    let (owner, repo) = Tool::split_repository(&name)?;
 
     // Resolve the release first so a bad name/version never touches the file
     let release = match &version {
@@ -125,33 +83,14 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
 
     // Global tools live in ~/.lpm/tools.toml (created on first use) and
     // resolve in any directory; project tools only inside their project
-    let (path, text) = if global {
-        let path = tools::global_manifest_path()?;
-        let text = if path.exists() {
-            fs::read_to_string(&path)?
-        } else {
-            String::new()
-        };
-        (path, text)
-    } else {
-        (PathBuf::from(MANIFEST_FILE), read_project_manifest()?)
-    };
-    let mut document: toml_edit::DocumentMut = text.parse()?;
-
-    let tools = document
-        .entry("tools")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(table) = tools.as_table_mut() else {
-        return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
-    };
+    let mut manifest = ManifestDoc::open_or_create(Scope::from_global(global))?;
 
     // The alias key defaults to the repo short name; the bin shim takes the
     // same name, which is what `delete` relies on when removing it
     let version = release.tag_name.trim_start_matches('v');
-    table[repo] = toml_edit::value(format!("{owner}/{repo}@{version}"));
-
-    fs::create_dir_all(path.parent().expect("tools file has a parent"))?;
-    fs::write(&path, document.to_string())?;
+    manifest.table_or_create("tools")?[repo] =
+        toml_edit::value(format!("{owner}/{repo}@{version}"));
+    manifest.save()?;
 
     if global {
         ui::print_success(&format!("Added global tool {name}@{version}"));
@@ -164,31 +103,20 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
 }
 
 fn remove(name: String, global: bool) -> Result<(), Error> {
-    let (path, text) = if global {
-        let path = tools::global_manifest_path()?;
-        if !path.exists() {
-            return Err(Error::ToolMissing(name));
-        }
-        let text = fs::read_to_string(&path)?;
-        (path, text)
-    } else {
-        (PathBuf::from(MANIFEST_FILE), read_project_manifest()?)
-    };
-    let mut document: toml_edit::DocumentMut = text.parse()?;
+    let scope = Scope::from_global(global);
 
-    let Some(tools) = document.get_mut("tools") else {
-        return Err(Error::ManifestInvalid("[tools] doesn't exist".to_string()));
+    // No global tools file at all means nothing was ever pinned globally
+    let mut manifest = match ManifestDoc::open(scope) {
+        Err(Error::ManifestMissing) if global => return Err(Error::ToolMissing(name)),
+        opened => opened?,
     };
-    let Some(table) = tools.as_table_mut() else {
-        return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
-    };
+    let table = manifest.require_table("tools")?;
 
     // Try the exact alias key first; keys are short names, so a shorthand or
     // full "owner/repo" falls back to matching table values by repository
     let mut removed = table.remove(&name).is_some();
     if !removed {
-        let shorthands = shorthand_map();
-        let repository = shorthands.get(name.as_str()).copied().unwrap_or(&name);
+        let repository = tools::shorthand_repository(&name).unwrap_or(&name);
         let prefix = format!("{repository}@");
 
         // GitHub repository names are case-insensitive, so match ignoring case
@@ -208,18 +136,12 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
         return Err(Error::ToolMissing(name));
     }
 
-    // Don't leave an empty [tools] header behind
-    if table.is_empty() {
-        document.remove("tools");
-    }
-
-    fs::write(&path, document.to_string())?;
-    let file = if global {
-        "the global tools file"
-    } else {
-        "lpm.toml"
-    };
-    ui::print_success(&format!("Successfully removed tool {name} from {file}"));
+    manifest.drop_if_empty("tools");
+    manifest.save()?;
+    ui::print_success(&format!(
+        "Successfully removed tool {name} from {}",
+        scope.label()
+    ));
 
     Ok(())
 }
@@ -235,14 +157,11 @@ fn is_outdated(current: &str, latest: &str) -> bool {
 
 fn update() -> Result<(), Error> {
     let github = GithubAPI::new();
-    let mut document: toml_edit::DocumentMut = read_project_manifest()?.parse()?;
+    let mut manifest = ManifestDoc::open(Scope::Project)?;
 
-    let Some(tools) = document.get_mut("tools") else {
+    let Some(table) = manifest.table("tools")? else {
         println!("No tools to update");
         return Ok(());
-    };
-    let Some(table) = tools.as_table_mut() else {
-        return Err(Error::ManifestInvalid("[tools] is not a table".to_string()));
     };
 
     // Snapshot the entries up front so the table can be edited while looping
@@ -283,7 +202,7 @@ fn update() -> Result<(), Error> {
         return Ok(());
     }
 
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    manifest.save()?;
     ui::print_success(&format!(
         "Updated {updated} tool{} in lpm.toml",
         if updated == 1 { "" } else { "s" }
@@ -317,7 +236,7 @@ fn list() -> Result<(), Error> {
     let mut seen: Seen = BTreeMap::new();
 
     // What is stored on disk
-    let tools_dir = tools::tools_dir()?;
+    let tools_dir = paths::tools_dir()?;
     if tools_dir.is_dir() {
         for entry in fs::read_dir(&tools_dir)? {
             let entry = entry?;
@@ -344,8 +263,8 @@ fn list() -> Result<(), Error> {
     }
 
     // What the surrounding project and the global tools file pin
-    let project = tools::project_tools(&std::env::current_dir()?)?;
-    let global = tools::global_tools()?;
+    let project = tools::shim::project_tools(&std::env::current_dir()?)?;
+    let global = tools::shim::global_tools()?;
     for (tools, is_global) in [(&project, false), (&global, true)] {
         for tool in tools.values() {
             let state = state_of(&mut seen, &tool.repository, tool.version.clone());
@@ -402,9 +321,9 @@ fn list() -> Result<(), Error> {
 }
 
 fn delete(name: String, version: Option<String>) -> Result<(), Error> {
-    let name = expand_shorthand(name);
-    let (owner, repo) = split_repository(&name)?;
-    let tool_dir = tools::tools_dir()?.join(format!("{owner}_{repo}"));
+    let name = tools::expand_shorthand(&name);
+    let (owner, repo) = Tool::split_repository(&name)?;
+    let tool_dir = paths::tools_dir()?.join(format!("{owner}_{repo}"));
     let version = version
         .as_deref()
         .map(|version| version.trim_start_matches('v'));
@@ -415,7 +334,7 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
         None => tool_dir.clone(),
     };
     if !target.exists() {
-        return Err(Error::ToolMissing(name));
+        return Err(Error::ToolMissing(name.to_string()));
     }
     fs::remove_dir_all(&target)?;
 
@@ -428,7 +347,7 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
             .unwrap_or(true);
     if tool_gone {
         let _ = fs::remove_dir(&tool_dir);
-        if let Ok(bin_dir) = tools::bin_dir() {
+        if let Ok(bin_dir) = paths::bin_dir() {
             let _ = fs::remove_file(bin_dir.join(format!("{repo}{EXE_SUFFIX}")));
         }
     }

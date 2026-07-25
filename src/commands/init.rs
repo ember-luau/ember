@@ -1,8 +1,8 @@
 use crate::error::Error;
-use crate::manifest::{Environment, Manifest, Package, Target};
+use crate::project::manifest::{Environment, Manifest, Package, Target};
+use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
-use std::process::Command;
 
 const ENVIRONMENTS: &[&str] = &["shared", "server", "lune", "luau", "lute"];
 
@@ -41,9 +41,9 @@ impl Defaults {
     /// Best-effort prompt defaults scraped from git: `name` prefers owner/repo
     /// from the origin remote, falling back to `<git user>/<current dir>`.
     fn guess() -> Self {
-        let remote = git_output(&["remote", "get-url", "origin"]);
-        let repository = remote.as_deref().and_then(https_remote_url);
-        let user_name = git_output(&["config", "user.name"]);
+        let remote = git::output(&["remote", "get-url", "origin"]);
+        let repository = remote.as_deref().and_then(git::remote_https_url);
+        let user_name = git::output(&["config", "user.name"]);
 
         let name = repository
             .as_deref()
@@ -55,7 +55,7 @@ impl Defaults {
                 (!scope.is_empty() && !name.is_empty()).then(|| format!("{scope}/{name}"))
             });
 
-        let authors = match (user_name, git_output(&["config", "user.email"])) {
+        let authors = match (user_name, git::output(&["config", "user.email"])) {
             (Some(name), Some(email)) => Some(format!("{name} <{email}>")),
             (Some(name), None) => Some(name),
             _ => None,
@@ -66,33 +66,6 @@ impl Defaults {
             authors,
             repository,
         }
-    }
-}
-
-fn git_output(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-/// Normalizes a git remote URL ("git@host:owner/repo.git", "https://host/owner/repo.git", ...)
-/// into a plain https link.
-fn https_remote_url(url: &str) -> Option<String> {
-    let url = url.trim().trim_end_matches(".git");
-
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Some(url.to_string())
-    } else if let Some(rest) = url.strip_prefix("ssh://git@") {
-        Some(format!("https://{rest}"))
-    } else if let Some(rest) = url.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':')?;
-        Some(format!("https://{host}/{path}"))
-    } else {
-        None
     }
 }
 
@@ -185,7 +158,7 @@ pub fn run() -> Result<(), Error> {
         .prompt()?;
     let main = Text::new("main:")
         .with_help_message("Entry point of your package")
-        .with_default("init.luau")
+        .with_default("src/init.luau")
         .prompt()?;
 
     let manifest = Manifest {
@@ -207,6 +180,7 @@ pub fn run() -> Result<(), Error> {
         indices: Default::default(),
         dependencies: Default::default(),
         tools: Default::default(),
+        scripts: Default::default(),
     };
 
     std::fs::write(manifest_path, toml::to_string(&manifest)?)?;
@@ -313,23 +287,6 @@ mod tests {
     fn non_empty_trims_and_drops_blank_values() {
         assert_eq!(non_empty("   ".to_string()), None);
         assert_eq!(non_empty(" hi ".to_string()), Some("hi".to_string()));
-    }
-
-    #[test]
-    fn normalizes_remote_urls_to_https() {
-        assert_eq!(
-            https_remote_url("https://github.com/luaupm/cli.git").as_deref(),
-            Some("https://github.com/luaupm/cli")
-        );
-        assert_eq!(
-            https_remote_url("git@github.com:luaupm/cli.git").as_deref(),
-            Some("https://github.com/luaupm/cli")
-        );
-        assert_eq!(
-            https_remote_url("ssh://git@github.com/luaupm/cli").as_deref(),
-            Some("https://github.com/luaupm/cli")
-        );
-        assert_eq!(https_remote_url("ftp://example.com/a/b"), None);
     }
 
     #[test]

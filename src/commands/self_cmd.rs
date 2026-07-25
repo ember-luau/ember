@@ -1,11 +1,12 @@
 use crate::error::Error;
-use crate::github::GithubAPI;
-use crate::http::responses::Release;
+use crate::net::github::GithubAPI;
+use crate::net::http::responses::Release;
+use crate::sys::paths;
 use clap::Subcommand;
 use semver::Version;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// GitHub repo `self update` pulls releases from.
 const REPO: &str = "luaupm/cli";
@@ -28,24 +29,13 @@ pub fn run(command: SelfCommand) -> Result<(), Error> {
     }
 }
 
-fn install_dir() -> Result<PathBuf, Error> {
-    Ok(dirs::home_dir().ok_or(Error::NoHomeDir)?.join(".lpm"))
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 fn install() -> Result<(), Error> {
-    let bin_dir = install_dir()?.join("bin");
+    let bin_dir = paths::bin_dir()?;
     fs::create_dir_all(&bin_dir)?;
     let target = bin_dir.join(format!("lpm{}", env::consts::EXE_SUFFIX));
 
     let current = env::current_exe()?;
-    if target.exists() && same_file(&current, &target) {
+    if target.exists() && paths::same_file(&current, &target) {
         println!("lpm is already installed at {}", target.display());
     } else {
         fs::copy(&current, &target)?;
@@ -90,7 +80,7 @@ fn update() -> Result<(), Error> {
 
     println!("Downloading lpm v{latest}");
 
-    let bytes = crate::http::get_bytes(&asset.browser_download_url, &[])?;
+    let bytes = crate::net::http::get_bytes(&asset.browser_download_url, &[])?;
 
     let staged = env::temp_dir().join(&asset_name);
     fs::write(&staged, &bytes)?;
@@ -102,7 +92,7 @@ fn update() -> Result<(), Error> {
 }
 
 fn uninstall() -> Result<(), Error> {
-    let dir = install_dir()?;
+    let dir = paths::lpm_dir()?;
     if !dir.exists() {
         return Err(Error::NotInstalled(dir));
     }

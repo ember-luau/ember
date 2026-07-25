@@ -1,6 +1,6 @@
 use crate::error::Error;
-use crate::index::{DownloadSource, Index};
-use crate::manifest::{Environment, Manifest, parse_version_req, split_package_name};
+use crate::project::manifest::{Environment, Manifest, parse_version_req, split_package_name};
+use crate::registry::index::{DownloadSource, Index};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// A package ready to download: the flattened result of resolution.

@@ -1,10 +1,10 @@
-use crate::auth;
 use crate::error::Error;
-use crate::github::GithubAPI;
-use crate::index;
-use crate::lockfile::{LockedPackage, Lockfile};
-use crate::manifest::{Environment, Manifest, Tool};
-use crate::resolver;
+use crate::net::github::GithubAPI;
+use crate::project::lockfile::{LockedPackage, Lockfile};
+use crate::project::manifest::{Environment, Manifest, Tool};
+use crate::project::package;
+use crate::registry::index;
+use crate::registry::resolver;
 use crate::tools;
 use crate::ui;
 use clap::Args;
@@ -31,11 +31,6 @@ struct Job {
 pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
-    // Private-index downloads authenticate with the stored GitHub token. Not
-    // being logged in is not an error here: public downloads need no token,
-    // and private ones fail with the server's response instead.
-    let token = auth::load()?.map(|credentials| credentials.token);
-
     let jobs: Vec<Job> = if args.locked {
         Lockfile::load()?
             .packages
@@ -50,20 +45,19 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             })
             .collect()
     } else {
-        let spinner = ui::spinner("Resolving dependencies");
-        let resolved = resolver::resolve(&manifest, true);
-        spinner.finish_and_clear();
-        resolved?
-            .into_iter()
-            .map(|package| Job {
-                name: package.name,
-                version: package.version.to_string(),
-                environment: package.environment,
-                source: package.source,
-                index_url: package.index_url,
-                link: package.link,
-            })
-            .collect()
+        ui::with_spinner("Resolving dependencies", || {
+            resolver::resolve(&manifest, true)
+        })?
+        .into_iter()
+        .map(|package| Job {
+            name: package.name,
+            version: package.version.to_string(),
+            environment: package.environment,
+            source: package.source,
+            index_url: package.index_url,
+            link: package.link,
+        })
+        .collect()
     };
 
     // Installs are reproduced from scratch each run: every environment's
@@ -80,10 +74,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     // folder) is always known, so stage in a project-local temp dir; a rename
     // then moves it into place (same filesystem as the outputs).
     let staging = Path::new(".lpm-staging").to_path_buf();
-    let bar = ui::progress_bar(jobs.len() as u64);
-    let installed = install_packages(&manifest, jobs, &staging, token.as_deref(), &bar);
-    bar.finish_and_clear();
-    let locked = installed?;
+    let locked = ui::with_progress(jobs.len() as u64, |bar| {
+        install_packages(&manifest, jobs, &staging, bar)
+    })?;
 
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -104,7 +97,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
         .iter()
         .map(|(alias, tool)| (alias.clone(), tool.clone(), false))
         .collect();
-    for (alias, tool) in tools::global_tools()? {
+    for (alias, tool) in tools::shim::global_tools()? {
         // A pin listed identically in both scopes only needs one install
         let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
             project.repository.eq_ignore_ascii_case(&tool.repository)
@@ -118,20 +111,17 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     let tool_count = tool_jobs.len();
     if !tool_jobs.is_empty() {
         println!("Installing tools");
-        let bar = ui::progress_bar(tool_count as u64);
-        let result = install_tools(&tool_jobs, &bar);
-        bar.finish_and_clear();
-        result?;
+        ui::with_progress(tool_count as u64, |bar| install_tools(&tool_jobs, bar))?;
     }
 
     match (package_count, tool_count) {
         (0, 0) => println!("Nothing to install"),
-        (p, 0) => println!("Installed {p} package{}", plural(p)),
-        (0, t) => println!("Installed {t} tool{}", plural(t)),
+        (p, 0) => println!("Installed {p} package{}", ui::plural(p)),
+        (0, t) => println!("Installed {t} tool{}", ui::plural(t)),
         (p, t) => println!(
             "Installed {p} package{} and {t} tool{}",
-            plural(p),
-            plural(t)
+            ui::plural(p),
+            ui::plural(t)
         ),
     }
     Ok(())
@@ -143,7 +133,6 @@ fn install_packages(
     manifest: &Manifest,
     jobs: Vec<Job>,
     staging: &Path,
-    token: Option<&str>,
     bar: &ProgressBar,
 ) -> Result<Vec<LockedPackage>, Error> {
     let mut locked = Vec::new();
@@ -152,14 +141,14 @@ fn install_packages(
         if staging.exists() {
             fs::remove_dir_all(staging)?;
         }
-        index::download(&job.source, staging, token)?;
-        flatten_single_dir(staging)?;
+        index::download(&job.source, staging)?;
+        package::flatten_single_dir(staging)?;
 
         // Indices usually know the environment; otherwise ask the files
         // (lpm.toml -> pesde.toml -> wally.toml).
         let environment = match job.environment {
             Some(environment) => environment,
-            None => detect_environment(staging)
+            None => package::environment(staging)
                 .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
         };
 
@@ -175,10 +164,10 @@ fn install_packages(
         }
         fs::rename(staging, &storage)?;
 
-        match detect_entry(&storage) {
+        match package::entry_point(&storage) {
             Some(entry) => {
                 let link_path = out.join(format!("{}.luau", job.link));
-                fs::write(&link_path, link_contents(&folder, &entry))?;
+                fs::write(&link_path, package::link_contents(&folder, &entry))?;
             }
             None => bar.suspend(|| {
                 eprintln!(
@@ -236,7 +225,7 @@ fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(),
         // Another toolchain manager's shim earlier in PATH (aftman,
         // rokit) would run instead of ours and report its own errors;
         // surface that or the tool looks broken for no visible reason.
-        if let Some(shadow) = tools::shadowing_executable(alias) {
+        if let Some(shadow) = tools::shim::shadowing_executable(alias) {
             bar.suspend(|| {
                 eprintln!(
                     "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
@@ -247,237 +236,4 @@ fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(),
         bar.inc(1);
     }
     Ok(())
-}
-
-/// "" for one, "s" for any other count — for the install summary.
-fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
-}
-
-/// Body of a generated link file, e.g. `return require("./.lpm/scope_pkg/lib")`.
-fn link_contents(folder: &str, entry: &str) -> String {
-    format!("return require(\"./.lpm/{folder}/{entry}\")\n")
-}
-
-/// Finds a package's entry point relative to its root, without a file
-/// extension (Luau string requires reject them). Checked in order:
-/// lpm.toml `[target].main`, pesde.toml `[target].lib`, a Rojo
-/// default.project.json tree `$path`, then conventional init file locations.
-fn detect_entry(dir: &Path) -> Option<String> {
-    let read_toml = |file: &str| -> Option<toml::Value> {
-        fs::read_to_string(dir.join(file)).ok()?.parse().ok()
-    };
-
-    if let Some(main) = read_toml("lpm.toml")
-        .as_ref()
-        .and_then(|value| Some(value.get("target")?.get("main")?.as_str()?.to_string()))
-    {
-        return Some(strip_entry_extension(&main));
-    }
-    if let Some(lib) = read_toml("pesde.toml")
-        .as_ref()
-        .and_then(|value| Some(value.get("target")?.get("lib")?.as_str()?.to_string()))
-    {
-        return Some(strip_entry_extension(&lib));
-    }
-    if let Some(path) = fs::read_to_string(dir.join("default.project.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|json| Some(json.get("tree")?.get("$path")?.as_str()?.to_string()))
-    {
-        return Some(strip_entry_extension(&path));
-    }
-
-    for candidate in [
-        "init.luau",
-        "init.lua",
-        "src/init.luau",
-        "src/init.lua",
-        "lib/init.luau",
-        "lib/init.lua",
-    ] {
-        if dir.join(candidate).exists() {
-            return Some(strip_entry_extension(candidate));
-        }
-    }
-    None
-}
-
-/// Normalizes an entry path for a string require: forward slashes, no leading
-/// "./", no .luau/.lua extension (a bare folder resolves its init file).
-fn strip_entry_extension(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let path = path.trim_start_matches("./").trim_matches('/');
-    path.strip_suffix(".luau")
-        .or_else(|| path.strip_suffix(".lua"))
-        .unwrap_or(path)
-        .to_string()
-}
-
-/// Archives sometimes wrap everything in a single top-level folder
-/// (e.g. GitHub release tarballs); unwrap it so package files sit at the root.
-fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
-    let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-    let [only] = entries.as_slice() else {
-        return Ok(());
-    };
-    if !only.file_type()?.is_dir() {
-        return Ok(());
-    }
-
-    let inner = only.path();
-    for entry in fs::read_dir(&inner)? {
-        let entry = entry?;
-        fs::rename(entry.path(), dir.join(entry.file_name()))?;
-    }
-    fs::remove_dir(inner)?;
-    Ok(())
-}
-
-/// Reads an extracted package's own manifest to find its environment:
-/// lpm.toml `[target].environment`, then pesde.toml `[target].environment`
-/// (translated), then wally.toml `[package].realm` (translated).
-fn detect_environment(dir: &Path) -> Option<Environment> {
-    let read_toml = |file: &str| -> Option<toml::Value> {
-        fs::read_to_string(dir.join(file)).ok()?.parse().ok()
-    };
-    let target_environment = |value: &toml::Value| -> Option<String> {
-        Some(
-            value
-                .get("target")?
-                .get("environment")?
-                .as_str()?
-                .to_string(),
-        )
-    };
-
-    if let Some(environment) = read_toml("lpm.toml").as_ref().and_then(target_environment) {
-        return Environment::from_lpm(&environment).ok();
-    }
-    if let Some(environment) = read_toml("pesde.toml")
-        .as_ref()
-        .and_then(target_environment)
-    {
-        return Environment::from_pesde(&environment).ok();
-    }
-    if let Some(realm) = read_toml("wally.toml")
-        .as_ref()
-        .and_then(|value| Some(value.get("package")?.get("realm")?.as_str()?.to_string()))
-    {
-        return Environment::from_wally_realm(&realm).ok();
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn write_package(dir: &Path, file: &str, contents: &str) {
-        fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join(file), contents).unwrap();
-    }
-
-    #[test]
-    fn detects_environment_from_manifests() {
-        let base = std::env::temp_dir().join("lpm-test-detect-env");
-        let _ = fs::remove_dir_all(&base);
-
-        let lpm = base.join("lpm");
-        write_package(&lpm, "lpm.toml", "[target]\nenvironment = \"lune\"");
-        assert_eq!(detect_environment(&lpm), Some(Environment::Lune));
-
-        let pesde = base.join("pesde");
-        write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");
-        assert_eq!(detect_environment(&pesde), Some(Environment::Shared));
-
-        let wally = base.join("wally");
-        write_package(&wally, "wally.toml", "[package]\nrealm = \"server\"");
-        assert_eq!(detect_environment(&wally), Some(Environment::Server));
-
-        let none = base.join("none");
-        fs::create_dir_all(&none).unwrap();
-        assert_eq!(detect_environment(&none), None);
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn lpm_manifest_takes_priority_over_wally() {
-        let base = std::env::temp_dir().join("lpm-test-detect-priority");
-        let _ = fs::remove_dir_all(&base);
-
-        write_package(&base, "wally.toml", "[package]\nrealm = \"server\"");
-        write_package(&base, "lpm.toml", "[target]\nenvironment = \"luau\"");
-        assert_eq!(detect_environment(&base), Some(Environment::Luau));
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn flattens_single_wrapper_directory() {
-        let base = std::env::temp_dir().join("lpm-test-flatten");
-        let _ = fs::remove_dir_all(&base);
-        let wrapper = base.join("pkg-1.0.0");
-        fs::create_dir_all(wrapper.join("src")).unwrap();
-        fs::write(wrapper.join("init.luau"), "return {}").unwrap();
-
-        flatten_single_dir(&base).unwrap();
-        assert!(base.join("init.luau").exists());
-        assert!(base.join("src").exists());
-        assert!(!base.join("pkg-1.0.0").exists());
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn detects_entry_points_in_priority_order() {
-        let base = std::env::temp_dir().join("lpm-test-detect-entry");
-        let _ = fs::remove_dir_all(&base);
-
-        // lpm.toml main wins over everything.
-        let a = base.join("a");
-        write_package(&a, "lpm.toml", "[target]\nmain = \"src/main.luau\"");
-        write_package(&a, "init.luau", "");
-        assert_eq!(detect_entry(&a).as_deref(), Some("src/main"));
-
-        // pesde.toml lib next.
-        let b = base.join("b");
-        write_package(&b, "pesde.toml", "[target]\nlib = \"lib.luau\"");
-        assert_eq!(detect_entry(&b).as_deref(), Some("lib"));
-
-        // Rojo project tree path (a folder; its init file resolves at require time).
-        let c = base.join("c");
-        write_package(
-            &c,
-            "default.project.json",
-            r#"{"name": "pkg", "tree": {"$path": "src"}}"#,
-        );
-        assert_eq!(detect_entry(&c).as_deref(), Some("src"));
-
-        // Conventional fallbacks.
-        let d = base.join("d");
-        write_package(&d.join("src"), "init.lua", "");
-        assert_eq!(detect_entry(&d).as_deref(), Some("src/init"));
-
-        let e = base.join("e");
-        fs::create_dir_all(&e).unwrap();
-        assert_eq!(detect_entry(&e), None);
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn link_files_require_the_stored_package() {
-        assert_eq!(
-            link_contents("evaera_promise", "lib"),
-            "return require(\"./.lpm/evaera_promise/lib\")\n"
-        );
-        assert_eq!(
-            strip_entry_extension("./src\\init.luau"),
-            "src/init".to_string()
-        );
-        assert_eq!(strip_entry_extension("lib.lua"), "lib".to_string());
-        assert_eq!(strip_entry_extension("src"), "src".to_string());
-    }
 }

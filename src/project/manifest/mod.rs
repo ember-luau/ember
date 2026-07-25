@@ -1,3 +1,5 @@
+pub mod edit;
+
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -6,8 +8,7 @@ use std::path::Path;
 
 pub const MANIFEST_FILE: &str = "lpm.toml";
 
-/// The index searched when a dependency does not name one.
-pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
+/// Key under [indices] used for dependencies that name no index.
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -23,6 +24,9 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, Dependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, Tool>,
+    /// Shell commands runnable with `lpm run <name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scripts: BTreeMap<String, String>,
 }
 
 /// Per-environment install locations; each defaults to "packages/<env>".
@@ -80,8 +84,12 @@ pub struct Package {
 impl Package {
     /// The `repository` field reduced to a GitHub "owner/repo" slug. Accepts
     /// a bare slug, https:// and host-only URLs, and the git@ ssh remote,
-    /// with or without ".git". Other hosts give None: publishing uploads
-    /// release assets through the GitHub API, so only GitHub repos work.
+    /// with or without ".git". Other hosts give None.
+    ///
+    /// TODO(api): publish used this to pick the repo that hosted the release
+    /// asset. Kept because the API will likely want to record where a package
+    /// comes from; delete it if it doesn't.
+    #[allow(dead_code)]
     pub fn repository_slug(&self) -> Option<String> {
         let repository = self.repository.as_deref()?.trim().trim_end_matches('/');
 
@@ -116,7 +124,7 @@ impl Package {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Target {
     pub environment: Environment,
-    /// Entry point of the package, e.g. "init.luau".
+    /// Entry point of the package, e.g. "src/init.luau".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
 }
@@ -219,27 +227,33 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Parses an "owner/repo@version" tool spec. Unlike index package names
-    /// (see `split_package_name`), GitHub owners/repos may contain uppercase
-    /// letters and dots (e.g. "JohnnyMorganz/StyLua"), so only the shape is
-    /// validated here.
+    /// Parses an "owner/repo@version" tool spec.
     pub fn parse(spec: &str) -> Result<Self, Error> {
         let invalid = || Error::InvalidToolSpec(spec.to_string());
 
         let (repository, version) = spec.trim().split_once('@').ok_or_else(invalid)?;
-        if repository.is_empty() || version.is_empty() || version.contains('@') {
+        if version.is_empty() || version.contains('@') {
             return Err(invalid());
         }
-
-        let (owner, repo) = repository.split_once('/').ok_or_else(invalid)?;
-        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
-            return Err(invalid());
-        }
+        Self::split_repository(repository).map_err(|_| invalid())?;
 
         Ok(Tool {
             repository: repository.to_string(),
             version: version.to_string(),
         })
+    }
+
+    /// Splits an "owner/repo" GitHub repository name. Unlike index package
+    /// names (see `split_package_name`), GitHub owners and repos may contain
+    /// uppercase letters and dots (e.g. "JohnnyMorganz/StyLua"), so only the
+    /// shape is validated: exactly one '/', both halves non-empty.
+    pub fn split_repository(repository: &str) -> Result<(&str, &str), Error> {
+        match repository.split_once('/') {
+            Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() && !repo.contains('/') => {
+                Ok((owner, repo))
+            }
+            _ => Err(Error::InvalidToolSpec(repository.to_string())),
+        }
     }
 }
 
@@ -297,19 +311,32 @@ impl Manifest {
     }
 
     /// Resolves a dependency's `index` key to an index URL.
+    ///
+    /// TODO(api): with lpm's own index gone, a dependency that names no index
+    /// only works when the project defines a `default` one. This is where the
+    /// lpm API becomes the fallback again.
     pub fn index_url(&self, index: Option<&str>) -> Result<&str, Error> {
         match index {
-            None => Ok(self
+            None => self
                 .indices
                 .get(DEFAULT_INDEX_NAME)
                 .map(String::as_str)
-                .unwrap_or(DEFAULT_INDEX_URL)),
+                .ok_or(Error::NoDefaultIndex),
             Some(key) => self
                 .indices
                 .get(key)
                 .map(String::as_str)
                 .ok_or_else(|| Error::UnknownIndex(key.to_string())),
         }
+    }
+
+    /// The command a `[scripts]` entry runs. Editing the manifest goes
+    /// through `edit::ManifestDoc`; this is the read side, used by `lpm run`.
+    pub fn script(&self, name: &str) -> Result<&str, Error> {
+        self.scripts
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| Error::ScriptMissing(name.to_string()))
     }
 }
 
@@ -367,6 +394,9 @@ mod tests {
             [tools]
             stylua = "johnnymorganz/stylua@2.0.0"
             StyLua = "JohnnyMorganz/StyLua@2.1.0"
+
+            [scripts]
+            build = "rojo build -o game.rbxl"
             "#,
         )
         .unwrap();
@@ -385,6 +415,11 @@ mod tests {
         assert_eq!(manifest.tools["stylua"].version, "2.0.0");
         assert_eq!(manifest.tools["StyLua"].repository, "JohnnyMorganz/StyLua");
         assert_eq!(manifest.tools["StyLua"].version, "2.1.0");
+        assert_eq!(manifest.script("build").unwrap(), "rojo build -o game.rbxl");
+        assert!(matches!(
+            manifest.script("test"),
+            Err(Error::ScriptMissing(_))
+        ));
     }
 
     #[test]
@@ -401,7 +436,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.index_url(None).unwrap(), DEFAULT_INDEX_URL);
+        // No `default` key and no built-in index left to fall back on.
+        assert!(matches!(
+            manifest.index_url(None),
+            Err(Error::NoDefaultIndex)
+        ));
         assert_eq!(
             manifest.index_url(Some("wally")).unwrap(),
             "https://example.com/wally-index"
@@ -413,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn default_index_key_overrides_builtin_url() {
+    fn default_index_key_resolves_bare_dependencies() {
         let manifest: Manifest = toml::from_str(
             r#"
             [package]

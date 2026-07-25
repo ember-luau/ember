@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::error::Error;
 use clap::builder::styling;
 use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
@@ -85,6 +86,32 @@ pub fn spinner(message: &str) -> indicatif::ProgressBar {
     spinner.set_message(message.to_string());
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
+}
+
+/// Runs `work` under a spinner. The spinner is always cleared first, so an
+/// error message never lands on top of a live one.
+pub fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    let spinner = spinner(message);
+    let result = work();
+    spinner.finish_and_clear();
+    result
+}
+
+/// Runs `work` with a progress bar of `len` steps, clearing it afterwards
+/// whether the work succeeded or not.
+pub fn with_progress<T>(
+    len: u64,
+    work: impl FnOnce(&indicatif::ProgressBar) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let bar = progress_bar(len);
+    let result = work(&bar);
+    bar.finish_and_clear();
+    result
+}
+
+/// "" for one, "s" for any other count, for summary lines.
+pub fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 /// "<1ms", "142ms", "1.42s", or "1m 12s" depending on magnitude.

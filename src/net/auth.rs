@@ -1,11 +1,19 @@
+//! GitHub's OAuth device flow and the token store it writes.
+//!
+//! TODO(api): nothing calls this since publishing was gutted. It stays because
+//! the device flow and ~/.lpm/credentials.toml are reusable if the lpm API
+//! accepts a GitHub token; delete it if the API brings its own auth.
+#![allow(dead_code)]
+
 use crate::error::Error;
-use crate::github::GithubAPI;
-use crate::http;
-use crate::http::responses;
+use crate::net::github::GithubAPI;
+use crate::net::http;
+use crate::net::http::responses;
+use crate::sys::paths;
 use crate::ui;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -25,16 +33,8 @@ struct CredentialsFile {
     login: String,
 }
 
-/// ~/.lpm/credentials.toml — the GitHub token persisted between publishes.
-pub fn credentials_path() -> Result<PathBuf, Error> {
-    Ok(dirs::home_dir()
-        .ok_or(Error::NoHomeDir)?
-        .join(".lpm")
-        .join("credentials.toml"))
-}
-
 pub fn load() -> Result<Option<Credentials>, Error> {
-    let path = credentials_path()?;
+    let path = paths::credentials_file()?;
 
     // A corrupt or unreadable file is treated as "not logged in" rather than
     // an error: the worst case is re-running the device flow, while a hard
@@ -46,7 +46,7 @@ pub fn load() -> Result<Option<Credentials>, Error> {
 }
 
 pub fn save(credentials: &Credentials) -> Result<(), Error> {
-    let path = credentials_path()?;
+    let path = paths::credentials_file()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -200,14 +200,5 @@ mod tests {
     fn corrupt_file_reads_as_not_logged_in() {
         assert!(from_toml("not = valid = toml").is_none());
         assert!(from_toml(r#"token = "half-a-file""#).is_none());
-    }
-
-    #[test]
-    fn credentials_path_lives_under_dot_lpm() {
-        // Skipped on machines with no home directory rather than failing;
-        // the path shape is all this checks.
-        if let Ok(path) = credentials_path() {
-            assert!(path.ends_with(".lpm/credentials.toml"));
-        }
     }
 }

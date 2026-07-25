@@ -1,3 +1,9 @@
+//! Shapes of the GitHub responses lpm deserializes.
+//!
+//! TODO(api): the fork/branch/file/pull shapes below are only still here
+//! because github.rs is (see its note); they were the publish flow's.
+#![allow(dead_code)]
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -5,9 +11,7 @@ pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
     // Deserialized for future use (e.g. publishing); nothing reads them yet.
-    #[allow(dead_code)]
     pub url: String,
-    #[allow(dead_code)]
     pub id: u64,
 }
 
@@ -40,7 +44,6 @@ pub struct AccessToken {
 pub struct User {
     pub login: String,
     // Deserialized for future use (stable identity across renames).
-    #[allow(dead_code)]
     pub id: u64,
 }
 
@@ -68,8 +71,6 @@ pub struct ContentFile {
 #[derive(Deserialize)]
 pub struct PullRequest {
     pub html_url: String,
-    // Deserialized for future use (e.g. tracking publish PRs).
-    #[allow(dead_code)]
     pub number: u64,
 }
 
