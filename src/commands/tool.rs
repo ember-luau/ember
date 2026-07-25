@@ -334,7 +334,7 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
         None => tool_dir.clone(),
     };
     if !target.exists() {
-        return Err(Error::ToolMissing(name));
+        return Err(Error::ToolMissing(name.to_string()));
     }
     fs::remove_dir_all(&target)?;
 
