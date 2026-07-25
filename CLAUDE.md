@@ -35,8 +35,8 @@ cargo clippy --all-targets   # clippy lints; keep at zero warnings
 - `init` — interactive manifest wizard; also git-ignores `packages/`.
 - `run <name>` — runs the `[scripts]` entry of that name through the platform
   shell (sh -c / cmd /C), forwarding a non-zero exit code.
-- `studio` — launches Roblox Studio plain (protocol handler on Windows,
-  `open -a` on macOS, Vinegar via flatpak on Linux).
+- `studio` — subcommand group; bare `lpm studio` prints its help (exit 2,
+  clap arg_required_else_help) rather than launching anything.
 - `studio init` — inquire wizard that writes the `[studio]` table: either
   `universe` + `place` IDs or a local `file` (default guessed from a Rojo
   `*.project.json` `name`).

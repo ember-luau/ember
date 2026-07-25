@@ -16,13 +16,12 @@ pub enum StudioCommand {
     Open,
 }
 
-/// Bare `lpm studio` keeps its old meaning: launch Studio itself, no place
-/// attached.
-pub fn run(command: Option<StudioCommand>) -> Result<(), Error> {
+/// Bare `lpm studio` never gets here: clap prints the studio help instead
+/// (arg_required_else_help in main.rs).
+pub fn run(command: StudioCommand) -> Result<(), Error> {
     match command {
-        None => launch(),
-        Some(StudioCommand::Init) => init(),
-        Some(StudioCommand::Open) => open(),
+        StudioCommand::Init => init(),
+        StudioCommand::Open => open(),
     }
 }
 
@@ -221,33 +220,6 @@ fn rojo_project_name(dir: &Path) -> Option<String> {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let name = project.get("name")?.as_str()?.trim();
     (!name.is_empty()).then(|| name.to_string())
-}
-
-/// Bare `lpm studio`: pokes the roblox-studio: protocol handler and is done.
-#[cfg(windows)]
-fn launch() -> Result<(), Error> {
-    ensure_protocol_handler()?;
-    os_open(OsStr::new("roblox-studio:"))
-}
-
-/// Bare `lpm studio`: the launcher keeps our terminal, so exec.
-#[cfg(target_os = "macos")]
-fn launch() -> Result<(), Error> {
-    use std::process::Command;
-
-    let mut command = Command::new("open");
-    command.args(["-a", "RobloxStudio"]);
-    crate::sys::process::exec(command).map(|_| ())
-}
-
-/// Linux has no Studio build; Vinegar is the usual wrapper for it.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn launch() -> Result<(), Error> {
-    use std::process::Command;
-
-    let mut command = Command::new("flatpak");
-    command.args(["run", "org.vinegarhq.Vinegar"]);
-    crate::sys::process::exec(command).map(|_| ())
 }
 
 /// Refuses to launch when the roblox-studio: protocol has no handler in the

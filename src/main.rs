@@ -25,10 +25,11 @@ enum Commands {
     /// Runs a script from lpm.toml
     Run(commands::run::RunArgs),
 
-    /// Runs Roblox Studio, or opens this project's place in it
+    /// Set up and open this project's place in Roblox Studio
+    #[command(arg_required_else_help = true)]
     Studio {
         #[command(subcommand)]
-        command: Option<commands::studio::StudioCommand>,
+        command: commands::studio::StudioCommand,
     },
 
     /// Add a dependency to lpm.toml
