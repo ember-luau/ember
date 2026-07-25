@@ -80,6 +80,27 @@ lpm --version
 lpm self update    # pulls the newest release when there is one
 ```
 
+### With cargo
+
+```bash
+cargo install luaupm     # the crate is luaupm, the binary is lpm
+lpm self install         # optional, see below
+```
+
+The crate is published as `luaupm` because `lpm` was already taken on
+crates.io. The binary it installs is still `lpm`.
+
+Cargo puts it in `~/.cargo/bin`, which is already on your PATH, so lpm works
+straight away. `self install` is still worth running: pinned tools are invoked
+through shims in `~/.lpm/bin`, and that folder is what `self install` adds to
+your PATH. Without it, `lpm install` will happily install `rojo` and you will
+not be able to run it.
+
+One thing to know: `self install` also copies lpm into `~/.lpm/bin`, and on
+Windows that folder goes to the front of your PATH, so it wins over the cargo
+copy. Update with `lpm self update` from then on, or, if you would rather cargo
+stay in charge, skip `self install` and add `~/.lpm/bin` to your PATH yourself.
+
 ### From source
 
 ```bash
