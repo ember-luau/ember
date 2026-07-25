@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 /// Well-known tools addable by bare name; anything else must be "owner/repo".
 const SHORTHANDS: &[(&str, &str)] = &[
     ("darklua", "seaofvoices/darklua"),
-    ("lest", "ryancundiff/lest"),
+    ("lest", "luau-lest/lest"),
     ("luau-lsp", "johnnymorganz/luau-lsp"),
     ("rojo", "rojo-rbx/rojo"),
     ("stylua", "johnnymorganz/stylua"),
