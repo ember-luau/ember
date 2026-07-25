@@ -1,10 +1,10 @@
 use crate::error::Error;
-use crate::index::Index;
-use crate::manifest::{MANIFEST_FILE, Manifest, parse_version_req, split_package_name};
+use crate::project::manifest::edit::{ManifestDoc, Scope};
+use crate::project::manifest::{Manifest, parse_version_req, split_package_name};
+use crate::registry::index::Index;
 use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
-use std::fs;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
@@ -47,15 +47,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     // Edit the raw document instead of re-serializing `manifest` so comments
     // and formatting in lpm.toml survive.
-    let mut document: toml_edit::DocumentMut = fs::read_to_string(MANIFEST_FILE)?.parse()?;
-    let dependencies = document
-        .entry("dependencies")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(table) = dependencies.as_table_mut() else {
-        return Err(Error::ManifestInvalid(
-            "[dependencies] is not a table".to_string(),
-        ));
-    };
+    let mut document = ManifestDoc::open(Scope::Project)?;
 
     let mut entry = toml_edit::InlineTable::new();
     entry.insert("name", name.clone().into());
@@ -63,8 +55,10 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if let Some(key) = &index_key {
         entry.insert("index", key.clone().into());
     }
-    table.insert(&alias, toml_edit::value(entry));
-    fs::write(MANIFEST_FILE, document.to_string())?;
+    document
+        .table_or_create("dependencies")?
+        .insert(&alias, toml_edit::value(entry));
+    document.save()?;
 
     ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
     println!("Run `lpm install` to install it");

@@ -1,4 +1,4 @@
-use crate::http::error::HttpError;
+use crate::net::http::error::HttpError;
 use serde::de::DeserializeOwned;
 use std::io::Read;
 

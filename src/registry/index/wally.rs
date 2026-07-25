@@ -1,16 +1,18 @@
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
-use crate::manifest::{Environment, split_package_name};
+use crate::project::manifest::{Environment, split_package_name};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Version reported to wally registries, which reject clients that don't send
+/// a recent-enough Wally-Version header (HTTP 426 otherwise).
+pub const VERSION_HEADER: &str = "0.3.2";
 
 /// Root config.json of a wally index.
 #[derive(Deserialize)]
 pub struct Config {
     pub api: String,
-    #[serde(default)]
-    pub github_oauth_id: Option<String>,
 }
 
 /// One JSON line of a wally index package file. Dev-dependencies are left

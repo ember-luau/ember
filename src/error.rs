@@ -27,16 +27,18 @@ pub enum Error {
     #[error("GitHub authorization failed: {0}")]
     AuthFailed(String),
 
+    // TODO(api): replace with whatever the API's publish endpoint can fail
+    // with (auth, ownership, duplicate version, ...).
+    #[error("Publishing is not available yet: lpm's package API is being rebuilt")]
+    PublishUnavailable,
+
+    // TODO(api): lpm's own index used to be the fallback for dependencies that
+    // name no index. Once the API can resolve packages, this stops being an
+    // error and becomes "ask the API".
     #[error(
-        "Publishing needs a 'repository' under [package] in lpm.toml (a GitHub owner/repo or URL) to host release artifacts"
+        "No default index is configured; add one as `default` under [indices] in lpm.toml, or point the dependency at a named index"
     )]
-    MissingRepository,
-
-    #[error("Scope '{scope}' is owned by {owner}; publish under a scope you own")]
-    ScopeOwned { scope: String, owner: String },
-
-    #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
-    IndexNotPublishable(String),
+    NoDefaultIndex,
 
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,
@@ -95,6 +97,9 @@ pub enum Error {
     #[error("Invalid lpm.toml: {0}")]
     ManifestInvalid(String),
 
+    #[error("No script named '{0}' under [scripts] in lpm.toml")]
+    ScriptMissing(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -121,5 +126,5 @@ pub enum Error {
 
     // Uses the http errors made
     #[error(transparent)]
-    Http(#[from] crate::http::error::HttpError),
+    Http(#[from] crate::net::http::error::HttpError),
 }

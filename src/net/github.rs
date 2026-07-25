@@ -1,10 +1,19 @@
+//! GitHub's REST API, as much of it as lpm has ever needed.
+//!
+//! TODO(api): only the release endpoints (`get_release`, `get_latest_release`)
+//! are still called, by the tool installer and `lpm self update`. Everything
+//! below them — forks, branches, file writes, pull requests, asset uploads —
+//! belonged to the publish flow and is kept only as a reference while the lpm
+//! API is built. Delete what the API makes redundant.
+#![allow(dead_code)]
+
 const BASE_URL: &str = "https://api.github.com";
 const UPLOADS_URL: &str = "https://uploads.github.com";
 const JSON_HEADER_TYPE: &str = "application/vnd.github.v3+json";
 
 use crate::error::Error;
-use crate::http;
-use crate::http::error::HttpError;
+use crate::net::http;
+use crate::net::http::error::HttpError;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use http::responses;

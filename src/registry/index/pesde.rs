@@ -1,29 +1,26 @@
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
-use crate::manifest::{Environment, split_package_name};
+use crate::project::manifest::{Environment, split_package_name};
 use serde::Deserialize;
 use std::path::Path;
 use toml::Value;
 
-const DEFAULT_DOWNLOAD_TEMPLATE: &str =
+/// How a pesde registry serves package archives.
+const DOWNLOAD_TEMPLATE: &str =
     "{API_URL}/v1/packages/{PACKAGE}/{PACKAGE_VERSION}/{PACKAGE_TARGET}/archive";
 
-/// Root config.toml of a pesde-format index. `api` may be absent for lpm
-/// indices whose entries all carry direct download URLs.
+/// Root config.toml of a pesde-format index.
+///
+/// TODO(api): lpm's own index was this format plus a per-entry `download` url,
+/// an optional `download` template on the config, and a `private` flag (whose
+/// downloads carried the user's GitHub token). All three are gone; the API
+/// replaces them.
 #[derive(Deserialize)]
 pub struct Config {
+    /// Registry the download URLs are built against. Optional only so a
+    /// config.toml that predates it still parses.
     #[serde(default)]
     pub api: Option<String>,
-    /// Optional download URL template with {API_URL}, {PACKAGE},
-    /// {PACKAGE_VERSION}, and {PACKAGE_TARGET} placeholders.
-    #[serde(default)]
-    pub download: Option<String>,
-    /// Real pesde indices spell this `github_oauth_client_id`.
-    #[serde(default, alias = "github_oauth_client_id")]
-    pub github_oauth_id: Option<String>,
-    /// Downloads from this index need the user's GitHub token.
-    #[serde(default)]
-    pub private: bool,
 }
 
 pub fn load_config(root: &Path) -> Result<Config, Error> {
@@ -146,23 +143,11 @@ fn download_source(
     name: &str,
     candidate: &Candidate,
 ) -> Result<DownloadSource, Error> {
-    // lpm index entries carry a direct URL.
-    if let Some(url) = candidate.entry.get("download").and_then(Value::as_str) {
-        return Ok(DownloadSource::TarGz {
-            url: url.to_string(),
-        });
-    }
-
-    let template = config
-        .download
-        .as_deref()
-        .unwrap_or(DEFAULT_DOWNLOAD_TEMPLATE);
-    let mut url = template
+    let mut url = DOWNLOAD_TEMPLATE
         .replace("{PACKAGE}", &name.replace('/', "%2F"))
         .replace("{PACKAGE_VERSION}", &candidate.version.to_string());
 
-    // Only demand what the template actually references, so a custom lpm
-    // template can bake in its host or ignore targets entirely.
+    // Only demand what the template actually references.
     if url.contains("{API_URL}") {
         let Some(api) = config.api.as_deref() else {
             return Err(Error::IndexFetch {
@@ -308,21 +293,19 @@ mod tests {
     }
 
     #[test]
-    fn config_accepts_pesde_key_names() {
+    fn config_ignores_keys_lpm_does_not_use() {
+        // Real pesde configs carry oauth ids and other registry settings.
         let config: Config = toml::from_str(
             r#"
             api = "https://registry.example.com"
             github_oauth_client_id = "Iv1.abc123"
-            private = true
             "#,
         )
         .unwrap();
-        assert_eq!(config.github_oauth_id.as_deref(), Some("Iv1.abc123"));
-        assert!(config.private);
+        assert_eq!(config.api.as_deref(), Some("https://registry.example.com"));
 
-        let config: Config = toml::from_str(r#"github_oauth_id = "Iv1.xyz789""#).unwrap();
-        assert_eq!(config.github_oauth_id.as_deref(), Some("Iv1.xyz789"));
-        assert!(!config.private);
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.api, None);
     }
 
     #[test]
@@ -373,12 +356,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_download_url_from_default_template() {
+    fn builds_download_url_from_the_registry_template() {
         let config = Config {
             api: Some("https://registry.example.com/".to_string()),
-            download: None,
-            github_oauth_id: None,
-            private: false,
         };
         let candidate = Candidate {
             version: semver::Version::new(1, 0, 2),
@@ -404,79 +384,41 @@ mod tests {
     }
 
     #[test]
-    fn custom_template_needs_only_its_placeholders() {
-        let template = "https://cdn.example.com/{PACKAGE}/{PACKAGE_VERSION}.tar.gz";
-        let config = Config {
-            api: None,
-            download: Some(template.to_string()),
-            github_oauth_id: None,
-            private: false,
-        };
+    fn entries_without_an_api_cannot_be_downloaded() {
+        // TODO(api): entries used to be able to carry their own `download`
+        // url, which is what made lpm's registry-less index work.
+        let config = Config { api: None };
         let candidate = Candidate {
             version: semver::Version::new(1, 2, 3),
-            target: None,
-            environment: None,
+            target: Some("luau".to_string()),
+            environment: Some(Environment::Luau),
             entry: parse_entries(""),
         };
 
-        let source = download_source(
-            &config,
-            "https://example.com/index",
-            "scope/pkg",
-            &candidate,
-        )
-        .unwrap();
-        let DownloadSource::TarGz { url } = source else {
-            panic!("expected tarball source");
-        };
-        assert_eq!(url, "https://cdn.example.com/scope%2Fpkg/1.2.3.tar.gz");
+        assert!(matches!(
+            download_source(
+                &config,
+                "https://example.com/index",
+                "scope/pkg",
+                &candidate
+            ),
+            Err(Error::IndexFetch { .. })
+        ));
     }
 
     #[test]
-    fn prefers_direct_download_urls() {
-        let config = Config {
-            api: None,
-            download: None,
-            github_oauth_id: None,
-            private: false,
-        };
-        let candidate = Candidate {
-            version: semver::Version::new(0, 1, 0),
-            target: None,
-            environment: Some(Environment::Luau),
-            entry: parse_entries(r#"download = "https://example.com/pkg.tar.gz""#),
-        };
-
-        let source = download_source(
-            &config,
-            "https://example.com/index",
-            "scope/pkg",
-            &candidate,
-        )
-        .unwrap();
-        let DownloadSource::TarGz { url } = source else {
-            panic!("expected tarball source");
-        };
-        assert_eq!(url, "https://example.com/pkg.tar.gz");
-    }
-
-    #[test]
-    fn resolves_lpm_entries_from_disk() {
-        let index = TempIndex::new("lpm-format", "");
+    fn resolves_top_level_entries_from_disk() {
+        // Entry keys carry the target after the version; older files put the
+        // entries at the top level instead of under [entries].
+        let index = TempIndex::new("top-level", r#"api = "https://registry.example.com""#);
         index.write_package(
             "scope/pkg",
             r#"
-            ["0.1.0"]
-            download = "https://example.com/pkg-0.1.0.tar.gz"
-
-            ["0.1.0".target]
+            ["0.1.0 luau".target]
             environment = "luau"
             lib = "init.luau"
 
-            ["0.2.0"]
-            download = "https://example.com/pkg-0.2.0.tar.gz"
-
-            ["0.2.0".target]
+            ["0.2.0 luau".target]
             environment = "luau"
             lib = "init.luau"
             "#,
@@ -498,7 +440,10 @@ mod tests {
         let DownloadSource::TarGz { url } = resolved.source else {
             panic!("expected tarball source");
         };
-        assert_eq!(url, "https://example.com/pkg-0.2.0.tar.gz");
+        assert_eq!(
+            url,
+            "https://registry.example.com/v1/packages/scope%2Fpkg/0.2.0/luau/archive"
+        );
     }
 
     #[test]

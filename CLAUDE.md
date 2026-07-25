@@ -1,7 +1,14 @@
 # lpm — Luau Package Manager (CLI)
 
-Rust CLI (`lpm`) for managing Luau packages across ecosystems: our own index
-(luaupm), pesde indices, and Wally indices. Windows is the primary dev platform.
+Rust CLI (`lpm`) for managing Luau packages across ecosystems: pesde indices
+and Wally indices today, lpm's own package API once it exists. Windows is the
+primary dev platform.
+
+**In flight:** lpm's own index (the luaupm git index) and the GitHub-based
+publish flow were deliberately gutted; a first-party API replaces both. Every
+hole is marked `TODO(api)` in the source — grep for it. `lpm publish` packs and
+then stops at `PublishUnavailable`, and a dependency that names no index errors
+with `NoDefaultIndex` unless the project defines a `default` one.
 
 ## Build / test / run
 
@@ -26,27 +33,27 @@ cargo clippy --all-targets   # clippy lints; keep at zero warnings
 ## Commands
 
 - `init` — interactive manifest wizard; also git-ignores `packages/`.
+- `run <name>` — runs the `[scripts]` entry of that name through the platform
+  shell (sh -c / cmd /C), forwarding a non-zero exit code.
+- `studio` — launches Roblox Studio (protocol handler on Windows, `open -a`
+  on macOS, Vinegar via flatpak on Linux).
 - `add <scope>/<name> [--version <req>] [--index <key>] [--alias <name>]` —
   resolves first (fails before touching the manifest), then edits `lpm.toml`
   via `toml_edit` (preserves comments/formatting). Without `--index` it asks
-  via a text prompt; empty input = default luaupm index.
+  via a text prompt; empty input means the `default` index, which now has to be
+  defined under [indices].
 - `install` / `i` — re-resolves everything each run (so `version = "^"` picks
   up new releases), wipes and rebuilds each environment's output folder,
   writes `lpm.lock`. `--locked` installs exactly from the lock, no resolution.
 - `publish [--dry-run] [--index <key>]` — packs the project into a .tar.gz
   (optional `include`/`exclude` path lists under `[package]`; lpm.toml always
-  ships), uploads it as an asset on a GitHub release tagged `v{version}` of
-  `[package].repository` (required for publishing), then forks the index
-  repo, writes the entry at `<scope>/<name>` (pesde-style key
-  `"<version> <target>"` with lpm's `download` URL plus target/dependencies),
-  and opens a PR. First publish to a scope adds `<scope>/owners.toml` in the
-  same PR (see "Index formats"). `--dry-run` prints the file list and index
-  entry without auth or network mutations.
-- GitHub auth: OAuth device flow (`auth::ensure_logged_in`) using
-  `github_oauth_id` from the target index's config.toml (pesde's
-  `github_oauth_client_id` key accepted as an alias); token cached at
-  `~/.lpm/credentials.toml` (0600 on unix). Index config with no oauth id →
-  `IndexNotPublishable`.
+  ships), then stops: uploading is the API's job. `--dry-run` prints the
+  archive name, its size, and the file list. Everything after packing (upload,
+  index entry, scope ownership) was removed; see the TODO(api) block at the top
+  of `commands/publish.rs` for what the old flow did.
+- GitHub auth: OAuth device flow (`net::auth::ensure_logged_in`) with the token
+  cached at `~/.lpm/credentials.toml` (0600 on unix). Nothing calls it right
+  now — it survives in case the API accepts a GitHub token.
 - `self install|update|uninstall` — self-management (PATH edits on Windows via
   winreg; update pulls GitHub releases from luaupm/cli).
 
@@ -74,14 +81,22 @@ lute-packages-out   = "packages/lute"
 [indices]
 wally = "https://github.com/UpliftGames/wally-index"
 pesde = "https://github.com/pesde-pkg/index"
-# `default` key overrides the built-in default index
+default = "https://github.com/pesde-pkg/index"  # used by deps naming no index
 
 [dependencies]
 Chief = { name = "chief/core", version = "^" }                # default index
 Other = { name = "user/pkg", version = "^", index = "wally" } # named index
+
+[tools]
+rojo = "rojo-rbx/rojo@7.7.0"      # owner/repo@version, key is the shim alias
+
+[scripts]                          # run with `lpm run <key>`
+build = "rojo build -o game.rbxl"
 ```
 
-- Default index when none specified: `https://github.com/luaupm/index`.
+- A dependency naming no index uses the `default` key under [indices]; with no
+  such key it fails with `NoDefaultIndex` (TODO(api): the API becomes the
+  fallback).
 - `version = "^"` (or `*`) means "latest"; otherwise standard semver reqs.
 - Environments translate: pesde `roblox`→shared, `roblox_server`→server;
   wally realm `shared`/`server` map directly.
@@ -114,22 +129,13 @@ packages/shared/              <- per-env output (configurable via [config])
 - **pesde** (root `config.toml`): package files are TOML keyed by
   `"<version> <target>"`. Tarballs from
   `{api}/v1/packages/{name urlencoded}/{version}/{target}/archive`.
-- **lpm (ours)**: pesde format + per-entry `download` URL (direct .tar.gz), so
-  no registry server is needed. Index config may carry a `download` template
-  with `{API_URL}`/`{PACKAGE}`/`{PACKAGE_VERSION}`/`{PACKAGE_TARGET}`.
-- Publishable indices carry a `github_oauth_id` in config.toml. Scope
-  ownership: `<scope>/owners.toml` (`owners = ["login"]`) — the first
-  publisher of a scope adds it, and publishing to a scope whose owners file
-  omits you fails with `ScopeOwned`. Enforcement beyond the CLI check is the
-  index repo's concern.
-- **Private indices** (early, back-burner): pesde-format index with
-  `private = true` in config.toml (reference: github.com/luaupm/pindex).
-  Cloning uses the user's git credentials as always; `index::download` takes
-  an optional token, attached as `Bearer` + `Accept:
-  application/octet-stream` ONLY for GitHub-owned hosts (github.com,
-  api.github.com, uploads.github.com, objects.githubusercontent.com,
-  raw.githubusercontent.com). `install` passes the stored token when logged
-  in.
+- **lpm's own format is gone** (TODO(api)): it was the pesde format plus a
+  per-entry `download` URL and an optional config `download` template, which is
+  what let it work with no registry server. Also removed with it: scope
+  ownership (`<scope>/owners.toml`), `github_oauth_id` in index configs, and
+  private indices (`private = true`, whose downloads carried the user's GitHub
+  token as a Bearer header and only ever to GitHub-owned hosts — keep that
+  restraint when the API needs credentials).
 - Indices are git repos, shallow-cloned/pulled to `~/.lpm/index-cache/`;
   offline falls back to the stale cache with a warning.
 
@@ -143,21 +149,55 @@ packages/shared/              <- per-env output (configurable via [config])
 
 ## Module map
 
-- `src/manifest.rs` — lpm.toml schema, `Environment` enum + translations,
-  `packages_out()`, version-req parsing (`^` special case).
-- `src/index/mod.rs` — git cache, kind detection, download/extract dispatch.
-- `src/index/wally.rs`, `src/index/pesde.rs` — per-format parsing/resolution.
-- `src/resolver.rs` — BFS over the dep graph, carries link names.
-- `src/lockfile.rs` — `lpm.lock` (TOML, `version = 1`, `[[package]]` entries
-  with baked download URLs so `--locked` never consults an index).
-- `src/auth.rs` — GitHub OAuth device flow + credential store
-  (`~/.lpm/credentials.toml`).
-- `src/publish/` — `pack.rs` (tarball packing), `index_entry.rs` (index-entry
-  + owners.toml generation).
-- `src/commands/` — `init`, `add`, `install`, `publish`, `self_cmd`.
-- `src/error.rs` — single `thiserror` enum for the whole crate.
-- `src/ui.rs` — theming (see below).
-- New deps: `indicatif` 0.18, `base64` 0.22.
+Source is grouped by what code talks to: the project's own files, remote
+package sources, the network, the local machine, and the CLI surface.
+
+**`src/project/`** — the files a project owns.
+- `manifest/mod.rs` — lpm.toml schema, `Environment` enum + translations,
+  `packages_out()`, `script()`, version-req parsing (`^` special case).
+- `manifest/edit.rs` — `ManifestDoc`/`Scope`: the toml_edit side of editing
+  lpm.toml or the global tools file (open, get/create a table, write back).
+  Every command that edits a manifest goes through it, so comments and
+  formatting survive; nothing else should hand-roll the toml_edit dance.
+- `lockfile.rs` — `lpm.lock` (TOML, `version = 1`, `[[package]]` entries with
+  baked download URLs so `--locked` never consults an index).
+- `package.rs` — reading an *installed* package: entry point detection,
+  environment detection, link-file contents, single-dir flattening.
+- `hooks.rs` — stub: lifecycle names that will map to `[scripts]` entries.
+
+**`src/registry/`** — where packages come from (the layer the API replaces).
+- `index/mod.rs` — git cache, kind detection, download/extract dispatch.
+- `index/wally.rs`, `index/pesde.rs` — per-format parsing/resolution.
+- `resolver.rs` — BFS over the dep graph, carries link names.
+- `pack.rs` — tarball packing for publish.
+
+**`src/net/`** — remote services.
+- `http/` — ureq wrapper (`get_json`, `post_form`, `get_bytes`, ...), error
+  mapping, response shapes.
+- `github.rs` — GitHub REST client. Only the release endpoints are still
+  called; the rest is leftover from publishing (TODO(api)).
+- `auth.rs` — GitHub OAuth device flow + credential store (TODO(api): unused).
+
+**`src/sys/`** — the local machine.
+- `paths.rs` — the whole `~/.lpm` layout (bin, tools, tools.toml,
+  credentials.toml, index-cache) plus `same_file`/`with_suffix`. Nothing else
+  builds those paths by hand.
+- `process.rs` — handing off to other programs: `shell()` builds a sh/cmd
+  command, `exec()` replaces the lpm process (unix) or waits, `wait()` always
+  waits and returns the exit code. On Windows the script is passed with
+  `raw_arg`, not `arg`: std escapes inner quotes MSVCRT-style (`\"`) and
+  cmd.exe does not understand that, so scripts with quoted paths break.
+- `git.rs` — `run` (index clone/pull) and `output` (init's prompt defaults),
+  plus remote-URL normalization.
+
+**`src/tools/`** — GitHub-released binaries a project pins.
+- `mod.rs` — storage layout, install, shorthand names.
+- `archive.rs` — asset selection per os/arch, unpacking, executable picking.
+- `shim.rs` — shims, alias resolution, which tools a scope pins.
+
+**Top level** — `main.rs` (CLI wiring), `commands/` (one file per subcommand),
+`error.rs` (single `thiserror` enum for the whole crate), `ui.rs` (theming;
+see below).
 
 ## UI conventions
 
@@ -165,9 +205,11 @@ packages/shared/              <- per-env output (configurable via [config])
   (inquire render config, clap help styles, error/success lines).
 - Errors print as accent `✗ <message>` via `ui::print_error`; successes as
   accent `✓` + default text via `ui::print_success`.
-- Progress: `ui::progress_bar` / `ui::spinner` (indicatif, accent-styled —
-  ACCENT stays the single color source). `ui::success_line` is the `✓ `
-  string, for printing through a live bar.
+- Progress: `ui::with_spinner` / `ui::with_progress` wrap work so the spinner
+  or bar is always cleared, including on errors; `ui::progress_bar` /
+  `ui::spinner` are the raw builders (indicatif, accent-styled — ACCENT stays
+  the single color source). `ui::success_line` is the `✓ ` string, for printing
+  through a live bar, and `ui::plural` handles count suffixes.
 - Every successful command ends with a dimmed "Done in 142ms" via
   `ui::print_elapsed`; `ui::format_duration` renders "<1ms", "142ms",
   "1.42s", "1m 12s". Tool-shim dispatch prints no timer.

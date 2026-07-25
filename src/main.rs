@@ -1,13 +1,9 @@
-mod auth;
 mod commands;
 mod error;
-mod github;
-mod http;
-mod index;
-mod lockfile;
-mod manifest;
-mod publish;
-mod resolver;
+mod net;
+mod project;
+mod registry;
+mod sys;
 mod tools;
 mod ui;
 
@@ -25,6 +21,13 @@ struct Cli {
 enum Commands {
     /// Create an lpm.toml manifest in the current directory
     Init,
+
+    /// Runs a script from lpm.toml
+    Run(commands::run::RunArgs),
+
+    /// Runs Roblox Studio
+    Studio,
+
     /// Add a dependency to lpm.toml
     Add(commands::add::AddArgs),
 
@@ -51,8 +54,8 @@ fn main() {
     // Tool shims are copies of lpm named after their alias; invoked under
     // such a name, dispatch to the tool the surrounding manifest pins
     // instead of running the CLI.
-    if let Some(alias) = tools::shim_alias() {
-        match tools::run_shim(&alias) {
+    if let Some(alias) = tools::shim::shim_alias() {
+        match tools::shim::run(&alias) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 ui::print_error(&err.to_string());
@@ -72,6 +75,8 @@ fn main() {
         Commands::Publish(args) => commands::publish::run(args),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),
+        Commands::Studio => commands::studio::run(),
+        Commands::Run(args) => commands::run::run(args),
     };
 
     match result {
