@@ -181,6 +181,7 @@ pub fn run() -> Result<(), Error> {
         dependencies: Default::default(),
         tools: Default::default(),
         scripts: Default::default(),
+        studio: Default::default(),
     };
 
     std::fs::write(manifest_path, toml::to_string(&manifest)?)?;

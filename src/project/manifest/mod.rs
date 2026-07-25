@@ -27,6 +27,9 @@ pub struct Manifest {
     /// Shell commands runnable with `lpm run <name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scripts: BTreeMap<String, String>,
+    /// What `lpm studio open` opens in Roblox Studio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub studio: Option<Studio>,
 }
 
 /// Per-environment install locations; each defaults to "packages/<env>".
@@ -202,6 +205,76 @@ impl Environment {
 impl fmt::Display for Environment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.dir_name())
+    }
+}
+
+/// The [studio] table: either a published place (both IDs) or a local place
+/// file.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct Studio {
+    /// Universe (experience) ID the place belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub universe: Option<u64>,
+    /// Place ID inside the universe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub place: Option<u64>,
+    /// Path to a .rbxl/.rbxlx place file, relative to lpm.toml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Anything else written under [studio]. The table is hand-edited often
+    /// and a typo'd key would otherwise read as "unconfigured", so `target()`
+    /// reports these — but only there, keeping a [studio] typo from failing
+    /// unrelated commands the way `deny_unknown_fields` would.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
+}
+
+/// A validated [studio] table: the one thing `lpm studio open` should open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StudioTarget {
+    /// A published place, opened through the roblox-studio: protocol.
+    Place { universe: u64, place: u64 },
+    /// A local place file, opened through the OS file association.
+    File(String),
+}
+
+impl Studio {
+    /// Reduces the table to what to open. Everything that can be wrong with a
+    /// hand-written [studio] is caught here, before any launch attempt.
+    pub fn target(&self) -> Result<StudioTarget, Error> {
+        if let Some((key, _)) = self.unknown.first_key_value() {
+            return Err(Error::StudioUnknownKey(key.clone()));
+        }
+        if self.file.is_some() && (self.universe.is_some() || self.place.is_some()) {
+            return Err(Error::StudioConflict);
+        }
+
+        match (self.file.as_deref(), self.universe, self.place) {
+            (Some(file), ..) => {
+                let file = file.trim();
+                if file.is_empty() {
+                    return Err(Error::StudioEmptyFile);
+                }
+                Ok(StudioTarget::File(file.to_string()))
+            }
+            (None, Some(universe), Some(place)) => {
+                for (key, id) in [("universe", universe), ("place", place)] {
+                    if id == 0 {
+                        return Err(Error::StudioInvalidId(key));
+                    }
+                }
+                Ok(StudioTarget::Place { universe, place })
+            }
+            (None, Some(_), None) => Err(Error::StudioIncomplete {
+                has: "universe",
+                needs: "place",
+            }),
+            (None, None, Some(_)) => Err(Error::StudioIncomplete {
+                has: "place",
+                needs: "universe",
+            }),
+            (None, None, None) => Err(Error::StudioUnconfigured),
+        }
     }
 }
 
@@ -685,6 +758,147 @@ mod tests {
         let serialized = toml::to_string(&bare).unwrap();
         assert!(!serialized.contains("include"));
         assert!(!serialized.contains("exclude"));
+    }
+
+    #[test]
+    fn parses_studio_place_ids() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [studio]
+            universe = 13058
+            place = 1818
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest.studio.unwrap().target().unwrap(),
+            StudioTarget::Place {
+                universe: 13058,
+                place: 1818
+            }
+        );
+    }
+
+    #[test]
+    fn parses_studio_file() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [studio]
+            file = "place.rbxl"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest.studio.unwrap().target().unwrap(),
+            StudioTarget::File("place.rbxl".to_string())
+        );
+    }
+
+    #[test]
+    fn studio_target_catches_hand_edit_mistakes() {
+        let studio = |universe, place, file: Option<&str>| Studio {
+            universe,
+            place,
+            file: file.map(str::to_string),
+            ..Default::default()
+        };
+
+        // Both forms at once is ambiguous, even when the ID half is partial.
+        assert!(matches!(
+            studio(Some(1), Some(2), Some("a.rbxl")).target(),
+            Err(Error::StudioConflict)
+        ));
+        assert!(matches!(
+            studio(Some(1), None, Some("a.rbxl")).target(),
+            Err(Error::StudioConflict)
+        ));
+
+        // One ID without the other.
+        assert!(matches!(
+            studio(Some(1), None, None).target(),
+            Err(Error::StudioIncomplete {
+                has: "universe",
+                needs: "place"
+            })
+        ));
+        assert!(matches!(
+            studio(None, Some(2), None).target(),
+            Err(Error::StudioIncomplete {
+                has: "place",
+                needs: "universe"
+            })
+        ));
+
+        // Nothing at all, zero IDs, and a blank file path.
+        assert!(matches!(
+            studio(None, None, None).target(),
+            Err(Error::StudioUnconfigured)
+        ));
+        assert!(matches!(
+            studio(Some(0), Some(2), None).target(),
+            Err(Error::StudioInvalidId("universe"))
+        ));
+        assert!(matches!(
+            studio(Some(1), Some(0), None).target(),
+            Err(Error::StudioInvalidId("place"))
+        ));
+        assert!(matches!(
+            studio(None, None, Some("   ")).target(),
+            Err(Error::StudioEmptyFile)
+        ));
+
+        // Surrounding whitespace in the path is tolerated.
+        assert_eq!(
+            studio(None, None, Some(" place.rbxl ")).target().unwrap(),
+            StudioTarget::File("place.rbxl".to_string())
+        );
+    }
+
+    #[test]
+    fn studio_flags_unknown_keys_without_failing_the_manifest() {
+        // A typo'd key must not break `Manifest::load` — that would take
+        // `install`/`add`/`run` down with it — but `target()` names it.
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [studio]
+            universeId = 13058
+            place = 1818
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            manifest.studio.unwrap().target(),
+            Err(Error::StudioUnknownKey(key)) if key == "universeId"
+        ));
+    }
+
+    #[test]
+    fn studio_stays_absent_when_unset() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+            "#,
+        )
+        .unwrap();
+        assert!(manifest.studio.is_none());
+        assert!(!toml::to_string(&manifest).unwrap().contains("studio"));
     }
 
     #[test]
