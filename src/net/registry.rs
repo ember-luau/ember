@@ -19,6 +19,9 @@ pub const API_URL: &str = "https://api.luaupm.com";
 so an oversized archive fails before uploading. */
 pub const MAX_ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 
+/// The API rejects [package] descriptions longer than this (400).
+pub const MAX_DESCRIPTION_CHARS: usize = 200;
+
 /// Every API error is `{"error": "<human readable message>"}`.
 #[derive(Deserialize)]
 struct ErrorBody {

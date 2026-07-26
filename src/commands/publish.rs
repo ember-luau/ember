@@ -105,6 +105,9 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
         )));
     }
 
+    // the API 400s descriptions past its cap; catch that before packing too
+    validate_description(manifest.package.description.as_deref())?;
+
     /* workspace deps become registry ones in the archive's manifest;
     the on-disk lpm.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
@@ -218,6 +221,21 @@ fn convert_workspace_dependencies(
     Ok(())
 }
 
+/// registry caps descriptions at 200 chars; counted as chars, not bytes.
+fn validate_description(description: Option<&str>) -> Result<(), Error> {
+    let Some(description) = description else {
+        return Ok(());
+    };
+    let length = description.chars().count();
+    if length > registry::MAX_DESCRIPTION_CHARS {
+        return Err(Error::ManifestInvalid(format!(
+            "description is {length} characters; the registry allows at most {}",
+            registry::MAX_DESCRIPTION_CHARS
+        )));
+    }
+    Ok(())
+}
+
 fn upload(token: &str, archive: &[u8]) -> Result<(), Error> {
     ui::with_spinner("Uploading package", || registry::publish(token, archive))
 }
@@ -309,5 +327,18 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn descriptions_past_the_cap_are_rejected() {
+        assert!(validate_description(None).is_ok());
+        assert!(validate_description(Some("short and sweet")).is_ok());
+        assert!(validate_description(Some(&"a".repeat(200))).is_ok());
+        assert!(matches!(
+            validate_description(Some(&"a".repeat(201))),
+            Err(Error::ManifestInvalid(_))
+        ));
+        // chars, not bytes: 200 two-byte chars are still fine
+        assert!(validate_description(Some(&"é".repeat(200))).is_ok());
     }
 }
