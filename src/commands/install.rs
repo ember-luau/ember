@@ -166,15 +166,11 @@ fn install_packages(
 
         match package::entry_point(&storage) {
             Some(entry) => {
+                let types = link_types(&storage, &entry, &job.name, bar);
                 let link_path = out.join(format!("{}.luau", job.link));
-                fs::write(&link_path, package::link_contents(&folder, &entry))?;
+                fs::write(&link_path, package::link_contents(&folder, &entry, &types))?;
             }
-            None => bar.suspend(|| {
-                eprintln!(
-                    "warning: could not find an entry point for {}; no link file generated",
-                    job.name
-                )
-            }),
+            None => warn_no_entry(&job.name, bar),
         }
 
         ui::bar_println(
@@ -195,6 +191,31 @@ fn install_packages(
         });
     }
     Ok(locked)
+}
+
+/// Exported types must be restated in the link file to survive the wrapper;
+/// a package whose entry point can't be parsed still links, just without
+/// its types.
+fn link_types(package_dir: &Path, entry: &str, name: &str, bar: &ProgressBar) -> Vec<String> {
+    let Some(source) =
+        package::entry_source(package_dir, entry).and_then(|path| fs::read_to_string(path).ok())
+    else {
+        return Vec::new();
+    };
+    package::exported_types(&source).unwrap_or_else(|| {
+        bar.suspend(|| {
+            eprintln!(
+                "warning: could not parse the entry point of {name}; its types are not re-exported"
+            )
+        });
+        Vec::new()
+    })
+}
+
+fn warn_no_entry(name: &str, bar: &ProgressBar) {
+    bar.suspend(|| {
+        eprintln!("warning: could not find an entry point for {name}; no link file generated")
+    });
 }
 
 fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(), Error> {
