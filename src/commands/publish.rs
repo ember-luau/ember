@@ -264,7 +264,7 @@ mod tests {
         write(
             "lpm.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace_members = [\"packages/*\"]\n",
+             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
             "packages/core/lpm.toml",

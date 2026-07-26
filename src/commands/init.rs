@@ -185,7 +185,7 @@ pub fn run() -> Result<(), Error> {
             main: non_empty(main),
             includes: Vec::new(),
             excludes: Vec::new(),
-            workspace_members: Vec::new(),
+            workspace: Vec::new(),
         }),
         config: Default::default(),
         indices: Default::default(),

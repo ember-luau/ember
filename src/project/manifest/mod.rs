@@ -91,17 +91,23 @@ pub struct Package {
 pub struct Target {
     pub environment: Environment,
     /// Entry point of the package, e.g. "src/init.luau". Not needed when
-    /// `workspace_members` is set — a workspace root has no code of its own
-    /// to require.
+    /// `workspace` is set — a workspace root has no code of its own to
+    /// require.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
     /// Globs (relative to this manifest) naming the member projects of a
-    /// workspace, pesde-style: `workspace_members = ["packages/*"]` (`!`
-    /// negates, a literal "." includes the root). A manifest with members is
-    /// a workspace root; `lpm publish`/`lpm install` there run for every
-    /// member. Read through [`Manifest::workspace_members`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_members: Vec<String>,
+    /// workspace: `workspace = ["packages/*"]` (`!` negates, a literal "."
+    /// includes the root). A manifest with members is a workspace root;
+    /// `lpm publish`/`lpm install` there run for every member. The pesde
+    /// spelling `workspace_members` is accepted as an alias. Read through
+    /// [`Manifest::workspace_members`].
+    #[serde(
+        rename = "workspace",
+        alias = "workspace_members",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub workspace: Vec<String>,
     /// What goes into the published archive: plain file or directory paths
     /// (a directory covers everything under it) or globs (`src/*`). Empty
     /// means "everything sensible" — the default walk minus VCS/output dirs.
@@ -382,12 +388,12 @@ impl Manifest {
         Self::load_from(Path::new(MANIFEST_FILE))
     }
 
-    /// Member globs of this workspace, from `[target] workspace_members`.
-    /// Empty means this project is not a workspace root.
+    /// Member globs of this workspace, from `[target] workspace`. Empty
+    /// means this project is not a workspace root.
     pub fn workspace_members(&self) -> &[String] {
         self.target
             .as_ref()
-            .map(|target| target.workspace_members.as_slice())
+            .map(|target| target.workspace.as_slice())
             .unwrap_or(&[])
     }
 
@@ -650,7 +656,7 @@ mod tests {
 
             [target]
             environment = "shared"
-            workspace_members = ["packages/*", "!packages/legacy"]
+            workspace = ["packages/*", "!packages/legacy"]
             "#,
         )
         .unwrap();
@@ -658,6 +664,21 @@ mod tests {
         // A root needs a [target] but no `main` — members carry the code.
         assert!(root.target.as_ref().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
+
+        // pesde's spelling still parses, so converted repos keep working.
+        let aliased: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "chief/root"
+            version = "0.0.0"
+
+            [target]
+            environment = "shared"
+            workspace_members = ["packages/*"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(aliased.workspace_members(), ["packages/*"]);
 
         let member: Manifest = toml::from_str(
             r#"
@@ -695,7 +716,7 @@ mod tests {
         assert!(plain.workspace_members().is_empty());
         let serialized = toml::to_string(&plain).unwrap();
         assert!(!serialized.contains("private"));
-        assert!(!serialized.contains("workspace_members"));
+        assert!(!serialized.contains("workspace"));
     }
 
     #[test]

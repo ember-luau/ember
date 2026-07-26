@@ -1,9 +1,9 @@
 //! Workspaces, pesde-style: a root lpm.toml lists member project directories
-//! under top-level `workspace_members` (globs), members depend on each other
-//! with `{ workspace = "scope/name" }` specifiers, and `lpm publish` /
+//! under `[target] workspace` (globs), members depend on each other with
+//! `{ workspace = "scope/name" }` specifiers, and `lpm publish` /
 //! `lpm install` at the root run for every member. Nested workspaces are not
-//! a thing: a member's own `workspace_members` are never iterated from the
-//! outer root, matching pesde.
+//! a thing: a member's own member globs are never iterated from the outer
+//! root, matching pesde.
 
 use crate::error::Error;
 use crate::project::manifest::{MANIFEST_FILE, Manifest};
@@ -19,7 +19,7 @@ pub struct Member {
 
 pub struct Workspace {
     /// Absolute path of the root — the directory whose manifest lists
-    /// `workspace_members`.
+    /// member globs under `[target] workspace`.
     pub root: PathBuf,
     /// Members in path order. Includes the root itself only when the globs
     /// contain a literal "." (pesde's self-reference).
@@ -27,9 +27,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Opens the workspace rooted at `root`; its manifest must define
-    /// `workspace_members`. Every matched directory must be an lpm project —
-    /// a member without lpm.toml is an error, same as pesde.
+    /// Opens the workspace rooted at `root`; its manifest must define member
+    /// globs. Every matched directory must be an lpm project — a member
+    /// without lpm.toml is an error, same as pesde.
     pub fn open(root: &Path) -> Result<Self, Error> {
         let root = absolute(root)?;
         let manifest = Manifest::load_from(&root.join(MANIFEST_FILE))?;
@@ -200,7 +200,7 @@ mod tests {
     fn write_workspace(base: &Path) {
         let root = format!(
             "{}private = true\n\n[target]\nenvironment = \"shared\"\n\
-             workspace_members = [\"packages/*\", \"!packages/skipped\"]\n",
+             workspace = [\"packages/*\", \"!packages/skipped\"]\n",
             manifest("acme/root", "0.0.0")
         );
         write(base, "lpm.toml", &root);
@@ -246,7 +246,7 @@ mod tests {
             &base,
             "lpm.toml",
             &format!(
-                "{}\n[target]\nenvironment = \"shared\"\nworkspace_members = [\"packages/*\"]\n",
+                "{}\n[target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
                 manifest("acme/root", "0.0.0")
             ),
         );

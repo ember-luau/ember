@@ -50,14 +50,14 @@ pub enum Error {
     NoWorkspaceMember(String),
 
     #[error(
-        "'{0}' is a workspace dependency, but this project is not part of a workspace (no ancestor lpm.toml lists it under workspace_members)"
+        "'{0}' is a workspace dependency, but this project is not part of a workspace (no ancestor lpm.toml lists it under [target] workspace)"
     )]
     NotInWorkspace(String),
 
     #[error("Workspace member {} has no lpm.toml", .0.display())]
     WorkspaceMemberMissingManifest(PathBuf),
 
-    #[error("Invalid workspace_members glob '{glob}': {reason}")]
+    #[error("Invalid workspace glob '{glob}': {reason}")]
     WorkspaceGlobInvalid { glob: String, reason: String },
 
     #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]

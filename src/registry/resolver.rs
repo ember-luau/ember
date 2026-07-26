@@ -228,7 +228,7 @@ mod tests {
             &base,
             "lpm.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace_members = [\"packages/*\"]\n",
+             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
             &base.join("packages/core"),
@@ -265,7 +265,7 @@ mod tests {
         // member list (no ancestor needed), and transitive workspace deps of
         // members come along.
         let root_manifest_text = "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace_members = [\"packages/*\"]\n\n\
+             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";
         write(&base, "lpm.toml", root_manifest_text);
         let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
