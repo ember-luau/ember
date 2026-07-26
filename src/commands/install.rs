@@ -245,12 +245,12 @@ fn install_packages(
 
         match package::entry_point(&storage) {
             Some(entry) => {
-                /* wally packages talk roblox instance paths
-                (require(script.Parent.X)); rewrite what we can into ./ string
-                requires so they work without an instance tree */
-                if matches!(job.source, index::DownloadSource::Zip { .. }) {
-                    requires::rewrite_instance_requires(&storage, &entry)?;
-                }
+                /* packages from any index can talk roblox instance paths
+                (require(script.Parent.X)), wally stuff especially but ports
+                published to pesde or our index too; rewrite what we can into
+                string requires so they work without an instance tree. string
+                require packages come through unchanged */
+                requires::rewrite_instance_requires(&storage, &entry)?;
                 let types = link_types(&storage, &entry, &job.name, bar);
                 let link_path = out.join(format!("{}.luau", job.link));
                 fs::write(&link_path, package::link_contents(&folder, &entry, &types))?;

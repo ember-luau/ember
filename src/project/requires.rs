@@ -78,8 +78,7 @@ pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usiz
             depth_in_module: dir_in_module,
             depth_in_package: dir_in_package,
         };
-        let (updated, count) = rewrite_source(&source, &context);
-        if count > 0 {
+        if let Some((updated, count)) = rewrite_source(&source, &context) {
             fs::write(&file, updated)?;
             rewritten += count;
         }
@@ -119,11 +118,39 @@ fn luau_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     Ok(files)
 }
 
-/// rewrites all mappable chains in one file. returns (new source, count).
-fn rewrite_source(source: &str, context: &FileContext) -> (String, usize) {
+/** rewrites all mappable chains in one file. None = nothing to change, and
+that path allocates nothing: the scan only records ranges, the new string
+only gets built when a chain actually matched. matters because this runs
+over every file of every installed package. */
+fn rewrite_source(source: &str, context: &FileContext) -> Option<(String, usize)> {
+    // most files have no requires at all, bail before even scanning
+    if !source.contains("require") {
+        return None;
+    }
+
+    let chains = find_chains(source, context);
+    if chains.is_empty() {
+        return None;
+    }
+
+    // one splice pass over the recorded ranges
     let mut output = String::with_capacity(source.len());
-    let mut count = 0;
+    let mut cursor = 0;
+    for (start, end, path) in &chains {
+        output.push_str(&source[cursor..*start]);
+        output.push_str("require(\"");
+        output.push_str(path);
+        output.push_str("\")");
+        cursor = *end;
+    }
+    output.push_str(&source[cursor..]);
+    Some((output, chains.len()))
+}
+
+/// scan pass: finds every mappable chain as (start, end, replacement path).
+fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String)> {
     let bytes = source.as_bytes();
+    let mut found = Vec::new();
     let mut position = 0;
 
     while position < bytes.len() {
@@ -131,51 +158,35 @@ fn rewrite_source(source: &str, context: &FileContext) -> (String, usize) {
         never touched */
         match bytes[position] {
             b'-' if bytes.get(position + 1) == Some(&b'-') => {
-                let end = skip_comment(bytes, position);
-                output.push_str(&source[position..end]);
-                position = end;
+                position = skip_comment(bytes, position);
             }
             b'"' | b'\'' => {
-                let end = skip_short_string(bytes, position);
-                output.push_str(&source[position..end]);
-                position = end;
+                position = skip_short_string(bytes, position);
             }
             b'[' if long_bracket_level(bytes, position).is_some() => {
-                let end = skip_long_string(bytes, position);
-                output.push_str(&source[position..end]);
-                position = end;
+                position = skip_long_string(bytes, position);
             }
             _ => {
                 if at_word(bytes, position, b"require")
-                    && let Some((end, replacement)) =
+                    && let Some((end, path)) =
                         parse_chain(source, position + "require".len(), context)
                 {
-                    output.push_str(&format!("require(\"{replacement}\")"));
+                    found.push((position, end, path));
                     position = end;
-                    count += 1;
                     continue;
                 }
-                // push whole identifiers at once so "myrequire" can't match
-                let end = if is_ident_byte(bytes[position]) {
-                    let mut end = position;
-                    while end < bytes.len() && is_ident_byte(bytes[end]) {
-                        end += 1;
+                // step whole identifiers so "myrequire" can't half-match
+                if is_ident_byte(bytes[position]) {
+                    while position < bytes.len() && is_ident_byte(bytes[position]) {
+                        position += 1;
                     }
-                    end
                 } else {
-                    // advance a whole char; slicing mid-codepoint panics
-                    position
-                        + source[position..]
-                            .chars()
-                            .next()
-                            .map_or(1, |c| c.len_utf8())
-                };
-                output.push_str(&source[position..end]);
-                position = end;
+                    position += 1;
+                }
             }
         }
     }
-    (output, count)
+    found
 }
 
 /** parses `(script.A.B)` style chains starting right after the require word.
@@ -436,7 +447,7 @@ mod tests {
         folder, so children are @self and "./" would hit siblings instead */
         let context = dir_module(0, true);
         let (out, count) =
-            rewrite_source("local Batcher = require(script.Core.Batcher)\n", &context);
+            rewrite_source("local Batcher = require(script.Core.Batcher)\n", &context).unwrap();
         assert_eq!(count, 1);
         assert_eq!(out, "local Batcher = require(\"@self/Core/Batcher\")\n");
     }
@@ -449,7 +460,8 @@ mod tests {
             "local A = require(script.Parent.Util)\n\
              local B = require(script.Other)\n",
             &context,
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         assert_eq!(
             out,
@@ -466,7 +478,8 @@ mod tests {
             "local A = require(script.Parent.Sanitizer)\n\
              local B = require(script.Parent.Parent.Core.Batcher)\n",
             &context,
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         assert_eq!(
             out,
@@ -481,7 +494,8 @@ mod tests {
         alias next to the package, we keep links in the out dir. the init's
         frame is the pkg dir (out/.lpm/pkg), so 2 ups reach out/. */
         let context = dir_module(0, true);
-        let (out, count) = rewrite_source("local Dep = require(script.Parent.Signal)\n", &context);
+        let (out, count) =
+            rewrite_source("local Dep = require(script.Parent.Signal)\n", &context).unwrap();
         assert_eq!(count, 1);
         assert_eq!(out, "local Dep = require(\"../../Signal\")\n");
 
@@ -490,7 +504,8 @@ mod tests {
         let (out, count) = rewrite_source(
             "local Dep = require(script.Parent.Parent.Signal)\n",
             &context,
-        );
+        )
+        .unwrap();
         assert_eq!(count, 1);
         assert_eq!(out, "local Dep = require(\"../../../Signal\")\n");
     }
@@ -502,7 +517,8 @@ mod tests {
             "local A = require(script[\"My Module\"])\n\
              local B = require(script:WaitForChild(\"Util\"))\n",
             &context,
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         assert_eq!(
             out,
@@ -519,9 +535,7 @@ mod tests {
                       local C = require(game.ReplicatedStorage.Thing)\n\
                       local D = require(script:FindFirstAncestor(\"x\"))\n\
                       local E = require(modules[i])\n";
-        let (out, count) = rewrite_source(source, &context);
-        assert_eq!(count, 0);
-        assert_eq!(out, source);
+        assert_eq!(rewrite_source(source, &context), None);
     }
 
     #[test]
@@ -529,7 +543,7 @@ mod tests {
         // satset ships comments with chars like 'ᴗ'; byte-stepping used to panic
         let context = dir_module(0, true);
         let source = "local face = \"(ᴗ_ᴗ)\" -- ᴗ\nlocal x = require(script.Core) .. \"日本語\"\n";
-        let (out, count) = rewrite_source(source, &context);
+        let (out, count) = rewrite_source(source, &context).unwrap();
         assert_eq!(count, 1);
         assert!(out.contains("require(\"@self/Core\")"));
         assert!(out.contains("(ᴗ_ᴗ)"));
@@ -544,9 +558,7 @@ mod tests {
                       local s = \"require(script.Core.Batcher)\"\n\
                       local l = [[require(script.Core.Batcher)]]\n\
                       local myrequire = 1\n";
-        let (out, count) = rewrite_source(source, &context);
-        assert_eq!(count, 0);
-        assert_eq!(out, source);
+        assert_eq!(rewrite_source(source, &context), None);
     }
 
     #[test]
