@@ -42,36 +42,6 @@ pub fn post_form<T: DeserializeOwned>(
     parse_json(response)
 }
 
-pub fn post_json<T: DeserializeOwned>(
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &serde_json::Value,
-) -> Result<T, HttpError> {
-    let response = with_headers(ureq::post(url), headers).send_json(body)?;
-    parse_json(response)
-}
-
-pub fn put_json<T: DeserializeOwned>(
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &serde_json::Value,
-) -> Result<T, HttpError> {
-    let response = with_headers(ureq::put(url), headers).send_json(body)?;
-    parse_json(response)
-}
-
-pub fn post_bytes<T: DeserializeOwned>(
-    url: &str,
-    headers: &[(&str, &str)],
-    content_type: &str,
-    bytes: &[u8],
-) -> Result<T, HttpError> {
-    let response = with_headers(ureq::post(url), headers)
-        .set("Content-Type", content_type)
-        .send_bytes(bytes)?;
-    parse_json(response)
-}
-
 /// GETs `url`, following redirects (ureq only auto-follows 301/302/303;
 /// some hosts, like pesde's registry or GitHub's asset redirects, use 307).
 pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {

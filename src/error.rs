@@ -27,18 +27,19 @@ pub enum Error {
     #[error("GitHub authorization failed: {0}")]
     AuthFailed(String),
 
-    // TODO(api): replace with whatever the API's publish endpoint can fail
-    // with (auth, ownership, duplicate version, ...).
-    #[error("Publishing is not available yet: lpm's package API is being rebuilt")]
-    PublishUnavailable,
+    /// The registry refused a publish. `message` is the human-readable
+    /// `error` field from the API's response body (bad token, scope owned by
+    /// someone else, version already exists, ...).
+    #[error("Publishing failed: {message}")]
+    PublishFailed { status: u16, message: String },
 
-    // TODO(api): lpm's own index used to be the fallback for dependencies that
-    // name no index. Once the API can resolve packages, this stops being an
-    // error and becomes "ask the API".
     #[error(
-        "No default index is configured; add one as `default` under [indices] in lpm.toml, or point the dependency at a named index"
+        "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `include`/`exclude` under [package]"
     )]
-    NoDefaultIndex,
+    PublishTooLarge { size_mb: f64, limit_mb: u64 },
+
+    #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
+    PublishNotSupported(String),
 
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,

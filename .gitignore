@@ -2,3 +2,5 @@
 lpm.toml
 lpm.lock
 packages/
+CLAUDE.md
+API.md

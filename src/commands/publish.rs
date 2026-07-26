@@ -1,31 +1,17 @@
 use crate::error::Error;
-use crate::project::manifest::{Environment, Manifest, split_package_name};
+use crate::net::{auth, registry};
+use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Manifest, split_package_name};
+use crate::registry::index::Index;
 use crate::registry::pack;
 use crate::ui;
 use clap::Args;
 use std::path::Path;
-
-// TODO(api): everything past packing was removed. The old flow uploaded the
-// tarball as a GitHub release asset on the package's own repo, then forked the
-// index repo, wrote the entry at <scope>/<name> and opened a PR (that entry
-// generation lived in publish/index_entry.rs, now deleted). What has to come
-// back against the lpm API:
-//   1. authenticate the user (auth.rs still has the GitHub device flow and the
-//      ~/.lpm/credentials.toml store if the API can reuse a GitHub token)
-//   2. upload `archive` under `asset_name`
-//   3. tell the API which environment/version/dependencies the entry carries
-//      (all of it is on `manifest`)
-//   4. report where the package landed instead of the PR url
-// Until then `run` packs, validates, and stops at PublishUnavailable.
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
     /// Show what would be published without uploading anything
     #[arg(long)]
     pub dry_run: bool,
-    /// Index key from [indices] to publish to (default index otherwise)
-    #[arg(short, long)]
-    pub index: Option<String>,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -34,31 +20,74 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let (scope, name) = split_package_name(&manifest.package.name)?;
     let version = semver::Version::parse(&manifest.package.version)?;
 
-    // Packing is unchanged: whatever the API ends up accepting, this is the
-    // archive it gets.
     let root = Path::new(".");
     let files = pack::packed_files(root, &manifest)?;
     let archive = ui::with_spinner("Packing package", || pack::pack(root, &manifest))?;
 
-    let asset_name = format!("{scope}_{name}-{version}.tar.gz");
+    // The API answers 413 past its cap; failing here saves the upload (and
+    // makes --dry-run catch it too).
+    if archive.len() > registry::MAX_ARCHIVE_BYTES {
+        return Err(Error::PublishTooLarge {
+            size_mb: archive.len() as f64 / (1024.0 * 1024.0),
+            limit_mb: (registry::MAX_ARCHIVE_BYTES / (1024 * 1024)) as u64,
+        });
+    }
 
     if args.dry_run {
         println!(
-            "Would publish {}@{version} ({environment}) as:",
-            manifest.package.name
+            "Would publish {}@{version} ({environment}) to {}:",
+            manifest.package.name,
+            registry::API_URL,
         );
-        println!("  {asset_name} ({} bytes)", archive.len());
+        println!(
+            "  {scope}/{name}/{version}.tar.gz ({} bytes)",
+            archive.len()
+        );
         for file in &files {
             println!("  {}", file.display());
-        }
-        if let Some(index) = &args.index {
-            println!("Target index: {index}");
         }
         return Ok(());
     }
 
-    // TODO(api): upload `archive` here.
-    Err(Error::PublishUnavailable)
+    // Stored credentials first; the device flow (and the index clone that
+    // provides its client id) only when there's nothing stored yet.
+    let credentials = match auth::load()? {
+        Some(credentials) => credentials,
+        None => auth::login(&oauth_client_id()?)?,
+    };
+
+    match upload(&credentials.token, &archive) {
+        // A 401 means the stored token was revoked or expired, not that this
+        // publish is doomed: forget it, log in fresh, and try once more.
+        Err(Error::PublishFailed { status: 401, .. }) => {
+            auth::clear()?;
+            eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
+            let credentials = auth::login(&oauth_client_id()?)?;
+            upload(&credentials.token, &archive)?;
+        }
+        other => other?,
+    }
+
+    ui::print_success(&format!(
+        "Published {}@{version} ({environment})",
+        manifest.package.name
+    ));
+    println!("Install it with `lpm add {}`", manifest.package.name);
+    Ok(())
+}
+
+fn upload(token: &str, archive: &[u8]) -> Result<(), Error> {
+    ui::with_spinner("Uploading package", || registry::publish(token, archive))
+}
+
+/// OAuth app client id for the device flow. It lives in the lpm index's
+/// config.toml (not in the binary) so it can rotate without a CLI release.
+fn oauth_client_id() -> Result<String, Error> {
+    let index = Index::open(DEFAULT_INDEX_URL, true)?;
+    index
+        .github_oauth_id()
+        .map(str::to_string)
+        .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
 /// Published packages must say where their code runs; the entry is keyed by it.

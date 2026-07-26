@@ -1,8 +1,4 @@
 //! Shapes of the GitHub responses lpm deserializes.
-//!
-//! TODO(api): the fork/branch/file/pull shapes below are only still here
-//! because github.rs is (see its note); they were the publish flow's.
-#![allow(dead_code)]
 
 use serde::Deserialize;
 
@@ -10,9 +6,6 @@ use serde::Deserialize;
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
-    // Deserialized for future use (e.g. publishing); nothing reads them yet.
-    pub url: String,
-    pub id: u64,
 }
 
 #[derive(Deserialize)]
@@ -43,35 +36,6 @@ pub struct AccessToken {
 #[derive(Deserialize)]
 pub struct User {
     pub login: String,
-    // Deserialized for future use (stable identity across renames).
-    pub id: u64,
-}
-
-#[derive(Deserialize)]
-pub struct Repo {
-    pub full_name: String,
-    pub default_branch: String,
-}
-
-#[derive(Deserialize)]
-pub struct GitRef {
-    pub object: GitRefObject,
-}
-
-#[derive(Deserialize)]
-pub struct GitRefObject {
-    pub sha: String,
-}
-
-#[derive(Deserialize)]
-pub struct ContentFile {
-    pub sha: String,
-}
-
-#[derive(Deserialize)]
-pub struct PullRequest {
-    pub html_url: String,
-    pub number: u64,
 }
 
 #[cfg(test)]
@@ -111,11 +75,6 @@ mod tests {
 
         let release: Release = serde_json::from_str(json).unwrap();
         assert_eq!(release.tag_name, "v0.1.0");
-        assert_eq!(
-            release.url,
-            "https://api.github.com/repos/luaupm/cli/releases/213371337213"
-        );
-        assert_eq!(release.id, 213371337213); // larger than i32::MAX
         assert_eq!(release.assets.len(), 2);
         assert_eq!(release.assets[0].name, "lpm-windows-x86_64.exe");
         assert_eq!(
@@ -186,26 +145,5 @@ mod tests {
 
         let user: User = serde_json::from_str(json).unwrap();
         assert_eq!(user.login, "octocat");
-        assert_eq!(user.id, 583231);
-    }
-
-    #[test]
-    fn deserializes_git_ref() {
-        let json = r#"{
-            "ref": "refs/heads/main",
-            "node_id": "MDM6UmVmcmVmcy9oZWFkcy9tYWlu",
-            "url": "https://api.github.com/repos/octocat/Hello-World/git/refs/heads/main",
-            "object": {
-                "type": "commit",
-                "sha": "aa218f56b14c9653891f9e74264a383fa43fefbd",
-                "url": "https://api.github.com/repos/octocat/Hello-World/git/commits/aa218f56b14c9653891f9e74264a383fa43fefbd"
-            }
-        }"#;
-
-        let git_ref: GitRef = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            git_ref.object.sha,
-            "aa218f56b14c9653891f9e74264a383fa43fefbd"
-        );
     }
 }

@@ -11,6 +11,12 @@ pub const MANIFEST_FILE: &str = "lpm.toml";
 /// Key under [indices] used for dependencies that name no index.
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
+/// lpm's own package index, used for dependencies that name no index when the
+/// project doesn't define a `default` one. Pesde-format entries whose
+/// `download` URLs point at the registry CDN; written only by the lpm API as
+/// part of publishing, read by the CLI like any other git index.
+pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
     pub package: Package,
@@ -82,46 +88,6 @@ pub struct Package {
     /// Paths dropped from the published archive after `include` applies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
-}
-
-impl Package {
-    /// The `repository` field reduced to a GitHub "owner/repo" slug. Accepts
-    /// a bare slug, https:// and host-only URLs, and the git@ ssh remote,
-    /// with or without ".git". Other hosts give None.
-    ///
-    /// TODO(api): publish used this to pick the repo that hosted the release
-    /// asset. Kept because the API will likely want to record where a package
-    /// comes from; delete it if it doesn't.
-    #[allow(dead_code)]
-    pub fn repository_slug(&self) -> Option<String> {
-        let repository = self.repository.as_deref()?.trim().trim_end_matches('/');
-
-        let rest = if let Some(ssh) = repository.strip_prefix("git@github.com:") {
-            ssh
-        } else if let Some(after_scheme) = repository
-            .strip_prefix("https://")
-            .or_else(|| repository.strip_prefix("http://"))
-        {
-            after_scheme.strip_prefix("github.com/")?
-        } else if let Some(hosted) = repository.strip_prefix("github.com/") {
-            hosted
-        } else {
-            repository
-        };
-        let rest = rest.strip_suffix(".git").unwrap_or(rest);
-
-        // Charset checks (GitHub's, roughly) keep host-shaped strings like
-        // "gitlab.com/owner" or "git@host:owner" from passing as bare slugs.
-        let (owner, repo) = rest.split_once('/')?;
-        let slug_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-        let owner_ok = !owner.is_empty() && owner.chars().all(slug_char);
-        let repo_ok = !repo.is_empty() && repo.chars().all(|c| slug_char(c) || c == '.');
-        if owner_ok && repo_ok {
-            Some(format!("{owner}/{repo}"))
-        } else {
-            None
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -383,18 +349,16 @@ impl Manifest {
         }
     }
 
-    /// Resolves a dependency's `index` key to an index URL.
-    ///
-    /// TODO(api): with lpm's own index gone, a dependency that names no index
-    /// only works when the project defines a `default` one. This is where the
-    /// lpm API becomes the fallback again.
+    /// Resolves a dependency's `index` key to an index URL. No key means the
+    /// `default` entry under [indices] when the project defines one, and lpm's
+    /// own index otherwise.
     pub fn index_url(&self, index: Option<&str>) -> Result<&str, Error> {
         match index {
-            None => self
+            None => Ok(self
                 .indices
                 .get(DEFAULT_INDEX_NAME)
                 .map(String::as_str)
-                .ok_or(Error::NoDefaultIndex),
+                .unwrap_or(DEFAULT_INDEX_URL)),
             Some(key) => self
                 .indices
                 .get(key)
@@ -509,11 +473,8 @@ mod tests {
         )
         .unwrap();
 
-        // No `default` key and no built-in index left to fall back on.
-        assert!(matches!(
-            manifest.index_url(None),
-            Err(Error::NoDefaultIndex)
-        ));
+        // No `default` key: bare dependencies fall back to lpm's own index.
+        assert_eq!(manifest.index_url(None).unwrap(), DEFAULT_INDEX_URL);
         assert_eq!(
             manifest.index_url(Some("wally")).unwrap(),
             "https://example.com/wally-index"
@@ -658,70 +619,6 @@ mod tests {
         );
         let parsed: Tools = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.stylua, tools.stylua);
-    }
-
-    fn package_with_repository(repository: Option<&str>) -> Package {
-        Package {
-            name: "scope/name".to_string(),
-            version: "0.1.0".to_string(),
-            description: None,
-            authors: Vec::new(),
-            repository: repository.map(str::to_string),
-            license: None,
-            include: Vec::new(),
-            exclude: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn repository_slug_normalizes_github_shapes() {
-        for repository in [
-            "owner/repo",
-            "https://github.com/owner/repo",
-            "https://github.com/owner/repo.git",
-            "https://github.com/owner/repo/",
-            "http://github.com/owner/repo",
-            "github.com/owner/repo",
-            "git@github.com:owner/repo",
-            "git@github.com:owner/repo.git",
-            "  owner/repo  ",
-        ] {
-            assert_eq!(
-                package_with_repository(Some(repository)).repository_slug(),
-                Some("owner/repo".to_string()),
-                "repository {repository:?} should normalize"
-            );
-        }
-        assert_eq!(
-            package_with_repository(Some("JohnnyMorganz/StyLua.git"))
-                .repository_slug()
-                .as_deref(),
-            Some("JohnnyMorganz/StyLua")
-        );
-    }
-
-    #[test]
-    fn repository_slug_rejects_everything_else() {
-        for repository in [
-            "https://gitlab.com/owner/repo",
-            "gitlab.com/owner/repo",
-            "git@gitlab.com:owner/repo",
-            "https://github.com/owner",
-            "https://github.com/owner/repo/tree/main",
-            "owner",
-            "owner/",
-            "/repo",
-            "a/b/c",
-            "",
-            "   ",
-        ] {
-            assert_eq!(
-                package_with_repository(Some(repository)).repository_slug(),
-                None,
-                "repository {repository:?} should be rejected"
-            );
-        }
-        assert_eq!(package_with_repository(None).repository_slug(), None);
     }
 
     #[test]
