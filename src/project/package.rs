@@ -21,11 +21,17 @@ return module
 
 no exported types = the compact `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
-    link_contents_at(&format!("./.lpm/{folder}/{entry}"), types)
+    // empty entry = the package root itself is the module (root init file)
+    let path = if entry.is_empty() {
+        format!("./.lpm/{folder}")
+    } else {
+        format!("./.lpm/{folder}/{entry}")
+    };
+    link_contents_at(&path, types)
 }
 
 /** like [`link_contents`] but for an arbitrary require path: workspace members
-link straight to their source dir (`../../packages/core/src/init`) instead of an
+link straight to their source (`../../packages/core/src`) instead of an
 extracted copy under `.lpm/`. */
 pub fn link_contents_at(path: &str, types: &[String]) -> String {
     let path = format!("\"{path}\"");
@@ -42,17 +48,22 @@ pub fn link_contents_at(path: &str, types: &[String]) -> String {
     contents
 }
 
-/// the file an extensionless entry resolves to, Luau string-require style: `<entry>.luau`, `<entry>.lua`, then the folder's init file.
+/// the file an extensionless entry resolves to, Luau string-require style: `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
-    [
-        format!("{entry}.luau"),
-        format!("{entry}.lua"),
-        format!("{entry}/init.luau"),
-        format!("{entry}/init.lua"),
-    ]
-    .into_iter()
-    .map(|candidate| dir.join(candidate))
-    .find(|path| path.is_file())
+    let candidates = if entry.is_empty() {
+        vec!["init.luau".to_string(), "init.lua".to_string()]
+    } else {
+        vec![
+            format!("{entry}.luau"),
+            format!("{entry}.lua"),
+            format!("{entry}/init.luau"),
+            format!("{entry}/init.lua"),
+        ]
+    };
+    candidates
+        .into_iter()
+        .map(|candidate| dir.join(candidate))
+        .find(|path| path.is_file())
 }
 
 /// full_moon recurses per nesting level, so deep sources need serious stack; parsing gets its own thread with this much.
@@ -253,10 +264,14 @@ fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
 fn normalize_entry(path: &str) -> String {
     let path = path.replace('\\', "/");
     let path = path.trim_start_matches("./").trim_matches('/');
-    path.strip_suffix(".luau")
+    let path = path
+        .strip_suffix(".luau")
         .or_else(|| path.strip_suffix(".lua"))
-        .unwrap_or(path)
-        .to_string()
+        .unwrap_or(path);
+    /* init files are the folder's module, mod.rs style, so the require has to
+    point at the folder. pesde manifests like lib = "/src/init.luau" hit this. */
+    let path = path.strip_suffix("/init").unwrap_or(path);
+    if path == "init" { "" } else { path }.to_string()
 }
 
 #[cfg(test)]
@@ -348,7 +363,7 @@ mod tests {
         // conventional fallbacks.
         let d = base.join("d");
         write_package(&d.join("src"), "init.lua", "");
-        assert_eq!(entry_point(&d).as_deref(), Some("src/init"));
+        assert_eq!(entry_point(&d).as_deref(), Some("src"));
 
         let e = base.join("e");
         fs::create_dir_all(&e).unwrap();
@@ -373,7 +388,7 @@ mod tests {
              export type Status = module.Status\n\
              return module\n"
         );
-        assert_eq!(normalize_entry("./src\\init.luau"), "src/init".to_string());
+        assert_eq!(normalize_entry("./src\\init.luau"), "src".to_string());
         assert_eq!(normalize_entry("lib.lua"), "lib".to_string());
         assert_eq!(normalize_entry("src"), "src".to_string());
     }

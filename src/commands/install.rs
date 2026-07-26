@@ -183,8 +183,10 @@ fn install_packages(
 
             match package::entry_point(member_dir) {
                 Some(entry) => {
-                    let mut require =
-                        format!("{}/{entry}", workspace::relative_path(&out, member_dir));
+                    let mut require = workspace::relative_path(&out, member_dir);
+                    if !entry.is_empty() {
+                        require = format!("{require}/{entry}");
+                    }
                     if !require.starts_with("..") {
                         require = format!("./{require}");
                     }
