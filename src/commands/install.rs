@@ -3,6 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, Tool};
 use crate::project::package;
+use crate::project::requires;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
 use crate::registry::resolver;
@@ -244,6 +245,12 @@ fn install_packages(
 
         match package::entry_point(&storage) {
             Some(entry) => {
+                /* wally packages talk roblox instance paths
+                (require(script.Parent.X)); rewrite what we can into ./ string
+                requires so they work without an instance tree */
+                if matches!(job.source, index::DownloadSource::Zip { .. }) {
+                    requires::rewrite_instance_requires(&storage, &entry)?;
+                }
                 let types = link_types(&storage, &entry, &job.name, bar);
                 let link_path = out.join(format!("{}.luau", job.link));
                 fs::write(&link_path, package::link_contents(&folder, &entry, &types))?;

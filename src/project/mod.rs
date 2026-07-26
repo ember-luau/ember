@@ -4,4 +4,5 @@ pub mod hooks;
 pub mod lockfile;
 pub mod manifest;
 pub mod package;
+pub mod requires;
 pub mod workspace;
