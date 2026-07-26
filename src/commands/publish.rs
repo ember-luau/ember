@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::net::{auth, registry};
-use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Manifest, split_package_name};
+use crate::project::manifest::{
+    DEFAULT_INDEX_URL, Environment, Manifest, is_github_username, split_package_name,
+};
 use crate::registry::index::Index;
 use crate::registry::pack;
 use crate::ui;
@@ -19,6 +21,21 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let environment = publish_environment(&manifest)?;
     let (scope, name) = split_package_name(&manifest.package.name)?;
     let version = semver::Version::parse(&manifest.package.version)?;
+
+    // The API appends [package] authors to the scope's owner list (each one
+    // can then publish to the whole scope) and 400s anything that isn't
+    // shaped like a GitHub username; catch that before packing. It does NOT
+    // check the account exists, so a typo silently grants a stranger-to-be.
+    if let Some(author) = manifest
+        .package
+        .authors
+        .iter()
+        .find(|author| !is_github_username(author))
+    {
+        return Err(Error::ManifestInvalid(format!(
+            "author '{author}' is not a GitHub username; [package] authors grant publish access to your scope and must be GitHub usernames (no emails or display names)"
+        )));
+    }
 
     let root = Path::new(".");
     let files = pack::packed_files(root, &manifest)?;

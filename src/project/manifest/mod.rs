@@ -377,6 +377,20 @@ impl Manifest {
     }
 }
 
+/// Shape of a GitHub username: 1-39 characters, alphanumeric or dashes, with
+/// no leading, trailing, or consecutive dash. `[package] authors` must pass
+/// this — the registry appends authors to the scope's owner list on publish
+/// (co-ownership) and 400s anything that isn't a username. Shape only; whether
+/// the account exists is not checked anywhere, so typos still bite.
+pub fn is_github_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 39
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+}
+
 /// Splits a "scope/name" package identifier. Wally allows dashes, so parts
 /// accept lowercase letters, digits, and dashes/underscores.
 pub fn split_package_name(name: &str) -> Result<(&str, &str), Error> {
@@ -554,6 +568,26 @@ mod tests {
             Environment::Server
         );
         assert!(Environment::from_wally_realm("lune").is_err());
+    }
+
+    #[test]
+    fn recognizes_github_username_shapes() {
+        for name in ["octocat", "Luau-PM", "a", "user123", "x-1-y"] {
+            assert!(is_github_username(name), "{name:?} should be accepted");
+        }
+        for name in [
+            "",
+            "-octocat",
+            "octocat-",
+            "double--dash",
+            "with space",
+            "name@example.com",
+            "Jane Doe <jane@example.com>",
+            "under_score",
+            &"a".repeat(40),
+        ] {
+            assert!(!is_github_username(name), "{name:?} should be rejected");
+        }
     }
 
     #[test]

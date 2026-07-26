@@ -1,5 +1,6 @@
 use crate::error::Error;
-use crate::project::manifest::{Environment, Manifest, Package, Target};
+use crate::net::auth;
+use crate::project::manifest::{Environment, Manifest, Package, Target, is_github_username};
 use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
@@ -55,11 +56,16 @@ impl Defaults {
                 (!scope.is_empty() && !name.is_empty()).then(|| format!("{scope}/{name}"))
             });
 
-        let authors = match (user_name, git::output(&["config", "user.email"])) {
-            (Some(name), Some(email)) => Some(format!("{name} <{email}>")),
-            (Some(name), None) => Some(name),
-            _ => None,
-        };
+        // Authors must be GitHub usernames (the registry makes them scope
+        // co-owners on publish and rejects anything else), so only guess from
+        // sources that hold one: the login a previous `lpm publish` stored,
+        // then the owner of a github.com origin remote. Never git user.name
+        // or user.email — those are display identities, not usernames.
+        let authors = auth::load()
+            .ok()
+            .flatten()
+            .map(|credentials| credentials.login)
+            .or_else(|| repository.as_deref().and_then(github_owner));
 
         Defaults {
             name,
@@ -67,6 +73,15 @@ impl Defaults {
             repository,
         }
     }
+}
+
+/// Owner segment of a github.com https URL, kept verbatim (usernames are
+/// case-sensitive-ish and may contain dashes, so no sanitizing). Other hosts
+/// give None — a GitLab owner is not a GitHub username.
+fn github_owner(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let owner = rest.split('/').next()?;
+    is_github_username(owner).then(|| owner.to_string())
 }
 
 fn owner_repo_from_url(url: &str) -> Option<String> {
@@ -126,16 +141,10 @@ pub fn run() -> Result<(), Error> {
         .prompt()?;
 
     let mut authors_prompt = Text::new("authors:")
-        .with_help_message("Comma separated list, e.g. 'Jane Doe, John Doe'")
-        .with_validator(|input: &str| {
-            if parse_authors(input).is_empty() {
-                Ok(Validation::Invalid(
-                    "At least one author is required".into(),
-                ))
-            } else {
-                Ok(Validation::Valid)
-            }
-        });
+        .with_help_message(
+            "GitHub usernames, comma separated; each can publish to your scope after the first publish",
+        )
+        .with_validator(|input: &str| Ok(validate_authors(input)));
     if let Some(default) = &defaults.authors {
         authors_prompt = authors_prompt.with_default(default);
     }
@@ -243,6 +252,22 @@ fn parse_authors(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// At least one author, all shaped like GitHub usernames — the registry
+/// rejects the publish otherwise.
+fn validate_authors(input: &str) -> Validation {
+    let authors = parse_authors(input);
+    if authors.is_empty() {
+        return Validation::Invalid("At least one author is required".into());
+    }
+    match authors.iter().find(|author| !is_github_username(author)) {
+        Some(author) => Validation::Invalid(
+            format!("'{author}' is not a GitHub username (letters, digits, and inner dashes only)")
+                .into(),
+        ),
+        None => Validation::Valid,
+    }
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -282,6 +307,38 @@ mod tests {
         assert_eq!(parse_authors("Solo"), vec!["Solo"]);
         assert_eq!(parse_authors(" , ,"), Vec::<String>::new());
         assert_eq!(parse_authors(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn authors_must_be_github_usernames() {
+        assert!(matches!(
+            validate_authors("evaera, sleitnick"),
+            Validation::Valid
+        ));
+        assert!(matches!(validate_authors("Luau-PM"), Validation::Valid));
+        // The old default shape ("Name <email>") must be rejected, not just
+        // no longer guessed.
+        assert!(matches!(
+            validate_authors("Jane Doe <jane@example.com>"),
+            Validation::Invalid(_)
+        ));
+        assert!(matches!(validate_authors("jane, "), Validation::Valid));
+        assert!(matches!(validate_authors(""), Validation::Invalid(_)));
+        assert!(matches!(validate_authors(" , "), Validation::Invalid(_)));
+    }
+
+    #[test]
+    fn github_owner_comes_only_from_github_remotes() {
+        assert_eq!(
+            github_owner("https://github.com/Luau-PM/repo").as_deref(),
+            Some("Luau-PM")
+        );
+        assert_eq!(
+            github_owner("https://github.com/savruun/lpm-cli").as_deref(),
+            Some("savruun")
+        );
+        assert_eq!(github_owner("https://gitlab.com/owner/repo"), None);
+        assert_eq!(github_owner("https://github.com/"), None);
     }
 
     #[test]
