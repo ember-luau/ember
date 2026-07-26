@@ -52,6 +52,9 @@ pub enum DownloadSource {
     Zip { url: String },
     /// Gzipped tarball (pesde registry APIs).
     TarGz { url: String },
+    /// A workspace member, linked in place instead of downloaded; `path` is
+    /// the member's directory relative to the consuming project.
+    Workspace { path: String },
 }
 
 impl Index {
@@ -112,8 +115,14 @@ impl Index {
 /// restore the old restraint — the token went only to GitHub-owned hosts, so
 /// an arbitrary registry url in an index entry could not harvest it.
 pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
+    let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
+        // Workspace members are linked in place; install never gets here.
+        return Err(Error::IndexFetch {
+            url: String::new(),
+            reason: "workspace dependencies are linked in place, not downloaded".to_string(),
+        });
+    };
     std::fs::create_dir_all(dest)?;
-    let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source;
 
     let mut headers: Vec<(&str, &str)> = Vec::new();
     if matches!(source, DownloadSource::Zip { .. }) {
@@ -136,6 +145,7 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
                 tar::Archive::new(bytes.as_slice()).unpack(dest)?;
             }
         }
+        DownloadSource::Workspace { .. } => unreachable!("rejected above"),
     }
     Ok(())
 }

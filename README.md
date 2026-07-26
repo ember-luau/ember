@@ -164,15 +164,15 @@ terminal.
 name = "acme/rocket"          # scope/name, lowercase
 version = "0.1.0"
 description = "A rocket"      # optional
-authors = ["Jane Doe <jane@example.com>"]
+authors = ["janedoe"]         # GitHub usernames; each can publish to the scope
 repository = "acme/rocket"    # owner/repo or a GitHub URL
 license = "MIT"
-include = ["src"]             # optional; what gets packed for publishing
-exclude = ["src/tests"]       # optional; lpm.toml always ships
 
 [target]
 environment = "shared"        # shared | server | lune | luau | lute
 main = "src/init.luau"        # entry point consumers require
+includes = ["src"]            # optional; what gets packed for publishing
+excludes = ["src/tests"]      # optional; lpm.toml always ships
 
 [indices]
 wally = "https://github.com/UpliftGames/wally-index"
@@ -206,6 +206,41 @@ wally's realms).
 
 **Versions** are standard semver requirements. A bare `^` (or `*`) means
 "whatever is newest".
+
+## Workspaces
+
+A repository can hold many packages, pesde-style. The root lpm.toml lists
+member directories as globs under `[target]` (`!` negates, `.` includes the
+root itself) and usually marks itself private so it is never published:
+
+```toml
+[package]
+name = "acme/root"
+version = "0.0.0"
+private = true                       # never published
+
+[target]
+environment = "shared"
+workspace_members = ["packages/*"]   # no main needed with members
+```
+
+Members are complete lpm projects that can depend on each other with a
+workspace specifier instead of a version from the registry:
+
+```toml
+[dependencies]
+core = { workspace = "acme/core", version = "^" }
+```
+
+- `lpm install` links workspace dependencies straight to the member's source
+  (edits are picked up without reinstalling) and, run at the root, installs
+  every member.
+- `lpm publish` at the root publishes the root (unless private or
+  target-less) and then every member; one failure doesn't stop the rest.
+- When publishing, workspace specifiers become registry requirements:
+  `version` is a type — `^`, `~`, `=` applied to the member's current
+  version (`^` + `1.2.3` → `^1.2.3`), `*` for any — or a full requirement
+  passed through as-is.
 
 ## How installing works
 

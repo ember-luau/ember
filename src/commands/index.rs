@@ -171,7 +171,13 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     let dependents = manifest
         .dependencies
         .values()
-        .filter(|dependency| dependency.index.as_deref() == Some(name.as_str()))
+        .filter(|dependency| {
+            matches!(
+                dependency,
+                crate::project::manifest::Dependency::Registry { index: Some(index), .. }
+                    if *index == name
+            )
+        })
         .count();
     if dependents > 0 {
         let (count, verb) = match dependents {

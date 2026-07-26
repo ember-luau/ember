@@ -22,7 +22,14 @@ use std::path::{Path, PathBuf};
 ///
 /// A package exporting no types keeps the compact `return require(...)` form.
 pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
-    let path = format!("\"./.lpm/{folder}/{entry}\"");
+    link_contents_at(&format!("./.lpm/{folder}/{entry}"), types)
+}
+
+/// Like [`link_contents`], but for an arbitrary require path — workspace
+/// members link straight to their source dir (`../../packages/core/src/init`)
+/// instead of an extracted copy under `.lpm/`.
+pub fn link_contents_at(path: &str, types: &[String]) -> String {
+    let path = format!("\"{path}\"");
     if types.is_empty() {
         return format!("return require({path})\n");
     }

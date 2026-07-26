@@ -3,6 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, Tool};
 use crate::project::package;
+use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
 use crate::registry::resolver;
 use crate::tools;
@@ -30,7 +31,35 @@ struct Job {
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
+    install_project(&args, &manifest, true)?;
 
+    // A workspace root installs every member too, pesde's order: the root
+    // first, then each member. Member installs never recurse further (nested
+    // workspaces aren't a thing).
+    if !manifest.workspace_members().is_empty() {
+        let workspace = Workspace::open(Path::new("."))?;
+        for member in &workspace.members {
+            if member.dir == workspace.root {
+                continue;
+            }
+            println!("Installing {}", member.manifest.package.name);
+            workspace::in_dir(&member.dir, || {
+                let manifest = Manifest::load()?;
+                install_project(&args, &manifest, false)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Installs one project from the current directory. Global tools install only
+/// on the primary run: workspace members share them, so repeating the merge
+/// per member would just re-print every pin.
+fn install_project(
+    args: &InstallArgs,
+    manifest: &Manifest,
+    include_global_tools: bool,
+) -> Result<(), Error> {
     let jobs: Vec<Job> = if args.locked {
         Lockfile::load()?
             .packages
@@ -46,7 +75,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             .collect()
     } else {
         ui::with_spinner("Resolving dependencies", || {
-            resolver::resolve(&manifest, true)
+            resolver::resolve(manifest, Path::new("."), true)
         })?
         .into_iter()
         .map(|package| Job {
@@ -75,7 +104,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     // then moves it into place (same filesystem as the outputs).
     let staging = Path::new(".lpm-staging").to_path_buf();
     let locked = ui::with_progress(jobs.len() as u64, |bar| {
-        install_packages(&manifest, jobs, &staging, bar)
+        install_packages(manifest, jobs, &staging, bar)
     })?;
 
     if staging.exists() {
@@ -97,14 +126,16 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
         .iter()
         .map(|(alias, tool)| (alias.clone(), tool.clone(), false))
         .collect();
-    for (alias, tool) in tools::shim::global_tools()? {
-        // A pin listed identically in both scopes only needs one install
-        let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
-            project.repository.eq_ignore_ascii_case(&tool.repository)
-                && project.version == tool.version
-        });
-        if !duplicate {
-            tool_jobs.push((alias, tool, true));
+    if include_global_tools {
+        for (alias, tool) in tools::shim::global_tools()? {
+            // A pin listed identically in both scopes only needs one install
+            let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
+                project.repository.eq_ignore_ascii_case(&tool.repository)
+                    && project.version == tool.version
+            });
+            if !duplicate {
+                tool_jobs.push((alias, tool, true));
+            }
         }
     }
 
@@ -138,6 +169,51 @@ fn install_packages(
     let mut locked = Vec::new();
     for job in jobs {
         bar.set_message(job.name.clone());
+
+        // Workspace members are linked in place — no download, no copy under
+        // .lpm/ — so edits to the member are picked up without reinstalling,
+        // like pesde's symlinks.
+        if let index::DownloadSource::Workspace { path } = &job.source {
+            let member_dir = Path::new(path);
+            let environment = job
+                .environment
+                .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?;
+            let out = manifest.packages_out(environment);
+            fs::create_dir_all(&out)?;
+
+            match package::entry_point(member_dir) {
+                Some(entry) => {
+                    let mut require =
+                        format!("{}/{entry}", workspace::relative_path(&out, member_dir));
+                    if !require.starts_with("..") {
+                        require = format!("./{require}");
+                    }
+                    let types = link_types(member_dir, &entry, &job.name, bar);
+                    let link_path = out.join(format!("{}.luau", job.link));
+                    fs::write(&link_path, package::link_contents_at(&require, &types))?;
+                }
+                None => warn_no_entry(&job.name, bar),
+            }
+
+            ui::bar_println(
+                bar,
+                &ui::success_line(&format!(
+                    "{}@{} → {}/{} (workspace)",
+                    job.name, job.version, environment, job.link
+                )),
+            );
+            bar.inc(1);
+            locked.push(LockedPackage {
+                name: job.name,
+                version: job.version,
+                environment,
+                link: job.link,
+                index: job.index_url,
+                source: job.source,
+            });
+            continue;
+        }
+
         if staging.exists() {
             fs::remove_dir_all(staging)?;
         }

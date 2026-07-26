@@ -73,6 +73,10 @@ impl Config {
 pub struct Package {
     pub name: String,
     pub version: String,
+    /// Never published. Workspace roots that only exist to hold members set
+    /// this so publish skips them (chief's root manifest is the archetype).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -81,21 +85,32 @@ pub struct Package {
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-    /// Files or directories (not globs) that go into the published archive;
-    /// everything else is skipped. Empty means "everything sensible".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub include: Vec<String>,
-    /// Paths dropped from the published archive after `include` applies.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exclude: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Target {
     pub environment: Environment,
-    /// Entry point of the package, e.g. "src/init.luau".
+    /// Entry point of the package, e.g. "src/init.luau". Not needed when
+    /// `workspace_members` is set — a workspace root has no code of its own
+    /// to require.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
+    /// Globs (relative to this manifest) naming the member projects of a
+    /// workspace, pesde-style: `workspace_members = ["packages/*"]` (`!`
+    /// negates, a literal "." includes the root). A manifest with members is
+    /// a workspace root; `lpm publish`/`lpm install` there run for every
+    /// member. Read through [`Manifest::workspace_members`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_members: Vec<String>,
+    /// What goes into the published archive: plain file or directory paths
+    /// (a directory covers everything under it) or globs (`src/*`). Empty
+    /// means "everything sensible" — the default walk minus VCS/output dirs.
+    #[serde(default, alias = "include", skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
+    /// Subtracted from whatever `includes` (or the default walk) selected;
+    /// same path-or-glob entries. lpm.toml always ships.
+    #[serde(default, alias = "exclude", skip_serializing_if = "Vec::is_empty")]
+    pub excludes: Vec<String>,
 }
 
 /// Where a package's Luau code runs. Output folders under packages/ use the
@@ -245,14 +260,54 @@ impl Studio {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Dependency {
-    /// Package identifier in "scope/name" form.
-    pub name: String,
-    /// Semver requirement; "^" alone means "latest".
-    pub version: String,
-    /// Key into [indices]; None means the default luaupm index.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index: Option<String>,
+#[serde(untagged)]
+pub enum Dependency {
+    /// A package from an index:
+    /// `{ name = "scope/pkg", version = "^", index = "wally" }`.
+    Registry {
+        /// Package identifier in "scope/name" form.
+        name: String,
+        /// Semver requirement; "^" alone means "latest".
+        version: String,
+        /// Key into [indices]; None means the default luaupm index.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        index: Option<String>,
+    },
+    /// Another member of this workspace, pesde-style:
+    /// `{ workspace = "scope/pkg", version = "^" }`. Linked in place during
+    /// development; `version` is a version TYPE (`^`, `~`, `=`, `*`) or a
+    /// full requirement, applied to the member's current version only when
+    /// publishing (see [`workspace_version_req`]).
+    Workspace {
+        workspace: String,
+        #[serde(default = "default_workspace_version")]
+        version: String,
+    },
+}
+
+fn default_workspace_version() -> String {
+    "^".to_string()
+}
+
+/// The registry requirement a workspace dependency publishes as, pesde's
+/// rules exactly: `^`/`~`/`=` prefix the member's current version
+/// (`^` + `1.2.3` → `^1.2.3`), `*` stays "any", and anything else must
+/// already be a full semver requirement, passed through unchanged.
+pub fn workspace_version_req(
+    version: &str,
+    member_version: &semver::Version,
+) -> Result<String, Error> {
+    let version = version.trim();
+    Ok(match version {
+        "*" => "*".to_string(),
+        "" | "^" => format!("^{member_version}"),
+        "~" => format!("~{member_version}"),
+        "=" => format!("={member_version}"),
+        other => {
+            semver::VersionReq::parse(other)?;
+            other.to_string()
+        }
+    })
 }
 
 /// A GitHub-released binary tool, written in lpm.toml as the single string
@@ -325,6 +380,15 @@ impl Manifest {
     /// Loads the manifest from the current directory.
     pub fn load() -> Result<Self, Error> {
         Self::load_from(Path::new(MANIFEST_FILE))
+    }
+
+    /// Member globs of this workspace, from `[target] workspace_members`.
+    /// Empty means this project is not a workspace root.
+    pub fn workspace_members(&self) -> &[String] {
+        self.target
+            .as_ref()
+            .map(|target| target.workspace_members.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
@@ -457,11 +521,14 @@ mod tests {
             manifest.target.as_ref().unwrap().environment,
             Environment::Lune
         );
-        assert_eq!(manifest.dependencies["Chief"].index, None);
-        assert_eq!(
-            manifest.dependencies["Other"].index.as_deref(),
-            Some("wally")
-        );
+        assert!(matches!(
+            &manifest.dependencies["Chief"],
+            Dependency::Registry { index: None, .. }
+        ));
+        assert!(matches!(
+            &manifest.dependencies["Other"],
+            Dependency::Registry { index: Some(index), .. } if index == "wally"
+        ));
         assert_eq!(manifest.tools["stylua"].repository, "johnnymorganz/stylua");
         assert_eq!(manifest.tools["stylua"].version, "2.0.0");
         assert_eq!(manifest.tools["StyLua"].repository, "JohnnyMorganz/StyLua");
@@ -571,6 +638,80 @@ mod tests {
     }
 
     #[test]
+    fn parses_workspace_manifests_and_dependencies() {
+        // The chief repo's shape: a private root listing member globs, and
+        // members depending on each other with workspace specifiers.
+        let root: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "chief/root"
+            version = "0.0.0"
+            private = true
+
+            [target]
+            environment = "shared"
+            workspace_members = ["packages/*", "!packages/legacy"]
+            "#,
+        )
+        .unwrap();
+        assert!(root.package.private);
+        // A root needs a [target] but no `main` — members carry the code.
+        assert!(root.target.as_ref().unwrap().main.is_none());
+        assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
+
+        let member: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "chief/dependencies"
+            version = "0.1.0"
+
+            [dependencies]
+            core = { workspace = "chief/core", version = "^" }
+            pinned = { workspace = "chief/bin" }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &member.dependencies["core"],
+            Dependency::Workspace { workspace, version }
+                if workspace == "chief/core" && version == "^"
+        ));
+        // version defaults to "^", pesde's default version type.
+        assert!(matches!(
+            &member.dependencies["pinned"],
+            Dependency::Workspace { version, .. } if version == "^"
+        ));
+
+        // Not-a-workspace manifests don't accidentally gain the fields.
+        let plain: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+            "#,
+        )
+        .unwrap();
+        assert!(!plain.package.private);
+        assert!(plain.workspace_members().is_empty());
+        let serialized = toml::to_string(&plain).unwrap();
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains("workspace_members"));
+    }
+
+    #[test]
+    fn workspace_version_reqs_follow_pesde_rules() {
+        let version = semver::Version::new(2, 1, 5);
+        assert_eq!(workspace_version_req("^", &version).unwrap(), "^2.1.5");
+        assert_eq!(workspace_version_req("~", &version).unwrap(), "~2.1.5");
+        assert_eq!(workspace_version_req("=", &version).unwrap(), "=2.1.5");
+        assert_eq!(workspace_version_req("*", &version).unwrap(), "*");
+        assert_eq!(workspace_version_req("", &version).unwrap(), "^2.1.5");
+        // A full requirement passes through unchanged.
+        assert_eq!(workspace_version_req("^2.1.0", &version).unwrap(), "^2.1.0");
+        assert!(workspace_version_req("not a req", &version).is_err());
+    }
+
+    #[test]
     fn recognizes_github_username_shapes() {
         for name in ["octocat", "Luau-PM", "a", "user123", "x-1-y"] {
             assert!(is_github_username(name), "{name:?} should be accepted");
@@ -656,25 +797,47 @@ mod tests {
     }
 
     #[test]
-    fn include_and_exclude_round_trip() {
+    fn includes_and_excludes_round_trip() {
         let manifest: Manifest = toml::from_str(
             r#"
             [package]
             name = "scope/name"
             version = "0.1.0"
-            include = ["src", "lpm.toml", "README.md"]
-            exclude = ["src/tests"]
+
+            [target]
+            environment = "luau"
+            includes = ["src", "lpm.toml", "README.md"]
+            excludes = ["src/tests"]
             "#,
         )
         .unwrap();
 
-        assert_eq!(manifest.package.include, ["src", "lpm.toml", "README.md"]);
-        assert_eq!(manifest.package.exclude, ["src/tests"]);
+        let target = manifest.target.as_ref().unwrap();
+        assert_eq!(target.includes, ["src", "lpm.toml", "README.md"]);
+        assert_eq!(target.excludes, ["src/tests"]);
 
         let serialized = toml::to_string(&manifest).unwrap();
         let parsed: Manifest = toml::from_str(&serialized).unwrap();
-        assert_eq!(parsed.package.include, manifest.package.include);
-        assert_eq!(parsed.package.exclude, manifest.package.exclude);
+        let reparsed = parsed.target.as_ref().unwrap();
+        assert_eq!(reparsed.includes, target.includes);
+        assert_eq!(reparsed.excludes, target.excludes);
+
+        // The singular spellings parse too.
+        let aliased: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [target]
+            environment = "luau"
+            include = ["src"]
+            exclude = ["tests"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(aliased.target.as_ref().unwrap().includes, ["src"]);
+        assert_eq!(aliased.target.as_ref().unwrap().excludes, ["tests"]);
 
         // Absent lists stay absent on write.
         let bare: Manifest = toml::from_str(
@@ -682,13 +845,16 @@ mod tests {
             [package]
             name = "scope/name"
             version = "0.1.0"
+
+            [target]
+            environment = "luau"
             "#,
         )
         .unwrap();
-        assert!(bare.package.include.is_empty());
+        assert!(bare.target.as_ref().unwrap().includes.is_empty());
         let serialized = toml::to_string(&bare).unwrap();
-        assert!(!serialized.contains("include"));
-        assert!(!serialized.contains("exclude"));
+        assert!(!serialized.contains("includes"));
+        assert!(!serialized.contains("excludes"));
     }
 
     #[test]
