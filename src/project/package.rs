@@ -57,6 +57,16 @@ pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     .find(|path| path.is_file())
 }
 
+/// full_moon's parser and visitors recurse once per nesting level, so deep
+/// sources need serious stack; parsing gets its own thread with this much.
+const PARSE_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Sources nested deeper than this are refused without parsing. A stack
+/// overflow cannot be caught — it aborts the whole process — so the ceiling
+/// has to be enforced before full_moon ever runs. Real Luau tops out around
+/// nesting depth ~50; this is 10x that.
+const MAX_NESTING_DEPTH: usize = 500;
+
 /// `export type` re-export lines for a link file. Luau type exports are
 /// lexical — they do not flow through `return require(...)` — so the link
 /// file must restate each one as `export type X<T> = module.X<T>`, the same
@@ -64,8 +74,42 @@ pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
 /// the use side drops them. Exported type functions re-export the same way,
 /// with their parameters as generics (parameterless ones have no
 /// type-declaration equivalent and are skipped). `None` means the source
-/// failed to parse; the caller decides how loudly to say so.
+/// couldn't be parsed (invalid, absurdly nested, or a parser panic); the
+/// caller decides how loudly to say so.
 pub fn exported_types(source: &str) -> Option<Vec<String>> {
+    if bracket_depth(source) > MAX_NESTING_DEPTH {
+        return None;
+    }
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .name("luau-parse".to_string())
+        .stack_size(PARSE_STACK_BYTES)
+        .spawn(move || extract_types(&source))
+        .ok()?
+        .join()
+        .ok()? // a full_moon panic reads as "couldn't parse"
+}
+
+/// Deepest `(){}[]` nesting in `source`. A cheap over-approximation of the
+/// parser's recursion depth (brackets inside strings and comments count too,
+/// which only ever refuses more, never less).
+fn bracket_depth(source: &str) -> usize {
+    let mut depth = 0usize;
+    let mut deepest = 0;
+    for byte in source.bytes() {
+        match byte {
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b')' | b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+fn extract_types(source: &str) -> Option<Vec<String>> {
     struct TypeVisitor {
         types: Vec<String>,
     }
@@ -341,6 +385,35 @@ mod tests {
         assert_eq!(normalize_entry("./src\\init.luau"), "src/init".to_string());
         assert_eq!(normalize_entry("lib.lua"), "lib".to_string());
         assert_eq!(normalize_entry("src"), "src".to_string());
+    }
+
+    #[test]
+    fn absurdly_nested_sources_are_refused_not_crashed() {
+        // full_moon recurses per nesting level; past the guard's ceiling the
+        // source is refused before the parser can eat the stack. (This once
+        // aborted the whole install with a stack overflow.)
+        let depth = 2000;
+        let deep = format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(depth),
+            " }".repeat(depth)
+        );
+        assert_eq!(exported_types(&deep), None);
+
+        // Deep-but-sane nesting still parses on the roomy parser thread.
+        let sane = format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(100),
+            " }".repeat(100)
+        );
+        assert_eq!(
+            exported_types(&sane).unwrap(),
+            ["export type Deep = module.Deep"]
+        );
+
+        assert_eq!(bracket_depth("({[]})"), 3);
+        assert_eq!(bracket_depth("}}}((("), 3);
+        assert_eq!(bracket_depth("plain"), 0);
     }
 
     #[test]
