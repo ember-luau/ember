@@ -79,6 +79,16 @@ impl Index {
         })
     }
 
+    /// GitHub OAuth app client id publishes authenticate against, from the
+    /// index's config. Wally indices carry one too, but lpm never publishes
+    /// to wally, so only pesde-format configs are consulted.
+    pub fn github_oauth_id(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Wally(_) => None,
+            Kind::Pesde(config) => config.github_oauth_id.as_deref(),
+        }
+    }
+
     /// Finds the highest version of `name` matching `req`. For pesde indices,
     /// `prefer_environment` picks between multiple targets of one version.
     pub fn resolve(
@@ -96,14 +106,11 @@ impl Index {
     }
 }
 
-/// Downloads and extracts a resolved package into `dest`.
-///
-/// TODO(api): private downloads went out with lpm's own index. They attached
-/// the stored GitHub token as a Bearer header (plus
-/// `Accept: application/octet-stream`, which is what makes a release-asset API
-/// url serve bytes instead of JSON) and only ever to GitHub-owned hosts, so an
-/// arbitrary registry url in an index entry could not harvest the credential.
-/// Whatever the API needs will want the same care.
+/// Downloads and extracts a resolved package into `dest`. All downloads are
+/// anonymous: lpm's registry serves tarballs from a public CDN, wally/pesde
+/// registries are public too. If credentialed downloads ever come back,
+/// restore the old restraint — the token went only to GitHub-owned hosts, so
+/// an arbitrary registry url in an index entry could not harvest it.
 pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(dest)?;
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source;

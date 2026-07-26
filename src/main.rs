@@ -47,7 +47,7 @@ enum Commands {
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 
-    /// Publish this package to an index
+    /// Publish this package to the lpm registry
     Publish(commands::publish::PublishArgs),
     /// Manage this lpm installation
     #[command(subcommand, name = "self")]

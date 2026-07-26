@@ -1,9 +1,6 @@
-//! GitHub's OAuth device flow and the token store it writes.
-//!
-//! TODO(api): nothing calls this since publishing was gutted. It stays because
-//! the device flow and ~/.lpm/credentials.toml are reusable if the lpm API
-//! accepts a GitHub token; delete it if the API brings its own auth.
-#![allow(dead_code)]
+//! GitHub's OAuth device flow and the token store it writes. Publishing
+//! authenticates with the resulting token: the registry API takes it as a
+//! Bearer header and maps it to a GitHub login for scope ownership.
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
@@ -55,13 +52,20 @@ pub fn save(credentials: &Credentials) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the stored credentials, or runs the GitHub device flow and saves
-/// the result. `client_id` comes from the target index's config.
-pub fn ensure_logged_in(client_id: &str) -> Result<Credentials, Error> {
-    if let Some(credentials) = load()? {
-        return Ok(credentials);
+/// Deletes the stored credentials; missing file is fine. Used when the
+/// registry rejects the token (revoked or expired) so the next attempt runs
+/// the device flow instead of resending a dead token forever.
+pub fn clear() -> Result<(), Error> {
+    match fs::remove_file(paths::credentials_file()?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
+}
 
+/// Runs the GitHub device flow regardless of stored state and saves the
+/// result. `client_id` comes from the index's config.
+pub fn login(client_id: &str) -> Result<Credentials, Error> {
     let credentials = device_flow(client_id)?;
     save(&credentials)?;
     ui::print_success(&format!("Logged in as {}", credentials.login));
@@ -69,10 +73,12 @@ pub fn ensure_logged_in(client_id: &str) -> Result<Credentials, Error> {
 }
 
 fn device_flow(client_id: &str) -> Result<Credentials, Error> {
+    // No scope requested: the registry only maps the token to a GitHub login,
+    // and an unscoped token can already read the public profile.
     let device: responses::DeviceCode = http::post_form(
         DEVICE_CODE_URL,
         &[("Accept", "application/json")],
-        &[("client_id", client_id), ("scope", "repo")],
+        &[("client_id", client_id)],
     )?;
 
     print_instructions(&device);

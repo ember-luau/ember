@@ -1,9 +1,10 @@
 //! Where packages come from: index lookup, dependency resolution, and the
 //! archive a publish uploads.
 //!
-//! TODO(api): this is the layer the lpm API replaces. `index` and `resolver`
-//! speak to git indices (wally and pesde format); `pack` builds the tarball
-//! that publishing sends.
+//! `index` and `resolver` speak to git indices — wally format, pesde format,
+//! and lpm's own (pesde format whose entries bake in a `download` URL, written
+//! only by the registry API). `pack` builds the tarball `lpm publish` sends to
+//! that API (see `net::registry`).
 
 pub mod index;
 pub mod pack;
