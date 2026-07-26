@@ -3,6 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, Tool};
 use crate::project::package;
+use crate::project::requires;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
 use crate::registry::resolver;
@@ -183,8 +184,10 @@ fn install_packages(
 
             match package::entry_point(member_dir) {
                 Some(entry) => {
-                    let mut require =
-                        format!("{}/{entry}", workspace::relative_path(&out, member_dir));
+                    let mut require = workspace::relative_path(&out, member_dir);
+                    if !entry.is_empty() {
+                        require = format!("{require}/{entry}");
+                    }
                     if !require.starts_with("..") {
                         require = format!("./{require}");
                     }
@@ -242,6 +245,12 @@ fn install_packages(
 
         match package::entry_point(&storage) {
             Some(entry) => {
+                /* packages from any index can talk roblox instance paths
+                (require(script.Parent.X)), wally stuff especially but ports
+                published to pesde or our index too; rewrite what we can into
+                string requires so they work without an instance tree. string
+                require packages come through unchanged */
+                requires::rewrite_instance_requires(&storage, &entry)?;
                 let types = link_types(&storage, &entry, &job.name, bar);
                 let link_path = out.join(format!("{}.luau", job.link));
                 fs::write(&link_path, package::link_contents(&folder, &entry, &types))?;
