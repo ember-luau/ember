@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// "1 package" / "3 packages" for the workspace publish error display.
+fn ui_plural_packages(count: usize) -> String {
+    format!("{count} package{}", if count == 1 { "" } else { "s" })
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("An lpm.toml manifest already exists in this directory")]
@@ -34,12 +39,29 @@ pub enum Error {
     PublishFailed { status: u16, message: String },
 
     #[error(
-        "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `include`/`exclude` under [package]"
+        "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"
     )]
     PublishTooLarge { size_mb: f64, limit_mb: u64 },
 
     #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
     PublishNotSupported(String),
+
+    #[error("No workspace member is named '{0}'")]
+    NoWorkspaceMember(String),
+
+    #[error(
+        "'{0}' is a workspace dependency, but this project is not part of a workspace (no ancestor lpm.toml lists it under workspace_members)"
+    )]
+    NotInWorkspace(String),
+
+    #[error("Workspace member {} has no lpm.toml", .0.display())]
+    WorkspaceMemberMissingManifest(PathBuf),
+
+    #[error("Invalid workspace_members glob '{glob}': {reason}")]
+    WorkspaceGlobInvalid { glob: String, reason: String },
+
+    #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]
+    WorkspacePublishFailed(Vec<String>),
 
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,

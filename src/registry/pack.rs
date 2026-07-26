@@ -10,9 +10,11 @@ const SKIP_NAMES: [&str; 5] = [".git", ".lpm-staging", "lpm.lock", "target", "no
 
 /// Files to publish, relative to `root`, sorted so the archive is
 /// deterministic. Configured packages-out folders are skipped alongside
-/// `SKIP_NAMES`. `include`/`exclude` entries are plain relative file or
-/// directory paths (a directory covers everything under it), not globs;
-/// lpm.toml is always kept.
+/// `SKIP_NAMES`; that walk is the whole selection when `includes` under
+/// [target] is absent. Entries in `includes`/`excludes` are relative file or
+/// directory paths (a directory covers everything under it) or globs
+/// (`src/*`); `excludes` subtracts from whatever was selected, and lpm.toml
+/// always ships.
 pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
     let out_dirs: Vec<PathBuf> = Environment::ALL
         .into_iter()
@@ -22,29 +24,91 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     let mut files = Vec::new();
     walk(root, root, &out_dirs, &mut files)?;
 
-    let include = &manifest.package.include;
-    let exclude = &manifest.package.exclude;
+    let empty = Vec::new();
+    let (includes, excludes) = match &manifest.target {
+        Some(target) => (&target.includes, &target.excludes),
+        None => (&empty, &empty),
+    };
+    let includes = PathFilter::new(includes)?;
+    let excludes = PathFilter::new(excludes)?;
     files.retain(|file| {
         if file.as_path() == Path::new(MANIFEST_FILE) {
             return true;
         }
-        if !include.is_empty() && !include.iter().any(|entry| file.starts_with(entry)) {
+        if !includes.is_empty() && !includes.matches(file) {
             return false;
         }
-        !exclude.iter().any(|entry| file.starts_with(entry))
+        !excludes.matches(file)
     });
 
     files.sort();
     Ok(files)
 }
 
+/// One includes/excludes list, compiled: entries with glob metacharacters
+/// match as globs, plain entries match as path prefixes (so a bare directory
+/// name covers everything under it).
+struct PathFilter {
+    paths: Vec<PathBuf>,
+    globs: globset::GlobSet,
+}
+
+impl PathFilter {
+    fn new(entries: &[String]) -> Result<Self, Error> {
+        let mut paths = Vec::new();
+        let mut globs = globset::GlobSetBuilder::new();
+        for entry in entries {
+            if entry.contains(['*', '?', '[', '{']) {
+                // literal_separator: `src/*` covers src's files, not the
+                // whole subtree — spell that `src/**` (or just `src`).
+                let glob = globset::GlobBuilder::new(entry)
+                    .literal_separator(true)
+                    .build()
+                    .map_err(|error| {
+                        Error::ManifestInvalid(format!(
+                            "invalid includes/excludes glob '{entry}': {error}"
+                        ))
+                    })?;
+                globs.add(glob);
+            } else {
+                paths.push(PathBuf::from(entry));
+            }
+        }
+        let globs = globs
+            .build()
+            .map_err(|error| Error::ManifestInvalid(error.to_string()))?;
+        Ok(PathFilter { paths, globs })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.globs.is_empty()
+    }
+
+    fn matches(&self, file: &Path) -> bool {
+        self.paths.iter().any(|path| file.starts_with(path)) || self.globs.is_match(file)
+    }
+}
+
 /// Packs the selected files into a gzipped tar. Entry paths are
-/// forward-slash relative paths without a leading "./".
+/// forward-slash relative paths without a leading "./". The lpm.toml entry
+/// is serialized from `manifest` rather than copied from disk — publish
+/// rewrites workspace dependencies into registry ones in memory, and the
+/// archive is where that rewrite has to land (the on-disk file is never
+/// touched), exactly like pesde.
 pub fn pack(root: &Path, manifest: &Manifest) -> Result<Vec<u8>, Error> {
     let files = packed_files(root, manifest)?;
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
     for file in &files {
-        builder.append_path_with_name(root.join(file), tar_path(file))?;
+        if file.as_path() == Path::new(MANIFEST_FILE) {
+            let contents = toml::to_string(manifest)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, MANIFEST_FILE, contents.as_bytes())?;
+        } else {
+            builder.append_path_with_name(root.join(file), tar_path(file))?;
+        }
     }
     Ok(builder.into_inner()?.finish()?)
 }
@@ -179,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn include_and_exclude_are_plain_path_filters() {
+    fn includes_and_excludes_are_plain_path_filters() {
         let base = std::env::temp_dir().join("lpm-test-pack-filters");
         let _ = fs::remove_dir_all(&base);
 
@@ -194,8 +258,11 @@ mod tests {
             [package]
             name = "acme/rocket"
             version = "1.0.0"
-            include = ["src", "README.md"]
-            exclude = ["src/tests"]
+
+            [target]
+            environment = "luau"
+            includes = ["src", "README.md"]
+            excludes = ["src/tests"]
             "#,
         );
 
@@ -241,7 +308,9 @@ mod tests {
         }
 
         assert_eq!(unpacked.len(), 3);
-        assert_eq!(unpacked["lpm.toml"], "[package]\nname = \"acme/rocket\"\n");
+        // The archive's manifest is serialized from memory (that's where
+        // publish's workspace-dep rewrite lives), not copied from disk.
+        assert_eq!(unpacked["lpm.toml"], toml::to_string(&manifest).unwrap());
         assert_eq!(unpacked["src/init.luau"], "return 1\n");
         assert_eq!(unpacked["docs/guide.md"], "# rocket\n");
 

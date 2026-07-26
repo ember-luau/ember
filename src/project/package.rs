@@ -6,12 +6,175 @@
 
 use crate::error::Error;
 use crate::project::manifest::Environment;
+use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
+use full_moon::visitors::Visitor;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Body of a generated link file, e.g. `return require("./.lpm/scope_pkg/lib")`.
-pub fn link_contents(folder: &str, entry: &str) -> String {
-    format!("return require(\"./.lpm/{folder}/{entry}\")\n")
+/// Body of a generated link file: requires the stored package and restates
+/// its exported types, e.g.
+///
+/// ```luau
+/// local module = require("./.lpm/scope_pkg/lib")
+/// export type Result<T, E = string> = module.Result<T, E>
+/// return module
+/// ```
+///
+/// A package exporting no types keeps the compact `return require(...)` form.
+pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
+    link_contents_at(&format!("./.lpm/{folder}/{entry}"), types)
+}
+
+/// Like [`link_contents`], but for an arbitrary require path — workspace
+/// members link straight to their source dir (`../../packages/core/src/init`)
+/// instead of an extracted copy under `.lpm/`.
+pub fn link_contents_at(path: &str, types: &[String]) -> String {
+    let path = format!("\"{path}\"");
+    if types.is_empty() {
+        return format!("return require({path})\n");
+    }
+
+    let mut contents = format!("local module = require({path})\n");
+    for line in types {
+        contents.push_str(line);
+        contents.push('\n');
+    }
+    contents.push_str("return module\n");
+    contents
+}
+
+/// The file an extensionless entry resolves to, the way Luau string requires
+/// do: `<entry>.luau`, `<entry>.lua`, then the folder's init file.
+pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
+    [
+        format!("{entry}.luau"),
+        format!("{entry}.lua"),
+        format!("{entry}/init.luau"),
+        format!("{entry}/init.lua"),
+    ]
+    .into_iter()
+    .map(|candidate| dir.join(candidate))
+    .find(|path| path.is_file())
+}
+
+/// full_moon's parser and visitors recurse once per nesting level, so deep
+/// sources need serious stack; parsing gets its own thread with this much.
+const PARSE_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Sources nested deeper than this are refused without parsing. A stack
+/// overflow cannot be caught — it aborts the whole process — so the ceiling
+/// has to be enforced before full_moon ever runs. Real Luau tops out around
+/// nesting depth ~50; this is 10x that.
+const MAX_NESTING_DEPTH: usize = 500;
+
+/// `export type` re-export lines for a link file. Luau type exports are
+/// lexical — they do not flow through `return require(...)` — so the link
+/// file must restate each one as `export type X<T> = module.X<T>`, the same
+/// scheme as pesde's linker: the declaration side keeps generic defaults,
+/// the use side drops them. Exported type functions re-export the same way,
+/// with their parameters as generics (parameterless ones have no
+/// type-declaration equivalent and are skipped). `None` means the source
+/// couldn't be parsed (invalid, absurdly nested, or a parser panic); the
+/// caller decides how loudly to say so.
+pub fn exported_types(source: &str) -> Option<Vec<String>> {
+    if bracket_depth(source) > MAX_NESTING_DEPTH {
+        return None;
+    }
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .name("luau-parse".to_string())
+        .stack_size(PARSE_STACK_BYTES)
+        .spawn(move || extract_types(&source))
+        .ok()?
+        .join()
+        .ok()? // a full_moon panic reads as "couldn't parse"
+}
+
+/// Deepest `(){}[]` nesting in `source`. A cheap over-approximation of the
+/// parser's recursion depth (brackets inside strings and comments count too,
+/// which only ever refuses more, never less).
+fn bracket_depth(source: &str) -> usize {
+    let mut depth = 0usize;
+    let mut deepest = 0;
+    for byte in source.bytes() {
+        match byte {
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b')' | b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+fn extract_types(source: &str) -> Option<Vec<String>> {
+    struct TypeVisitor {
+        types: Vec<String>,
+    }
+
+    impl Visitor for TypeVisitor {
+        fn visit_exported_type_declaration(&mut self, node: &ExportedTypeDeclaration) {
+            let declaration = node.type_declaration();
+            let name = declaration.type_name().token().to_string();
+
+            let mut declared = Vec::new();
+            let mut used = Vec::new();
+            if let Some(generics) = declaration.generics() {
+                for generic in generics.generics() {
+                    declared.push(trimmed(generic));
+                    used.push(if generic.default_type().is_some() {
+                        trimmed(generic.parameter())
+                    } else {
+                        trimmed(generic)
+                    });
+                }
+            }
+            self.types.push(reexport(&name, &declared, &used));
+        }
+
+        fn visit_exported_type_function(&mut self, node: &ExportedTypeFunction) {
+            let function = node.type_function();
+            let name = function.function_name().token().to_string();
+            let parameters: Vec<String> = function
+                .function_body()
+                .parameters()
+                .iter()
+                .map(trimmed)
+                .collect();
+            if parameters.is_empty() {
+                return;
+            }
+            self.types.push(reexport(&name, &parameters, &parameters));
+        }
+    }
+
+    let ast = full_moon::parse(source).ok()?;
+    let mut visitor = TypeVisitor { types: Vec::new() };
+    visitor.visit_ast(&ast);
+    Some(visitor.types)
+}
+
+/// AST nodes print with their surrounding trivia (whitespace, comments);
+/// trim the ends so re-exports stay tidy on one line.
+fn trimmed(node: impl std::fmt::Display) -> String {
+    node.to_string().trim().to_string()
+}
+
+fn reexport(name: &str, declared: &[String], used: &[String]) -> String {
+    let angled = |params: &[String]| {
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", params.join(", "))
+        }
+    };
+    format!(
+        "export type {name}{} = module.{name}{}",
+        angled(declared),
+        angled(used)
+    )
 }
 
 /// Finds a package's entry point relative to its root, without a file
@@ -206,11 +369,112 @@ mod tests {
     #[test]
     fn link_files_require_the_stored_package() {
         assert_eq!(
-            link_contents("evaera_promise", "lib"),
+            link_contents("evaera_promise", "lib", &[]),
             "return require(\"./.lpm/evaera_promise/lib\")\n"
+        );
+        assert_eq!(
+            link_contents(
+                "evaera_promise",
+                "lib",
+                &["export type Status = module.Status".to_string()]
+            ),
+            "local module = require(\"./.lpm/evaera_promise/lib\")\n\
+             export type Status = module.Status\n\
+             return module\n"
         );
         assert_eq!(normalize_entry("./src\\init.luau"), "src/init".to_string());
         assert_eq!(normalize_entry("lib.lua"), "lib".to_string());
         assert_eq!(normalize_entry("src"), "src".to_string());
+    }
+
+    #[test]
+    fn absurdly_nested_sources_are_refused_not_crashed() {
+        // full_moon recurses per nesting level; past the guard's ceiling the
+        // source is refused before the parser can eat the stack. (This once
+        // aborted the whole install with a stack overflow.)
+        let depth = 2000;
+        let deep = format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(depth),
+            " }".repeat(depth)
+        );
+        assert_eq!(exported_types(&deep), None);
+
+        // Deep-but-sane nesting still parses on the roomy parser thread.
+        let sane = format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(100),
+            " }".repeat(100)
+        );
+        assert_eq!(
+            exported_types(&sane).unwrap(),
+            ["export type Deep = module.Deep"]
+        );
+
+        assert_eq!(bracket_depth("({[]})"), 3);
+        assert_eq!(bracket_depth("}}}((("), 3);
+        assert_eq!(bracket_depth("plain"), 0);
+    }
+
+    #[test]
+    fn extracts_exported_types_for_reexport() {
+        let source = r#"
+            local private = {}
+            type Hidden = { secret: boolean } -- not exported: stays hidden
+            export type Status = "Started" | "Resolved"
+            export type Promise<T> = { andThen: (Promise<T>, (T) -> ()) -> Promise<T> }
+            export type Result<T, E = string> = { ok: T?, err: E? }
+            export type Pack<T...> = (T...) -> ()
+            return private
+        "#;
+
+        assert_eq!(
+            exported_types(source).unwrap(),
+            [
+                "export type Status = module.Status",
+                "export type Promise<T> = module.Promise<T>",
+                // Declaration keeps the default, the use side drops it.
+                "export type Result<T, E = string> = module.Result<T, E>",
+                "export type Pack<T...> = module.Pack<T...>",
+            ]
+        );
+
+        assert_eq!(exported_types("return {}").unwrap(), Vec::<String>::new());
+        // A file that isn't Luau parses to nothing rather than bad re-exports.
+        assert_eq!(exported_types("local = = ="), None);
+    }
+
+    #[test]
+    fn reexports_exported_type_functions_with_parameters() {
+        let source = r#"
+            export type function Partial(ty)
+                return ty
+            end
+            export type function Constant()
+                return types.singleton("x")
+            end
+            return {}
+        "#;
+
+        // Parameterless type functions can't be restated as a declaration.
+        assert_eq!(
+            exported_types(source).unwrap(),
+            ["export type Partial<ty> = module.Partial<ty>"]
+        );
+    }
+
+    #[test]
+    fn entry_source_resolves_like_a_string_require() {
+        let base = std::env::temp_dir().join("lpm-test-entry-source");
+        let _ = fs::remove_dir_all(&base);
+
+        write_package(&base, "lib.luau", "return {}");
+        assert_eq!(entry_source(&base, "lib"), Some(base.join("lib.luau")));
+
+        write_package(&base.join("src"), "init.lua", "return {}");
+        assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.lua")));
+        assert_eq!(entry_source(&base, "missing"), None);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
