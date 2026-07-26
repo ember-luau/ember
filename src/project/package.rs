@@ -232,6 +232,59 @@ pub fn environment(dir: &Path) -> Option<Environment> {
     None
 }
 
+/** an extracted package's declared runtime dependencies, as (alias,
+lowercased package name) pairs — what install's nested-link pass consumes.
+the first manifest with a [dependencies] table wins, same priority order as
+the other readers here: lpm.toml (each entry's `name` key), pesde.toml
+(`name`, or `wally` for wally-sourced entries), wally.toml
+(`alias = "scope/name@req"`). runtime dependencies only — dev/peer/server
+tables don't ship in the consumer's tree, so they get no links. missing or
+unparseable manifests read as no dependencies, same stance as
+`toml_string`. */
+pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
+    /// how one manifest flavor names the package a [dependencies] entry means
+    type DependencyName = fn(&toml::Value) -> Option<String>;
+
+    let manifests: [(&str, DependencyName); 3] = [
+        ("lpm.toml", |entry| {
+            Some(entry.get("name")?.as_str()?.to_string())
+        }),
+        ("pesde.toml", |entry| {
+            let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
+            // pesde serializes wally package names with a "wally#" prefix
+            Some(name.strip_prefix("wally#").unwrap_or(name).to_string())
+        }),
+        ("wally.toml", |entry| {
+            let spec = entry.as_str()?;
+            Some(
+                spec.split_once('@')
+                    .map_or(spec, |(name, _)| name)
+                    .to_string(),
+            )
+        }),
+    ];
+
+    for (file, dependency_name) in manifests {
+        let Some(parsed) = fs::read_to_string(dir.join(file))
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+        else {
+            continue;
+        };
+        let Some(table) = parsed.get("dependencies").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        return table
+            .iter()
+            // entries this flavor can't name (e.g. workspace specifiers) are skipped
+            .filter_map(|(alias, entry)| {
+                Some((alias.clone(), dependency_name(entry)?.trim().to_lowercase()))
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
 /// archives sometimes wrap everything in one top-level folder (GitHub release tarballs do); unwrap so package files sit at the root.
 pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
     let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
@@ -315,6 +368,93 @@ mod tests {
         write_package(&base, "wally.toml", "[package]\nrealm = \"server\"");
         write_package(&base, "lpm.toml", "[target]\nenvironment = \"luau\"");
         assert_eq!(environment(&base), Some(Environment::Luau));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reads_declared_dependencies_per_manifest_flavor() {
+        let base = std::env::temp_dir().join("lpm-test-declared-deps");
+        let _ = fs::remove_dir_all(&base);
+
+        // lpm.toml: `name` keys, lowercased; entries without one (workspace
+        // specifiers) are skipped.
+        let lpm = base.join("lpm");
+        write_package(
+            &lpm,
+            "lpm.toml",
+            "[dependencies]\ncore = { name = \"Chief/Core\", version = \"^0.2.0\" }\n\
+             local = { workspace = \"chief/dev\", version = \"^\" }\n",
+        );
+        assert_eq!(
+            declared_dependencies(&lpm),
+            [("core".to_string(), "chief/core".to_string())]
+        );
+
+        /* pesde.toml: `name`, or `wally` for wally-sourced entries — which
+        pesde serializes with a "wally#" prefix the install set doesn't
+        carry */
+        let pesde = base.join("pesde");
+        write_package(
+            &pesde,
+            "pesde.toml",
+            "[dependencies]\nhello = { name = \"pesde/hello\", version = \"^1\" }\n\
+             promise = { wally = \"wally#evaera/Promise\", version = \"^4\" }\n",
+        );
+        let mut deps = declared_dependencies(&pesde);
+        deps.sort();
+        assert_eq!(
+            deps,
+            [
+                ("hello".to_string(), "pesde/hello".to_string()),
+                ("promise".to_string(), "evaera/promise".to_string()),
+            ]
+        );
+
+        // wally.toml: `alias = "scope/name@req"`, req stripped.
+        let wally = base.join("wally");
+        write_package(
+            &wally,
+            "wally.toml",
+            "[dependencies]\nPromise = \"evaera/promise@^4.0.0\"\n\n\
+             [dev-dependencies]\nTestEZ = \"roblox/testez@^0.4\"\n",
+        );
+        assert_eq!(
+            declared_dependencies(&wally),
+            [("Promise".to_string(), "evaera/promise".to_string())]
+        );
+
+        // no manifests at all -> no dependencies.
+        let none = base.join("none");
+        fs::create_dir_all(&none).unwrap();
+        assert!(declared_dependencies(&none).is_empty());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn declared_dependencies_follow_reader_priority() {
+        let base = std::env::temp_dir().join("lpm-test-declared-deps-priority");
+        let _ = fs::remove_dir_all(&base);
+
+        // an lpm.toml [dependencies] table wins outright over wally.toml...
+        write_package(
+            &base,
+            "lpm.toml",
+            "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n",
+        );
+        write_package(&base, "wally.toml", "[dependencies]\nOther = \"a/b@^1\"\n");
+        assert_eq!(
+            declared_dependencies(&base),
+            [("core".to_string(), "acme/core".to_string())]
+        );
+
+        // ...but an lpm.toml without one falls through to the next manifest.
+        fs::write(base.join("lpm.toml"), "[package]\nname = \"acme/thing\"\n").unwrap();
+        assert_eq!(
+            declared_dependencies(&base),
+            [("Other".to_string(), "a/b".to_string())]
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
