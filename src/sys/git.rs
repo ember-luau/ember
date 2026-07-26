@@ -1,10 +1,10 @@
-//! Shelling out to git. The index cache clones and pulls with it; `lpm init`
-//! reads the surrounding repo for prompt defaults.
+/*! Shelling out to git. the index cache clones and pulls with it; `lpm
+init` reads the surrounding repo for prompt defaults. */
 
 use std::process::Command;
 
-/// Runs git, reporting failures as its stderr. Callers wrap that string in
-/// whatever error fits, so this stays free of crate::Error.
+/** Runs git, reporting failures as its stderr. callers wrap that string in
+whatever error fits, which keeps this free of crate::Error. */
 pub fn run(args: &[&str]) -> Result<(), String> {
     let output = Command::new("git")
         .args(args)
@@ -18,8 +18,8 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Trimmed stdout of a git command, or None when there is nothing useful to
-/// report: git missing, not a repository, or the value simply unset.
+/** Trimmed stdout of a git command, or None when there's nothing useful:
+git missing, not a repo, or the value simply unset. */
 pub fn output(args: &[&str]) -> Option<String> {
     let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {
@@ -30,9 +30,9 @@ pub fn output(args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-/// Normalizes a git remote URL ("git@host:owner/repo.git",
-/// "ssh://git@host/owner/repo", "https://host/owner/repo.git", ...) into a
-/// plain https link. None for protocols we can't rewrite.
+/** Normalizes a git remote URL (git@host:..., ssh://git@host/...,
+https://host/....git) into a plain https link. None for protocols we
+can't rewrite. */
 pub fn remote_https_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches(".git");
 
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn failed_commands_report_nothing() {
-        // A flag git will always reject, so this needs no repository.
+        // a flag git always rejects, so no repo needed.
         assert_eq!(output(&["--not-a-real-flag"]), None);
         assert!(run(&["--not-a-real-flag"]).is_err());
     }

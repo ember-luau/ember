@@ -1,6 +1,8 @@
-//! GitHub's OAuth device flow and the token store it writes. Publishing
-//! authenticates with the resulting token: the registry API takes it as a
-//! Bearer header and maps it to a GitHub login for scope ownership.
+/*!
+GitHub's OAuth device flow and the token store it writes. Publishing sends
+the token as a Bearer header; the registry API maps it to a GitHub login for
+scope ownership.
+*/
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
@@ -22,8 +24,7 @@ pub struct Credentials {
     pub login: String,
 }
 
-/// On-disk shape of credentials.toml; separate so the public struct stays
-/// serde-free.
+/// On-disk shape of credentials.toml; keeps the public struct serde-free.
 #[derive(Serialize, Deserialize)]
 struct CredentialsFile {
     token: String,
@@ -33,9 +34,9 @@ struct CredentialsFile {
 pub fn load() -> Result<Option<Credentials>, Error> {
     let path = paths::credentials_file()?;
 
-    // A corrupt or unreadable file is treated as "not logged in" rather than
-    // an error: the worst case is re-running the device flow, while a hard
-    // failure here would brick every command that touches credentials.
+    /* Corrupt or unreadable file reads as "not logged in": worst case is
+    re-running the device flow, while a hard failure here would brick
+    every command that touches credentials. */
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(None);
     };
@@ -52,9 +53,9 @@ pub fn save(credentials: &Credentials) -> Result<(), Error> {
     Ok(())
 }
 
-/// Deletes the stored credentials; missing file is fine. Used when the
-/// registry rejects the token (revoked or expired) so the next attempt runs
-/// the device flow instead of resending a dead token forever.
+/** Deletes the stored credentials; missing file is fine. Called when the
+registry rejects the token (revoked/expired) so the next attempt runs the
+device flow instead of resending a dead token forever. */
 pub fn clear() -> Result<(), Error> {
     match fs::remove_file(paths::credentials_file()?) {
         Ok(()) => Ok(()),
@@ -63,8 +64,8 @@ pub fn clear() -> Result<(), Error> {
     }
 }
 
-/// Runs the GitHub device flow regardless of stored state and saves the
-/// result. `client_id` comes from the index's config.
+/** Runs the device flow regardless of stored state and saves the result.
+`client_id` comes from the index's config, not the binary. */
 pub fn login(client_id: &str) -> Result<Credentials, Error> {
     let credentials = device_flow(client_id)?;
     save(&credentials)?;
@@ -73,8 +74,9 @@ pub fn login(client_id: &str) -> Result<Credentials, Error> {
 }
 
 fn device_flow(client_id: &str) -> Result<Credentials, Error> {
-    // No scope requested: the registry only maps the token to a GitHub login,
-    // and an unscoped token can already read the public profile.
+    /* No OAuth scopes requested: the registry only maps the token to a
+    GitHub login, and an unscoped token can already read the public
+    profile. */
     let device: responses::DeviceCode = http::post_form(
         DEVICE_CODE_URL,
         &[("Accept", "application/json")],
@@ -168,8 +170,8 @@ fn from_toml(text: &str) -> Option<Credentials> {
     })
 }
 
-/// The token grants repo access; keep the file owner-only. No-op on Windows,
-/// where the profile directory's ACL already restricts it.
+/** Keep the token file owner-only. No-op on Windows, where the profile
+directory's ACL already restricts it. */
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;

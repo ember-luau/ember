@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// "1 package" / "3 packages" for the workspace publish error display.
+/// "1 package" / "3 packages" for the workspace publish error.
 fn ui_plural_packages(count: usize) -> String {
     format!("{count} package{}", if count == 1 { "" } else { "s" })
 }
@@ -32,9 +32,9 @@ pub enum Error {
     #[error("GitHub authorization failed: {0}")]
     AuthFailed(String),
 
-    /// The registry refused a publish. `message` is the human-readable
-    /// `error` field from the API's response body (bad token, scope owned by
-    /// someone else, version already exists, ...).
+    /** the registry refused a publish. `message` is the human-readable
+    `error` field from the API's response body (bad token, scope owned
+    by someone else, version already exists, ...). */
     #[error("Publishing failed: {message}")]
     PublishFailed { status: u16, message: String },
 
@@ -195,7 +195,6 @@ pub enum Error {
     #[error(transparent)]
     Semver(#[from] semver::Error),
 
-    // Uses the http errors made
     #[error(transparent)]
     Http(#[from] crate::net::http::error::HttpError),
 }

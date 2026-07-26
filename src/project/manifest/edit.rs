@@ -1,7 +1,7 @@
-//! Editing side of the manifest. Commands that change lpm.toml (or the global
-//! tools file) all need the same handful of steps: open the right file, reach
-//! for a table, write it back. They go through `ManifestDoc` so the toml_edit
-//! dance lives in one place and comments/formatting survive every write.
+/*! editing side of the manifest. every command that changes lpm.toml (or the
+global tools file) needs the same steps: open the right file, reach for a table,
+write it back. all of it goes through `ManifestDoc` so the toml_edit dance lives
+in one place and comments/formatting survive every write. */
 
 use super::MANIFEST_FILE;
 use crate::error::Error;
@@ -10,11 +10,10 @@ use std::fs;
 use std::path::PathBuf;
 use toml_edit::{DocumentMut, Item, Table};
 
-/// Which file a command edits. Most tool commands take a `--global` flag that
-/// picks between the two.
+/// which file a command edits. most tool commands take a `--global` flag that picks between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// The lpm.toml in the current directory.
+    /// lpm.toml in the current directory.
     Project,
     /// ~/.lpm/tools.toml, whose tools resolve in any directory.
     Global,
@@ -36,7 +35,7 @@ impl Scope {
         }
     }
 
-    /// How the file is named when a command talks about it.
+    /// how the file is named when a command talks about it.
     pub fn label(self) -> &'static str {
         match self {
             Scope::Project => "lpm.toml",
@@ -45,16 +44,16 @@ impl Scope {
     }
 }
 
-/// A manifest opened for editing.
+/// a manifest opened for editing.
 pub struct ManifestDoc {
     path: PathBuf,
     document: DocumentMut,
 }
 
 impl ManifestDoc {
-    /// Opens an existing manifest. A missing project file is the friendly
-    /// `ManifestMissing` error rather than a raw io one, since these commands
-    /// get run outside projects all the time.
+    /** opens an existing manifest. a missing project file is the friendly
+    `ManifestMissing` error rather than a raw io one; these commands get run
+    outside projects all the time. */
     pub fn open(scope: Scope) -> Result<Self, Error> {
         let path = scope.path()?;
         if !path.exists() {
@@ -64,9 +63,9 @@ impl ManifestDoc {
         Ok(ManifestDoc { path, document })
     }
 
-    /// Same, except a missing global tools file starts an empty document: it
-    /// only comes into existence when the first global tool is added. Project
-    /// manifests are still never created here, that is `lpm init`'s job.
+    /** same, except a missing global tools file starts an empty document (it only
+    exists once the first global tool is added). project manifests are still never
+    created here; that's `lpm init`'s job. */
     pub fn open_or_create(scope: Scope) -> Result<Self, Error> {
         let path = scope.path()?;
         if scope == Scope::Global && !path.exists() {
@@ -78,8 +77,7 @@ impl ManifestDoc {
         Self::open(scope)
     }
 
-    /// The table named `name`, or None when the file has no such section. A
-    /// key that exists but isn't a table (`tools = 3`) is always an error.
+    /// the table named `name`, or None when the file has no such section. a key that exists but isn't a table (`tools = 3`) is always an error.
     pub fn table(&mut self, name: &str) -> Result<Option<&mut Table>, Error> {
         match self.document.get_mut(name) {
             None => Ok(None),
@@ -90,13 +88,13 @@ impl ManifestDoc {
         }
     }
 
-    /// The table named `name`, erroring when the manifest doesn't have it.
+    /// the table named `name`, erroring when the manifest doesn't have it.
     pub fn require_table(&mut self, name: &str) -> Result<&mut Table, Error> {
         self.table(name)?
             .ok_or_else(|| Error::ManifestInvalid(format!("[{name}] doesn't exist")))
     }
 
-    /// The table named `name`, appended to the file when it's missing.
+    /// the table named `name`, appended to the file when it's missing.
     pub fn table_or_create(&mut self, name: &str) -> Result<&mut Table, Error> {
         self.document
             .entry(name)
@@ -105,8 +103,7 @@ impl ManifestDoc {
             .ok_or_else(|| not_a_table(name))
     }
 
-    /// Drops a table once nothing is left in it, so removing the last entry
-    /// doesn't leave a bare `[tools]` header behind.
+    /// drops an emptied table so removing the last entry doesn't leave a bare `[tools]` header behind.
     pub fn drop_if_empty(&mut self, name: &str) {
         if self
             .document
@@ -118,8 +115,7 @@ impl ManifestDoc {
         }
     }
 
-    /// Writes the document back. Parent directories are created because the
-    /// global tools file lives in ~/.lpm, which may not exist yet.
+    /// writes the document back. parent dirs get created because the global tools file lives in ~/.lpm, which may not exist yet.
     pub fn save(&self) -> Result<(), Error> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -188,7 +184,7 @@ mod tests {
         manifest.drop_if_empty("tools");
         assert!(!manifest.document.to_string().contains("[tools]"));
 
-        // A table with entries left in it stays put.
+        // a table with entries left in it stays put.
         let mut manifest = doc("[tools]\nrojo = \"a/b@1\"\n");
         manifest.drop_if_empty("tools");
         assert!(manifest.document.to_string().contains("[tools]"));

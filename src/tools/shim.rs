@@ -1,7 +1,8 @@
-//! How a tool alias becomes a running binary. Shims are copies of lpm named
-//! after their alias (aftman-style); invoked under such a name, lpm looks up
-//! which repo@version the surrounding project pins the alias to and hands off
-//! to the stored binary. That lookup is what scopes tools to their projects.
+/*! How a tool alias becomes a running binary. shims are copies of lpm named
+after their alias (aftman-style); invoked under such a name, lpm looks
+up which repo@version the surrounding project pins the alias to and
+hands off to the stored binary. that lookup is what scopes tools to
+their projects. */
 
 use super::stored_executable;
 use crate::error::Error;
@@ -14,9 +15,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The alias this process was invoked under, or None when running as the real
-/// lpm CLI. "lpm" itself and "lpm-*" stems count as the CLI because release
-/// assets are named "lpm-{os}-{arch}".
+/** The alias this process was invoked under, or None when running as the
+real CLI. "lpm" itself and "lpm-*" stems count as the CLI because
+release assets are named "lpm-{os}-{arch}". */
 pub fn shim_alias() -> Option<String> {
     let exe = env::current_exe().ok()?;
     alias_from_stem(exe.file_stem()?.to_str()?)
@@ -31,8 +32,8 @@ fn alias_from_stem(stem: &str) -> Option<String> {
     }
 }
 
-/// Runs `alias` as a tool shim. Only returns the tool's exit code on platforms
-/// without exec (Windows); on unix the tool replaces this process.
+/** Runs `alias` as a tool shim. on unix the tool replaces this process; the
+exit code only comes back on platforms without exec (windows). */
 pub fn run(alias: &str) -> Result<i32, Error> {
     let tool = resolve_alias(alias, &env::current_dir()?, &paths::global_tools_file()?)?;
     let stored = stored_executable(&tool.repository, &tool.version)?;
@@ -45,22 +46,22 @@ pub fn run(alias: &str) -> Result<i32, Error> {
     process::exec(command)
 }
 
-/// Path of the shim an alias is invoked through, e.g. ~/.lpm/bin/stylua.
+/// the shim an alias is invoked through, e.g. ~/.lpm/bin/stylua.
 pub fn path(alias: &str) -> Result<PathBuf, Error> {
     Ok(paths::bin_dir()?.join(format!("{alias}{}", env::consts::EXE_SUFFIX)))
 }
 
-/// Writes the alias shim: a copy of the running lpm executable.
+/// writes the alias shim: a copy of the running lpm executable.
 pub fn write(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
     fs::copy(env::current_exe()?, shim)?;
     super::make_executable(shim)
 }
 
-/// The executable `alias` currently resolves to on PATH when that is NOT our
-/// shim — i.e. another toolchain manager (aftman, rokit, foreman) or a stray
-/// copy that shadows the lpm-managed tool, producing that manager's errors
-/// instead of running what lpm installed.
+/** What `alias` currently resolves to on PATH when that is NOT our shim:
+another toolchain manager (aftman, rokit, foreman) or a stray copy
+shadowing the lpm-managed tool, so users get that manager's errors
+instead of what lpm installed. */
 pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
     let bin = paths::bin_dir().ok()?;
     let file = format!("{alias}{}", env::consts::EXE_SUFFIX);
@@ -70,7 +71,7 @@ pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
         }
         let candidate = dir.join(&file);
         if candidate.is_file() {
-            // The first hit wins, mirroring OS command lookup
+            // first hit wins, same as OS command lookup
             return if paths::same_file(&dir, &bin) || dir == bin {
                 None
             } else {
@@ -81,8 +82,8 @@ pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
     None
 }
 
-/// Finds the tool an alias refers to: the nearest lpm.toml walking up from
-/// `start` whose [tools] lists the alias wins, then the global tools file.
+/** Which tool an alias means: the nearest lpm.toml walking up from `start`
+whose [tools] lists it wins, then the global tools file. */
 fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error> {
     for dir in start.ancestors() {
         if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))?
@@ -99,9 +100,9 @@ fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error
     Err(Error::ToolNotManaged(alias.to_string()))
 }
 
-/// Tools visible from `start` through project manifests: the union over
-/// ancestor lpm.tomls, the nearest manifest winning per alias — the same
-/// scope `run` resolves aliases against.
+/** Tools visible from `start` through project manifests: the union over
+ancestor lpm.tomls, nearest manifest winning per alias. same scope `run`
+resolves aliases against. */
 pub fn project_tools(start: &Path) -> Result<BTreeMap<String, Tool>, Error> {
     let mut merged = BTreeMap::new();
     for dir in start.ancestors() {
@@ -114,14 +115,13 @@ pub fn project_tools(start: &Path) -> Result<BTreeMap<String, Tool>, Error> {
     Ok(merged)
 }
 
-/// Tools pinned by the global tools file; empty when it does not exist yet.
+/// tools pinned by the global tools file; empty when it doesn't exist yet.
 pub fn global_tools() -> Result<BTreeMap<String, Tool>, Error> {
     Ok(tools_in(&paths::global_tools_file()?)?.unwrap_or_default())
 }
 
-/// Just the [tools] table of a manifest, parsed leniently so the shim can
-/// read both project manifests and the global tools file (which has no
-/// [package] section).
+/** Just the [tools] table, parsed leniently so the shim can read both
+project manifests and the global tools file (which has no [package]). */
 #[derive(Deserialize)]
 struct ToolsTable {
     #[serde(default)]
@@ -136,8 +136,8 @@ fn tools_in(path: &Path) -> Result<Option<BTreeMap<String, Tool>>, Error> {
     Ok(Some(table.tools))
 }
 
-/// Alias lookup, exact key first; Windows resolves commands case-insensitively
-/// so a shim can be invoked as "Rojo" while the manifest key is "rojo".
+/** Alias lookup, exact key first; windows resolves commands
+case-insensitively, so "Rojo" can hit a manifest key of "rojo". */
 fn get_tool<'a>(tools: &'a BTreeMap<String, Tool>, alias: &str) -> Option<&'a Tool> {
     tools.get(alias).or_else(|| {
         tools
@@ -154,7 +154,7 @@ mod tests {
     fn shim_aliases_exclude_lpm_itself() {
         assert_eq!(alias_from_stem("lpm"), None);
         assert_eq!(alias_from_stem("LPM"), None);
-        // Release assets run before `self install` renames them.
+        // release assets run before `self install` renames them.
         assert_eq!(alias_from_stem("lpm-windows-x86_64"), None);
         assert_eq!(alias_from_stem("rojo"), Some("rojo".to_string()));
         assert_eq!(alias_from_stem("StyLua"), Some("StyLua".to_string()));
@@ -180,16 +180,16 @@ mod tests {
         )
         .unwrap();
 
-        // Project manifests win, found from any directory below them.
+        // project manifests win, found from any directory below them.
         let tool = resolve_alias("rojo", &nested, &global).unwrap();
         assert_eq!(tool.repository, "rojo-rbx/rojo");
         assert_eq!(tool.version, "7.4.4");
 
-        // Aliases the project does not list fall back to the global file.
+        // aliases the project doesn't list fall back to the global file.
         let tool = resolve_alias("stylua", &nested, &global).unwrap();
         assert_eq!(tool.repository, "johnnymorganz/stylua");
 
-        // Windows command lookup is case-insensitive; resolution must be too.
+        // windows command lookup is case-insensitive; resolution must be too.
         assert!(resolve_alias("Rojo", &nested, &global).is_ok());
 
         assert!(matches!(

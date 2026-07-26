@@ -6,11 +6,9 @@ use std::path::Path;
 
 pub const LOCKFILE: &str = "lpm.lock";
 
-/// Records exactly what `lpm install` resolved, so `lpm install --locked`
-/// can reproduce it without consulting any index.
+/// exactly what `lpm install` resolved, so `--locked` can replay it without touching any index.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Lockfile {
-    /// Lockfile format version.
     pub version: u32,
     #[serde(default, rename = "package")]
     pub packages: Vec<LockedPackage>,
@@ -21,7 +19,7 @@ pub struct LockedPackage {
     pub name: String,
     pub version: String,
     pub environment: Environment,
-    /// Link file name generated in the environment folder.
+    /// link file name in the environment folder.
     pub link: String,
     pub index: String,
     #[serde(flatten)]

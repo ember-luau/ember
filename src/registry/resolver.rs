@@ -15,27 +15,28 @@ pub struct ResolvedInstall {
     pub environment: Option<Environment>,
     pub source: DownloadSource,
     pub index_url: String,
-    /// Name of the generated link file: the [dependencies] alias for direct
-    /// dependencies, the package's short name for transitive ones.
+    /** Name of the generated link file: the [dependencies] alias for direct
+    deps, the package's short name for transitive ones. */
     pub link: String,
 }
 
 /// Where a queued dependency comes from.
 enum Request {
-    /// Resolve in a git index.
-    Registry { req_text: String, index_url: String },
-    /// Resolve to a member of this project's workspace. Like pesde, any
-    /// `version` on the specifier is ignored locally — the member's current
-    /// version is what you get (it only matters when publishing).
+    Registry {
+        req_text: String,
+        index_url: String,
+    },
+    /** A member of this project's workspace. Like pesde, any `version` on
+    the specifier is ignored locally; you get the member's current version
+    (the req only matters when publishing). */
     Workspace,
 }
 
-/// Resolves the manifest's dependency graph breadth-first. Transitive
-/// dependencies (including cross-manager ones, e.g. a pesde package pulling a
-/// wally package) all flatten into one install set, deduped by package name;
-/// a requirement that rejects the already-chosen version is a hard error.
-/// Workspace dependencies resolve to sibling projects on disk and carry their
-/// own dependencies into the same set.
+/** Resolves the manifest's dependency graph breadth-first. Transitive deps
+(cross-manager ones too, e.g. a pesde package pulling a wally one) flatten
+into one install set, deduped by package name; a requirement that rejects the
+already-chosen version is a hard error. Workspace deps resolve to sibling
+projects on disk and bring their own deps into the same set. */
 pub fn resolve(
     manifest: &Manifest,
     project_dir: &Path,
@@ -43,15 +44,15 @@ pub fn resolve(
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let prefer_environment = manifest.target.as_ref().map(|target| target.environment);
     let mut indices: HashMap<String, Index> = HashMap::new();
-    // The workspace is only discovered (walking up for a claiming root) when
-    // a workspace dependency actually appears.
+    /* Only walk up looking for a claiming workspace root once a workspace
+    dep actually appears. */
     let mut workspace_memo: Option<Option<Workspace>> = None;
 
     let mut queue: VecDeque<(String, Request, Option<String>)> = VecDeque::new();
 
-    // Seeding all direct dependencies before any transitive one is discovered
-    // matters: the first entry per name wins, so a package that also shows up
-    // transitively still links under its manifest alias.
+    /* Seed all direct deps before any transitive one is discovered: first
+    entry per name wins, so a package that also shows up transitively
+    still links under its manifest alias. */
     for (alias, dependency) in &manifest.dependencies {
         queue.push_back((
             dependency_name(dependency).to_lowercase(),
@@ -60,8 +61,8 @@ pub fn resolve(
         ));
     }
 
-    // name -> (what we resolved, the requirement that won). A BTreeMap keeps
-    // the install set (and the lockfile written from it) in name order.
+    /* name -> (what we resolved, the req that won). BTreeMap keeps the
+    install set, and the lockfile written from it, in name order. */
     let mut resolved: BTreeMap<String, (ResolvedInstall, String)> = BTreeMap::new();
 
     while let Some((name, request, link)) = queue.pop_front() {
@@ -124,8 +125,8 @@ pub fn resolve(
                     .map(|target| target.environment)
                     .ok_or_else(|| Error::UnknownPackageEnvironment(name.clone()))?;
 
-                // The member's own dependencies install for the consumer too;
-                // its registry deps resolve against the member's [indices].
+                /* The member's own deps install for the consumer too; its
+                registry deps resolve against the member's [indices]. */
                 for dependency in member.manifest.dependencies.values() {
                     queue.push_back((
                         dependency_name(dependency).to_lowercase(),
@@ -165,8 +166,8 @@ fn dependency_name(dependency: &Dependency) -> &str {
     }
 }
 
-/// Builds the queue entry for a dependency of `owner` (index keys resolve
-/// against the owner's [indices], so a member's deps use the member's).
+/** Queue entry for a dependency of `owner`. Index keys resolve against the
+owner's [indices], so a member's deps use the member's. */
 fn request_for(dependency: &Dependency, owner: &Manifest) -> Result<Request, Error> {
     Ok(match dependency {
         Dependency::Registry { version, index, .. } => Request::Registry {
@@ -177,9 +178,9 @@ fn request_for(dependency: &Dependency, owner: &Manifest) -> Result<Request, Err
     })
 }
 
-/// The workspace this project resolves members from: itself when it declares
-/// members, otherwise the nearest ancestor that claims it. Memoized — glob
-/// walks and manifest reads shouldn't repeat per dependency.
+/** The workspace this project resolves members from: itself when it declares
+members, otherwise the nearest ancestor that claims it. Memoized so glob
+walks and manifest reads don't repeat per dependency. */
 fn workspace_context<'memo>(
     memo: &'memo mut Option<Option<Workspace>>,
     manifest: &Manifest,
@@ -244,8 +245,8 @@ mod tests {
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"^\" }\n",
         );
 
-        // Resolving from a member: its workspace dep and that dep's own
-        // workspace dep all land in the install set, linked in place.
+        /* Resolving from a member: its workspace dep and that dep's own
+        workspace dep all land in the install set, linked in place. */
         let member_dir = base.join("packages/extra");
         let manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
         let installs = resolve(&manifest, &member_dir, false).unwrap();
@@ -261,9 +262,9 @@ mod tests {
             DownloadSource::Workspace { path } if path == "../core"
         ));
 
-        // Resolving from the root: members resolve through the root's own
-        // member list (no ancestor needed), and transitive workspace deps of
-        // members come along.
+        /* Resolving from the root: members resolve through the root's own
+        member list (no ancestor needed), and members' transitive
+        workspace deps come along. */
         let root_manifest_text = "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
              [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";

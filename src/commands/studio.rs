@@ -16,8 +16,8 @@ pub enum StudioCommand {
     Open,
 }
 
-/// Bare `lpm studio` never gets here: clap prints the studio help instead
-/// (arg_required_else_help in main.rs).
+/** bare `lpm studio` never gets here: clap prints the studio help instead
+(arg_required_else_help in main.rs). */
 pub fn run(command: StudioCommand) -> Result<(), Error> {
     match command {
         StudioCommand::Init => init(),
@@ -29,14 +29,14 @@ const PUBLISHED_PLACE: &str = "Published place (universe and place IDs)";
 const LOCAL_FILE: &str = "Local place file (.rbxl / .rbxlx)";
 
 fn init() -> Result<(), Error> {
-    // Open the manifest first so a missing or unparsable one fails before
-    // any prompting, same as `lpm index add`.
+    /* open the manifest first so a missing/broken one fails before any
+    prompting, same as `lpm index add` */
     let mut document = ManifestDoc::open(Scope::Project)?;
 
-    // A [studio] with anything in it — including an inline `studio = {...}`,
-    // which table() rejects — is left alone. An empty table from a hand-edit
-    // is simply filled in, so `open`'s "run `lpm studio init`" advice always
-    // works.
+    /* a [studio] with anything in it (including an inline `studio = {...}`,
+    which table() rejects) is left alone. an empty table from a hand-edit
+    just gets filled in, so `open`'s "run `lpm studio init`" advice always
+    works */
     let occupied = match document.table("studio") {
         Ok(table) => table.is_some_and(|table| !table.is_empty()),
         Err(_) => true,
@@ -106,7 +106,7 @@ fn open() -> Result<(), Error> {
             let path = Path::new(&file);
             validate_place_file(path)?;
             ensure_file_handler(path)?;
-            // Absolute so the handler doesn't depend on inheriting our cwd.
+            // absolute so the handler doesn't depend on inheriting our cwd
             os_open(std::path::absolute(path)?.as_os_str())?;
             ui::print_success(&format!("Opening {file} in Roblox Studio"));
         }
@@ -114,17 +114,17 @@ fn open() -> Result<(), Error> {
     Ok(())
 }
 
-/// The deep link Roblox's own website uses for its "Edit in Studio" buttons.
-/// Going through the protocol handler — instead of hunting for the versioned,
-/// auto-updating Studio executable — keeps this working across Studio updates
-/// on every platform, and involves no credentials: Studio authenticates the
-/// user itself once it opens.
+/** the deep link Roblox's own website uses for its "Edit in Studio" buttons.
+going through the protocol handler (instead of hunting for the versioned,
+auto-updating Studio executable) keeps this working across Studio updates
+on every platform, and involves no credentials: Studio authenticates the
+user itself once it opens. */
 fn place_uri(universe: u64, place: u64) -> String {
     format!("roblox-studio:1+launchmode:edit+task:EditPlace+placeId:{place}+universeId:{universe}")
 }
 
-/// Everything that can be checked about `file` before Studio is involved: it
-/// names a place file, it exists, and it's a file rather than a folder.
+/** everything checkable about `file` before Studio gets involved: names a
+place file, exists, and is a file rather than a folder. */
 fn validate_place_file(path: &Path) -> Result<(), Error> {
     let name = path.display().to_string();
     if !is_place_path(path) {
@@ -134,22 +134,22 @@ fn validate_place_file(path: &Path) -> Result<(), Error> {
         return Err(Error::StudioFileMissing(name));
     }
     if !path.is_file() {
-        // A stale `rojo build` output directory of the same name, usually.
+        // usually a stale `rojo build` output directory of the same name
         return Err(Error::StudioFileIsFolder(name));
     }
     Ok(())
 }
 
-/// Whether `path` names a Roblox place file (.rbxl or .rbxlx, any case).
+/// .rbxl or .rbxlx, any case
 fn is_place_path(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
         .is_some_and(|ext| ext.eq_ignore_ascii_case("rbxl") || ext.eq_ignore_ascii_case("rbxlx"))
 }
 
-/// Validates the file prompt: non-empty and named like a place file. The file
-/// itself doesn't have to exist yet — building it later (e.g. `rojo build`)
-/// is normal.
+/** validates the file prompt: non-empty and named like a place file. the
+file itself doesn't have to exist yet; building it later (e.g. `rojo build`)
+is normal. */
 fn validate_file_input(input: &str) -> Result<(), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -161,9 +161,8 @@ fn validate_file_input(input: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parses a Roblox ID as typed at a prompt: a positive integer, surrounding
-/// whitespace tolerated. TOML integers are i64, so anything larger is
-/// rejected too.
+/** parses a Roblox ID as typed at a prompt: positive integer, surrounding
+whitespace ok. TOML integers are i64, so anything larger is rejected too. */
 fn parse_id(input: &str) -> Result<i64, String> {
     let trimmed = input.trim();
     match trimmed.parse::<i64>() {
@@ -189,9 +188,9 @@ fn prompt_id(label: &str, help: &str) -> Result<i64, Error> {
     Ok(parse_id(&input).expect("the validator only lets numeric IDs through"))
 }
 
-/// Default answer for the file prompt: "<name>.rbxl" from the `name` field of
-/// the project's Rojo manifest — default.project.json when present, otherwise
-/// the first *.project.json alphabetically. None when there's no usable one.
+/** default answer for the file prompt: "<name>.rbxl" from the `name` field
+of the project's Rojo manifest (default.project.json when present, else the
+first *.project.json alphabetically). None when there's no usable one. */
 fn rojo_place_default(dir: &Path) -> Option<String> {
     Some(format!("{}.rbxl", rojo_project_name(dir)?))
 }
@@ -222,10 +221,10 @@ fn rojo_project_name(dir: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// Refuses to launch when the roblox-studio: protocol has no handler in the
-/// registry, i.e. Studio was never installed. HKCR merges the machine-wide
-/// and per-user class registrations; a working handler must carry
-/// shell\open\command, so a leftover bare key doesn't count.
+/** refuses to launch when the roblox-studio: protocol has no registry
+handler, i.e. Studio was never installed. HKCR merges machine-wide and
+per-user class registrations; a working handler must carry
+shell\open\command, so a leftover bare key doesn't count. */
 #[cfg(windows)]
 fn ensure_protocol_handler() -> Result<(), Error> {
     use winreg::RegKey;
@@ -239,16 +238,16 @@ fn ensure_protocol_handler() -> Result<(), Error> {
     }
 }
 
-/// Same idea for place files: no .rbxl/.rbxlx association means no Studio.
-/// Presence of the extension key is a heuristic (user-choice associations
-/// live elsewhere); ShellExecuteW still reports SE_ERR_NOASSOC precisely if
-/// this passes a stale key through.
+/** same idea for place files: no .rbxl/.rbxlx association means no Studio.
+the extension key existing is a heuristic (user-choice associations live
+elsewhere); ShellExecuteW still reports SE_ERR_NOASSOC precisely if this
+passes a stale key through. */
 #[cfg(windows)]
 fn ensure_file_handler(path: &Path) -> Result<(), Error> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CLASSES_ROOT;
 
-    // validate_place_file has already pinned the extension to rbxl/rbxlx.
+    // validate_place_file already pinned the extension to rbxl/rbxlx
     let extension = path
         .extension()
         .and_then(OsStr::to_str)
@@ -262,9 +261,9 @@ fn ensure_file_handler(path: &Path) -> Result<(), Error> {
     }
 }
 
-/// LaunchServices has no cheap "who handles this?" query, but Studio only
-/// ever installs as RobloxStudio.app in /Applications or ~/Applications;
-/// missing from both means not installed.
+/** LaunchServices has no cheap "who handles this?" query, but Studio only
+ever installs as RobloxStudio.app in /Applications or ~/Applications;
+missing from both means not installed. */
 #[cfg(target_os = "macos")]
 fn studio_bundle_installed() -> bool {
     Path::new("/Applications/RobloxStudio.app").exists()
@@ -287,9 +286,9 @@ fn ensure_file_handler(_path: &Path) -> Result<(), Error> {
     ensure_protocol_handler()
 }
 
-/// Best effort: xdg-mime knows the scheme handler when a desktop environment
-/// is around. Failing to ask means "can't tell" and passes through —
-/// xdg-open still reports missing handlers at launch time.
+/** best effort: xdg-mime knows the scheme handler when a desktop
+environment is around. failing to ask means "can't tell" and passes
+through; xdg-open still reports missing handlers at launch time. */
 #[cfg(all(unix, not(target_os = "macos")))]
 fn ensure_protocol_handler() -> Result<(), Error> {
     let output = std::process::Command::new("xdg-mime")
@@ -309,15 +308,15 @@ fn ensure_protocol_handler() -> Result<(), Error> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn ensure_file_handler(_path: &Path) -> Result<(), Error> {
-    // File-type defaults are too patchy to query reliably; xdg-open reports
-    // a missing association itself, still before Studio is involved.
+    /* file-type defaults are too patchy to query reliably; xdg-open reports
+    a missing association itself, still before Studio is involved */
     Ok(())
 }
 
-/// Opens `target` — a URI or file path — with whatever Windows has registered
-/// for it. ShellExecuteW rather than a `cmd /C start` dance: it's the API
-/// `start` itself wraps, it needs no shell quoting, and it reports "nothing
-/// is registered for this" as a distinct code instead of a message to parse.
+/** opens `target` (URI or file path) with whatever Windows has registered
+for it. ShellExecuteW rather than a `cmd /C start` dance: it's the API
+`start` itself wraps, needs no shell quoting, and reports "nothing is
+registered for this" as a distinct code instead of a message to parse. */
 #[cfg(windows)]
 fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::os::windows::ffi::OsStrExt;
@@ -329,8 +328,8 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
     let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
     let file: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
 
-    // Returns an HINSTANCE for historical reasons; values over 32 mean the
-    // handler launched, anything else is one of the SE_ERR_* codes.
+    /* returns an HINSTANCE for historical reasons; values over 32 mean the
+    handler launched, anything else is one of the SE_ERR_* codes */
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -359,10 +358,10 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
     }
 }
 
-/// Opens `target` through LaunchServices. `open` exits non-zero for plenty
-/// of reasons besides a missing handler (the bundle check above rules that
-/// one out), and prints its own diagnosis to stderr, so the error here just
-/// carries the code and defers to that message.
+/** opens `target` through LaunchServices. `open` exits non-zero for plenty
+of reasons besides a missing handler (the bundle check above rules that
+one out) and prints its own diagnosis to stderr, so the error here just
+carries the code and defers to that message. */
 #[cfg(target_os = "macos")]
 fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::process::Command;
@@ -377,9 +376,9 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
     }
 }
 
-/// Opens `target` through the desktop's registered handler. Studio has no
-/// official Linux build, so a missing handler gets a pointer at Vinegar
-/// rather than a bare failure.
+/** opens `target` through the desktop's registered handler. Studio has no
+official Linux build, so a missing handler gets a pointer at Vinegar
+rather than a bare failure. */
 #[cfg(all(unix, not(target_os = "macos")))]
 fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::process::Command;
@@ -412,7 +411,7 @@ mod tests {
         assert!(parse_id("12.5").is_err());
         assert!(parse_id("abc").is_err());
         assert!(parse_id("").is_err());
-        // All digits but over i64::MAX gets the "too large" message.
+        // all digits but over i64::MAX gets the "too large" message
         assert_eq!(
             parse_id("99999999999999999999"),
             Err("That ID is too large".to_string())
@@ -454,13 +453,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Doesn't exist yet.
+        // doesn't exist yet
         assert!(matches!(
             validate_place_file(&dir.join("missing.rbxl")),
             Err(Error::StudioFileMissing(_))
         ));
 
-        // Exists, but isn't a place file.
+        // exists, but isn't a place file
         let model = dir.join("model.rbxm");
         std::fs::write(&model, b"x").unwrap();
         assert!(matches!(
@@ -468,7 +467,7 @@ mod tests {
             Err(Error::StudioFileNotAPlace(_))
         ));
 
-        // A folder that merely looks like a place file.
+        // a folder that merely looks like a place file
         let folder = dir.join("folder.rbxl");
         std::fs::create_dir_all(&folder).unwrap();
         assert!(matches!(
@@ -476,7 +475,7 @@ mod tests {
             Err(Error::StudioFileIsFolder(_))
         ));
 
-        // The real thing.
+        // the real thing
         let place = dir.join("game.rbxl");
         std::fs::write(&place, b"x").unwrap();
         assert!(validate_place_file(&place).is_ok());
@@ -490,10 +489,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // No project file at all: no default.
+        // no project file at all: no default
         assert_eq!(rojo_place_default(&dir), None);
 
-        // default.project.json wins even when others exist.
+        // default.project.json wins even when others exist
         std::fs::write(dir.join("aaa.project.json"), r#"{"name": "aaa"}"#).unwrap();
         std::fs::write(dir.join("default.project.json"), r#"{"name": "my-game"}"#).unwrap();
         assert_eq!(rojo_place_default(&dir), Some("my-game.rbxl".to_string()));
@@ -507,14 +506,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Malformed JSON and a blank name both mean "no default".
+        // malformed JSON and a blank name both mean "no default"
         std::fs::write(dir.join("default.project.json"), "not json").unwrap();
         assert_eq!(rojo_place_default(&dir), None);
         std::fs::write(dir.join("default.project.json"), r#"{"name": "  "}"#).unwrap();
         assert_eq!(rojo_place_default(&dir), None);
 
-        // Without default.project.json the first *.project.json (sorted) is
-        // used.
+        // no default.project.json: first *.project.json (sorted) is used
         std::fs::remove_file(dir.join("default.project.json")).unwrap();
         std::fs::write(dir.join("zzz.project.json"), r#"{"name": "zzz"}"#).unwrap();
         std::fs::write(dir.join("aaa.project.json"), r#"{"name": "aaa"}"#).unwrap();

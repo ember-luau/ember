@@ -33,9 +33,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     install_project(&args, &manifest, true)?;
 
-    // A workspace root installs every member too, pesde's order: the root
-    // first, then each member. Member installs never recurse further (nested
-    // workspaces aren't a thing).
+    /* a workspace root installs every member too, pesde's order: root first,
+    then each member. member installs never recurse further (nested
+    workspaces aren't a thing) */
     if !manifest.workspace_members().is_empty() {
         let workspace = Workspace::open(Path::new("."))?;
         for member in &workspace.members {
@@ -52,9 +52,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/// Installs one project from the current directory. Global tools install only
-/// on the primary run: workspace members share them, so repeating the merge
-/// per member would just re-print every pin.
+/** installs one project from the current directory. global tools only
+install on the primary run: workspace members share them, and repeating
+the merge per member would just re-print every pin. */
 fn install_project(
     args: &InstallArgs,
     manifest: &Manifest,
@@ -89,9 +89,9 @@ fn install_project(
         .collect()
     };
 
-    // Installs are reproduced from scratch each run: every environment's
-    // configured output folder is rebuilt even when there is nothing to
-    // install, so removing the last dependency leaves no stale packages.
+    /* installs rebuild from scratch each run: every env's output folder is
+    wiped even with nothing to install, so removing the last dependency
+    leaves no stale packages */
     for environment in Environment::ALL {
         let out = manifest.packages_out(environment);
         if out.exists() {
@@ -99,9 +99,9 @@ fn install_project(
         }
     }
 
-    // Extraction happens before the environment (and therefore the output
-    // folder) is always known, so stage in a project-local temp dir; a rename
-    // then moves it into place (same filesystem as the outputs).
+    /* extraction can happen before we know the environment (and so the
+    output folder), so stage in a project-local temp dir; a rename then
+    moves it into place (same filesystem as the outputs) */
     let staging = Path::new(".lpm-staging").to_path_buf();
     let locked = ui::with_progress(jobs.len() as u64, |bar| {
         install_packages(manifest, jobs, &staging, bar)
@@ -113,14 +113,14 @@ fn install_project(
 
     let package_count = locked.len();
     if !args.locked {
-        // Written even when empty, so lpm.lock always mirrors the manifest.
+        // written even when empty, so lpm.lock always mirrors the manifest
         Lockfile::new(locked).save()?;
     }
 
-    // Tool versions are pinned exactly, so tools have no lockfile entries and
-    // install the same way on normal and --locked runs. Global tools
-    // (~/.lpm/tools.toml) install here too: `tool add` never downloads, so
-    // this is the one place every tool gets installed.
+    /* tool versions are exact pins, so no lockfile entries; normal and
+    --locked runs install them the same way. global tools (~/.lpm/tools.toml)
+    install here too: `tool add` never downloads, this is the one place
+    every tool gets installed */
     let mut tool_jobs: Vec<(String, Tool, bool)> = manifest
         .tools
         .iter()
@@ -128,7 +128,7 @@ fn install_project(
         .collect();
     if include_global_tools {
         for (alias, tool) in tools::shim::global_tools()? {
-            // A pin listed identically in both scopes only needs one install
+            // same pin in both scopes only needs one install
             let duplicate = manifest.tools.get(&alias).is_some_and(|project| {
                 project.repository.eq_ignore_ascii_case(&tool.repository)
                     && project.version == tool.version
@@ -158,8 +158,8 @@ fn install_project(
     Ok(())
 }
 
-/// Downloads, stages, and links every package, reporting progress on `bar`.
-/// The caller owns the bar's lifecycle so it gets cleared on errors too.
+/** downloads, stages, and links every package, reporting progress on `bar`.
+caller owns the bar's lifecycle so it gets cleared on errors too. */
 fn install_packages(
     manifest: &Manifest,
     jobs: Vec<Job>,
@@ -170,9 +170,9 @@ fn install_packages(
     for job in jobs {
         bar.set_message(job.name.clone());
 
-        // Workspace members are linked in place — no download, no copy under
-        // .lpm/ — so edits to the member are picked up without reinstalling,
-        // like pesde's symlinks.
+        /* workspace members link in place (no download, no copy under .lpm/)
+        so edits to the member are picked up without reinstalling, like
+        pesde's symlinks */
         if let index::DownloadSource::Workspace { path } = &job.source {
             let member_dir = Path::new(path);
             let environment = job
@@ -220,17 +220,17 @@ fn install_packages(
         index::download(&job.source, staging)?;
         package::flatten_single_dir(staging)?;
 
-        // Indices usually know the environment; otherwise ask the files
-        // (lpm.toml -> pesde.toml -> wally.toml).
+        /* indices usually know the environment; otherwise ask the files
+        (lpm.toml -> pesde.toml -> wally.toml) */
         let environment = match job.environment {
             Some(environment) => environment,
             None => package::environment(staging)
                 .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
         };
 
-        // Real package contents live under <out>/.lpm/<scope>_<name>/; a
-        // <out>/<link>.luau file re-exports the package's entry point so
-        // consumers can `require(".../<link>")`.
+        /* real contents live under <out>/.lpm/<scope>_<name>/; a
+        <out>/<link>.luau file re-exports the entry point so consumers
+        can `require(".../<link>")` */
         let folder = job.name.replace('/', "_");
         let out = manifest.packages_out(environment);
         let storage = out.join(".lpm").join(&folder);
@@ -269,9 +269,8 @@ fn install_packages(
     Ok(locked)
 }
 
-/// Exported types must be restated in the link file to survive the wrapper;
-/// a package whose entry point can't be parsed still links, just without
-/// its types.
+/** exported types have to be restated in the link file to survive the
+wrapper; an unparseable entry point still links, just without its types. */
 fn link_types(package_dir: &Path, entry: &str, name: &str, bar: &ProgressBar) -> Vec<String> {
     let Some(source) =
         package::entry_source(package_dir, entry).and_then(|path| fs::read_to_string(path).ok())
@@ -319,9 +318,9 @@ fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(),
             )),
         );
 
-        // Another toolchain manager's shim earlier in PATH (aftman,
-        // rokit) would run instead of ours and report its own errors;
-        // surface that or the tool looks broken for no visible reason.
+        /* another toolchain manager's shim earlier in PATH (aftman, rokit)
+        would run instead of ours and report its own errors; surface that
+        or the tool looks broken for no visible reason */
         if let Some(shadow) = tools::shim::shadowing_executable(alias) {
             bar.suspend(|| {
                 eprintln!(

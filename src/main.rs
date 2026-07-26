@@ -55,9 +55,9 @@ enum Commands {
 }
 
 fn main() {
-    // Tool shims are copies of lpm named after their alias; invoked under
-    // such a name, dispatch to the tool the surrounding manifest pins
-    // instead of running the CLI.
+    /* tool shims are copies of lpm named after their alias. started under
+    one of those names, run the tool the surrounding manifest pins
+    instead of the CLI. */
     if let Some(alias) = tools::shim::shim_alias() {
         match tools::shim::run(&alias) {
             Ok(code) => std::process::exit(code),
@@ -92,17 +92,17 @@ fn main() {
     }
 }
 
-/// Parses arguments, restyling clap's hardcoded "error: <message>" line as an
-/// accent "✗ <message>" while keeping the styled usage/tip lines below it.
+/** Parses arguments, restyling clap's hardcoded "error: <message>" line as
+an accent "✗ <message>" while keeping the styled usage/tip lines below. */
 fn parse_cli() -> Cli {
     Cli::try_parse().unwrap_or_else(|err| {
         let plain = err.render().to_string();
-        // Help and version output pass through clap untouched.
+        // help and version output pass through clap untouched.
         let Some(rest) = plain.strip_prefix("error: ") else {
             err.exit()
         };
 
-        // clap's messages start lowercase; capitalize to match our own errors.
+        // clap starts messages lowercase; capitalize to match our own errors.
         let message = rest.lines().next().unwrap_or(rest);
         let mut chars = message.chars();
         let capitalized = match chars.next() {
@@ -112,8 +112,8 @@ fn parse_cli() -> Cli {
         ui::print_error(&capitalized);
         let styled = err.render().ansi().to_string();
         if let Some((_error_line, extra)) = styled.split_once('\n') {
-            // clap renders suggestions as "tip: a similar subcommand exists";
-            // drop the "tip:" label and re-capitalize what follows it.
+            /* clap renders suggestions as "tip: a similar subcommand
+            exists"; drop the "tip:" label and recapitalize. */
             let extra = extra
                 .replace("tip:", "")
                 .replace(" a similar", "A similar")
@@ -121,7 +121,7 @@ fn parse_cli() -> Cli {
             eprint!("{extra}");
         }
 
-        // clap uses exit code 2 for usage errors.
+        // usage errors exit 2, matching clap.
         std::process::exit(2)
     })
 }

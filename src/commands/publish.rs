@@ -21,14 +21,13 @@ pub struct PublishArgs {
 pub fn run(args: PublishArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
-    // A plain project just publishes itself.
     if manifest.workspace_members().is_empty() {
         return publish_project(manifest, args.dry_run);
     }
 
-    // A workspace root publishes the whole workspace: the root project
-    // first, then every member — pesde's order. One package failing doesn't
-    // stop the rest; the command fails at the end instead.
+    /* a workspace root publishes the whole workspace, pesde's order: root
+    first, then every member. one package failing doesn't stop the rest;
+    the command fails at the end instead */
     let workspace = Workspace::open(Path::new("."))?;
     let mut failed = Vec::new();
 
@@ -59,9 +58,9 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     }
 }
 
-/// Publishes the project in the current directory. Private packages and
-/// main-less workspace roots say so and skip instead of failing — that is
-/// how a container root stays unpublished while its members go out.
+/** publishes the project in the current directory. private packages and
+main-less workspace roots say so and skip instead of failing; that's how
+a container root stays unpublished while its members go out. */
 fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
     if manifest.package.private {
         println!(
@@ -70,8 +69,8 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
         );
         return Ok(());
     }
-    // A workspace root needs no `main`; without one it is a pure container
-    // and only its members go out.
+    /* a workspace root needs no `main`; without one it's a pure container
+    and only its members go out */
     let has_main = manifest
         .target
         .as_ref()
@@ -91,10 +90,10 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
     };
     let version = semver::Version::parse(&manifest.package.version)?;
 
-    // The API appends [package] authors to the scope's owner list (each one
-    // can then publish to the whole scope) and 400s anything that isn't
-    // shaped like a GitHub username; catch that before packing. It does NOT
-    // check the account exists, so a typo silently grants a stranger-to-be.
+    /* the API appends [package] authors to the scope's owner list (each one
+    can then publish to the whole scope) and 400s anything not shaped like
+    a GitHub username; catch that before packing. it does NOT check the
+    account exists, so a typo silently grants a stranger-to-be */
     if let Some(author) = manifest
         .package
         .authors
@@ -106,16 +105,16 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
         )));
     }
 
-    // Workspace dependencies become registry ones in the archive's manifest;
-    // the on-disk lpm.toml is never touched.
+    /* workspace deps become registry ones in the archive's manifest;
+    the on-disk lpm.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
 
     let root = Path::new(".");
     let files = pack::packed_files(root, &manifest)?;
     let archive = ui::with_spinner("Packing package", || pack::pack(root, &manifest))?;
 
-    // The API answers 413 past its cap; failing here saves the upload (and
-    // makes --dry-run catch it too).
+    /* the API answers 413 past its cap; failing here saves the upload
+    (and lets --dry-run catch it too) */
     if archive.len() > registry::MAX_ARCHIVE_BYTES {
         return Err(Error::PublishTooLarge {
             size_mb: archive.len() as f64 / (1024.0 * 1024.0),
@@ -139,16 +138,16 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
         return Ok(());
     }
 
-    // Stored credentials first; the device flow (and the index clone that
-    // provides its client id) only when there's nothing stored yet.
+    /* stored credentials first; the device flow (and the index clone that
+    provides its client id) only when nothing is stored yet */
     let credentials = match auth::load()? {
         Some(credentials) => credentials,
         None => auth::login(&oauth_client_id()?)?,
     };
 
     match upload(&credentials.token, &archive) {
-        // A 401 means the stored token was revoked or expired, not that this
-        // publish is doomed: forget it, log in fresh, and try once more.
+        /* 401 means the stored token was revoked or expired, not that this
+        publish is doomed: forget it, log in fresh, retry once */
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
@@ -166,11 +165,11 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rewrites workspace dependencies into registry ones, pesde's conversion
-/// exactly: the requirement is the specifier's version type applied to the
-/// member's current on-disk version (`^` + `1.2.3` → `^1.2.3`; a full
-/// requirement passes through), and the member's `default` index URL is
-/// baked in when it points somewhere other than lpm's own registry.
+/** rewrites workspace deps into registry ones, pesde's conversion exactly:
+the requirement is the specifier's version type applied to the member's
+current on-disk version (`^` + `1.2.3` -> `^1.2.3`; a full requirement
+passes through), and the member's `default` index url gets baked in when
+it points somewhere other than lpm's own registry. */
 fn convert_workspace_dependencies(
     manifest: &mut Manifest,
     project_dir: &Path,
@@ -223,8 +222,8 @@ fn upload(token: &str, archive: &[u8]) -> Result<(), Error> {
     ui::with_spinner("Uploading package", || registry::publish(token, archive))
 }
 
-/// OAuth app client id for the device flow. It lives in the lpm index's
-/// config.toml (not in the binary) so it can rotate without a CLI release.
+/** OAuth app client id for the device flow. lives in the lpm index's
+config.toml (not in the binary) so it can rotate without a CLI release. */
 fn oauth_client_id() -> Result<String, Error> {
     let index = Index::open(DEFAULT_INDEX_URL, true)?;
     index
@@ -233,7 +232,7 @@ fn oauth_client_id() -> Result<String, Error> {
         .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
-/// Published packages must say where their code runs; the entry is keyed by it.
+/// published packages must say where their code runs; the index entry is keyed by it.
 fn publish_environment(manifest: &Manifest) -> Result<Environment, Error> {
     manifest
         .target
@@ -280,20 +279,20 @@ mod tests {
         let mut manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
         convert_workspace_dependencies(&mut manifest, &member_dir).unwrap();
 
-        // "~" + the member's on-disk 1.2.3 → "~1.2.3"; no index written since
-        // the member publishes to lpm's own registry.
+        /* "~" + the member's on-disk 1.2.3 -> "~1.2.3"; no index written
+        since the member publishes to lpm's own registry */
         assert!(matches!(
             &manifest.dependencies["core"],
             Dependency::Registry { name, version, index: None }
                 if name == "acme/core" && version == "~1.2.3"
         ));
-        // The converted spec is what the packed manifest carries.
+        // the converted spec is what the packed manifest carries
         let serialized = toml::to_string(&manifest).unwrap();
         assert!(serialized.contains(r#"name = "acme/core""#));
         assert!(serialized.contains(r#"version = "~1.2.3""#));
         assert!(!serialized.contains("workspace"));
 
-        // A member that isn't in any workspace can't publish workspace deps.
+        // a member outside any workspace can't publish workspace deps
         let lonely = base.join("lonely");
         fs::create_dir_all(&lonely).unwrap();
         let mut orphaned = manifest;

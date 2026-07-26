@@ -1,6 +1,6 @@
-//! Tools are GitHub-released binaries a project pins by version. This module
-//! stores and installs them; `archive` picks and unpacks the right release
-//! asset, `shim` covers how an alias resolves to one of the stored binaries.
+/*! GitHub-released binaries a project pins by version. this module stores
+and installs them; `archive` picks and unpacks the right release asset,
+`shim` maps an alias to one of the stored binaries. */
 
 pub mod archive;
 pub mod shim;
@@ -15,7 +15,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Well-known tools addable by bare name; anything else must be "owner/repo".
+/// tools addable by bare name; anything else must be "owner/repo".
 const SHORTHANDS: &[(&str, &str)] = &[
     ("darklua", "seaofvoices/darklua"),
     ("lest", "luau-lest/lest"),
@@ -24,8 +24,7 @@ const SHORTHANDS: &[(&str, &str)] = &[
     ("stylua", "johnnymorganz/stylua"),
 ];
 
-/// Expands a shorthand to its full repository name; names not in the table
-/// are assumed to already be "owner/repo" and pass through unchanged.
+/// shorthand to full repo name; unknown names pass through as "owner/repo".
 pub fn expand_shorthand(name: &str) -> String {
     SHORTHANDS
         .iter()
@@ -33,8 +32,7 @@ pub fn expand_shorthand(name: &str) -> String {
         .map_or_else(|| name.to_string(), |(_, full)| full.to_string())
 }
 
-/// The repository a shorthand stands for, for matching manifest entries by
-/// their value rather than by their alias key.
+/// the repo behind a shorthand, for matching manifest entries by value, not alias key.
 pub fn shorthand_repository(name: &str) -> Option<&'static str> {
     SHORTHANDS
         .iter()
@@ -42,23 +40,23 @@ pub fn shorthand_repository(name: &str) -> Option<&'static str> {
         .map(|(_, full)| *full)
 }
 
-/// Where one version of a tool is stored: ~/.lpm/tools/{owner}_{repo}/{version}.
-/// GitHub owner names cannot contain '_', so the first '_' always marks the
-/// owner/repo split when reading the folder name back.
+/** ~/.lpm/tools/{owner}_{repo}/{version}. GitHub owner names can't contain
+'_', so the first '_' always marks the owner/repo split when reading the
+folder name back. */
 pub fn storage_dir(repository: &str, version: &str) -> Result<PathBuf, Error> {
     Ok(paths::tools_dir()?
         .join(repository.replace('/', "_"))
         .join(version))
 }
 
-/// Full path a tool's executable sits at once installed.
+/// where a tool's executable sits once installed.
 fn stored_executable(repository: &str, version: &str) -> Result<PathBuf, Error> {
     Ok(storage_dir(repository, version)?.join(executable_name(repo_short_name(repository))))
 }
 
-/// Installs a manifest tool, skipping all network work when the requested
-/// version is already stored. Returns true when a download happened, false
-/// when the cached copy was reused (the bin shim is refreshed either way).
+/** Installs a manifest tool, skipping the network when the version is
+already stored. true = downloaded, false = cache reused; the bin shim
+gets refreshed either way. */
 pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool, Error> {
     let stored = stored_executable(&tool.repository, &tool.version)?;
     if stored.exists() {
@@ -70,10 +68,10 @@ pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool
     install_release(alias, &tool.repository, &release)
 }
 
-/// Downloads the platform asset of an already-fetched release, extracts it,
-/// stores the executable under `storage_dir`, and writes a bin shim named
-/// after the alias. Returns true when a download happened, false when this
-/// release version was already stored (the shim is refreshed either way).
+/** Downloads the platform asset of a fetched release, extracts it, stores
+the executable under `storage_dir`, and writes a bin shim named after
+the alias. true = downloaded, false = version already stored; the shim
+gets refreshed either way. */
 pub fn install_release(alias: &str, repository: &str, release: &Release) -> Result<bool, Error> {
     let version = release.tag_name.trim_start_matches('v');
     let storage = storage_dir(repository, version)?;
@@ -92,8 +90,8 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
         })?;
     let bytes = http::get_bytes(&asset.browser_download_url, &[])?;
 
-    // Extract into a staging sibling first so a failed install never leaves a
-    // half-written storage dir behind (same dance as install.rs).
+    /* extract into a staging sibling first so a failed install never leaves
+    a half-written storage dir behind (same dance as install.rs). */
     let staging = paths::with_suffix(&storage, ".tmp");
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -114,7 +112,7 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
         fs::rename(&found, &target)?;
     }
 
-    // Move the finished staging dir into place (same filesystem, so rename).
+    // move staging into place; same filesystem, so it's a rename.
     if storage.exists() {
         fs::remove_dir_all(&storage)?;
     }
@@ -127,20 +125,19 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
     Ok(true)
 }
 
-/// The "repo" half of an "owner/repo" repository id; names the stored binary.
+/// the "repo" half of "owner/repo"; names the stored binary.
 fn repo_short_name(repository: &str) -> &str {
     repository
         .split_once('/')
         .map_or(repository, |(_, repo)| repo)
 }
 
-/// File name a tool's executable is stored under, e.g. "rojo.exe" on Windows.
+/// "rojo.exe" on windows, "rojo" elsewhere.
 fn executable_name(repo: &str) -> String {
     format!("{repo}{}", env::consts::EXE_SUFFIX)
 }
 
-/// Marks a binary executable (0o755). No-op elsewhere: on Windows
-/// executability comes from the .exe extension.
+/// chmod 755. no-op on windows, where the .exe extension is what makes it executable.
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;

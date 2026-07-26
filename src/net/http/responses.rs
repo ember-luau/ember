@@ -24,9 +24,9 @@ pub struct DeviceCode {
     pub interval: u64,
 }
 
-/// Device-flow poll result. GitHub reports "not yet" states
-/// (`authorization_pending`, `slow_down`, ...) as HTTP 200 with an `error`
-/// field rather than an error status.
+/** Device-flow poll result. GitHub reports "not yet" states
+(`authorization_pending`, `slow_down`, ...) as HTTP 200 with an `error`
+field, not an error status. */
 #[derive(Deserialize)]
 pub struct AccessToken {
     pub access_token: Option<String>,

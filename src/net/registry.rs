@@ -1,11 +1,12 @@
-//! lpm's own registry API (api.luaupm.com) — the write side of publishing.
-//!
-//! Reads never come here: resolution and installs go through the git index
-//! clone and the CDN URLs baked into its entries, so they keep working even
-//! when the API is down. The one thing the CLI needs the API for is
-//! `POST /v1/publish`, which validates the tarball, stores it in the CDN
-//! bucket, and writes the index entry (the API is the only writer of the
-//! index repo).
+/*!
+lpm's own registry API (api.luaupm.com): the write side of publishing.
+
+Reads never come here. Resolution and installs go through the git index
+clone and the CDN URLs baked into its entries, so they work even when the
+API is down. The one thing the CLI needs the API for is `POST /v1/publish`,
+which validates the tarball, stores it in the CDN bucket, and writes the
+index entry (the API is the index repo's only writer).
+*/
 
 use crate::error::Error;
 use crate::net::http;
@@ -14,8 +15,8 @@ use serde::Deserialize;
 
 pub const API_URL: &str = "https://api.luaupm.com";
 
-/// Hard cap the API enforces on publish bodies (413 above it); checked
-/// client-side so an oversized archive fails before uploading.
+/** The API's hard cap on publish bodies (413 above it); checked client-side
+so an oversized archive fails before uploading. */
 pub const MAX_ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Every API error is `{"error": "<human readable message>"}`.
@@ -24,10 +25,10 @@ struct ErrorBody {
     error: String,
 }
 
-/// Uploads a packed `.tar.gz` to `POST /v1/publish` as the given user.
-/// Statuses the API answers with: 401 bad token, 400 malformed
-/// tarball/lpm.toml, 403 scope owned by someone else (first publish claims a
-/// scope), 409 version already exists, 413 over the size cap.
+/** Uploads a packed `.tar.gz` to `POST /v1/publish` as the given user.
+Statuses the API answers with: 401 bad token, 400 malformed tarball or
+lpm.toml, 403 scope owned by someone else (first publish claims a scope),
+409 version already exists, 413 over the size cap. */
 pub fn publish(token: &str, archive: &[u8]) -> Result<(), Error> {
     let url = format!("{API_URL}/v1/publish");
     let response = ureq::post(&url)
@@ -42,7 +43,7 @@ pub fn publish(token: &str, archive: &[u8]) -> Result<(), Error> {
             status,
             message: error_message(status, response.into_string().ok().as_deref()),
         }),
-        // Transport errors (DNS, TLS, ...) — no response body to read.
+        // Transport errors (DNS, TLS, ...): no response body to read.
         Err(other) => Err(HttpError::from(other).into()),
     }
 }

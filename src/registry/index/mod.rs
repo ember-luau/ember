@@ -11,9 +11,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-/// A package index: a git repository cached under ~/.lpm/index-cache.
-/// Wally indices are identified by a root config.json, pesde indices by a
-/// root config.toml.
+/** A package index: a git repo cached under ~/.lpm/index-cache. Root
+config.json means wally, root config.toml means pesde. */
 pub struct Index {
     url: String,
     root: PathBuf,
@@ -28,8 +27,8 @@ enum Kind {
 /// A concrete package version picked from an index.
 pub struct ResolvedPackage {
     pub version: semver::Version,
-    /// Known from index metadata; None means "inspect the archive after
-    /// extraction" (lpm.toml -> pesde.toml -> wally.toml fallback).
+    /** Known from index metadata; None means inspect the archive after
+    extraction (lpm.toml -> pesde.toml -> wally.toml). */
     pub environment: Option<Environment>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
@@ -42,9 +41,9 @@ pub struct TransitiveDependency {
     pub index_url: Option<String>,
 }
 
-/// Everything needed to re-download a resolved package (also stored in
-/// lpm.lock for --locked installs). Resolution bakes the full URL so locked
-/// installs never re-consult an index.
+/** Everything needed to re-download a resolved package; also stored in
+lpm.lock. Resolution bakes the full URL so --locked installs never consult
+an index. */
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum DownloadSource {
@@ -52,14 +51,14 @@ pub enum DownloadSource {
     Zip { url: String },
     /// Gzipped tarball (pesde registry APIs).
     TarGz { url: String },
-    /// A workspace member, linked in place instead of downloaded; `path` is
-    /// the member's directory relative to the consuming project.
+    /** A workspace member, linked in place instead of downloaded; `path` is
+    the member's directory relative to the consuming project. */
     Workspace { path: String },
 }
 
 impl Index {
-    /// Opens an index, cloning or refreshing its git cache. When refreshing
-    /// fails but a cached copy exists, the stale copy is used with a warning.
+    /** Opens an index, cloning or refreshing its git cache. If the refresh
+    fails but a cached copy exists, the stale copy is used with a warning. */
     pub fn open(url: &str, refresh: bool) -> Result<Self, Error> {
         let root = ensure_cached(url, refresh)?;
         let kind = if root.join("config.json").exists() {
@@ -67,8 +66,8 @@ impl Index {
         } else if root.join("config.toml").exists() {
             Kind::Pesde(pesde::load_config(&root)?)
         } else {
-            // An empty or half-set-up index repo; a raw io error here would
-            // read as a bug in lpm rather than a problem with the index.
+            /* Empty or half-set-up index repo; a raw io error here would
+            read as an lpm bug rather than an index problem. */
             return Err(Error::IndexFetch {
                 url: url.to_string(),
                 reason: "the index has no config.json or config.toml at its root".to_string(),
@@ -82,9 +81,9 @@ impl Index {
         })
     }
 
-    /// GitHub OAuth app client id publishes authenticate against, from the
-    /// index's config. Wally indices carry one too, but lpm never publishes
-    /// to wally, so only pesde-format configs are consulted.
+    /** GitHub OAuth client id publishes authenticate against. Lives in the
+    index's config, not the binary. Wally indices carry one too, but lpm
+    never publishes to wally, so only pesde-format configs are consulted. */
     pub fn github_oauth_id(&self) -> Option<&str> {
         match &self.kind {
             Kind::Wally(_) => None,
@@ -92,8 +91,8 @@ impl Index {
         }
     }
 
-    /// Finds the highest version of `name` matching `req`. For pesde indices,
-    /// `prefer_environment` picks between multiple targets of one version.
+    /** Finds the highest version of `name` matching `req`. For pesde
+    indices, `prefer_environment` picks between a version's targets. */
     pub fn resolve(
         &self,
         name: &str,
@@ -109,11 +108,11 @@ impl Index {
     }
 }
 
-/// Downloads and extracts a resolved package into `dest`. All downloads are
-/// anonymous: lpm's registry serves tarballs from a public CDN, wally/pesde
-/// registries are public too. If credentialed downloads ever come back,
-/// restore the old restraint — the token went only to GitHub-owned hosts, so
-/// an arbitrary registry url in an index entry could not harvest it.
+/** Downloads and extracts a resolved package into `dest`. All downloads are
+anonymous: lpm's registry serves tarballs from a public CDN, wally/pesde
+registries are public too. If credentialed downloads ever come back, restore
+the old restraint: tokens only to GitHub-owned hosts, so an arbitrary
+registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
         // Workspace members are linked in place; install never gets here.
@@ -136,8 +135,8 @@ pub fn download(source: &DownloadSource, dest: &Path) -> Result<(), Error> {
             archive.extract(dest)?;
         }
         DownloadSource::TarGz { .. } => {
-            // ureq transparently decodes Content-Encoding: gzip, in which
-            // case the body is already the raw tar; sniff the gzip magic.
+            /* ureq already gunzips Content-Encoding: gzip bodies (leaving a
+            raw tar), so sniff the magic bytes instead of assuming. */
             if bytes.starts_with(&[0x1f, 0x8b]) {
                 let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
                 tar::Archive::new(decoder).unpack(dest)?;
@@ -199,8 +198,8 @@ mod tests {
         let pesde = cache_dir("https://github.com/pesde-pkg/index").unwrap();
 
         assert!(wally.starts_with(paths::index_cache_dir().unwrap()));
-        // The readable half of the folder name comes from the url's last
-        // segment; the hash keeps same-named indices from colliding.
+        /* Readable half of the folder name comes from the url's last
+        segment; the hash keeps same-named indices apart. */
         assert!(
             wally
                 .file_name()

@@ -1,9 +1,7 @@
-//! Workspaces, pesde-style: a root lpm.toml lists member project directories
-//! under `[target] workspace` (globs), members depend on each other with
-//! `{ workspace = "scope/name" }` specifiers, and `lpm publish` /
-//! `lpm install` at the root run for every member. Nested workspaces are not
-//! a thing: a member's own member globs are never iterated from the outer
-//! root, matching pesde.
+/*! workspaces, pesde-style: root lpm.toml lists member dirs as globs under
+[target] workspace, members depend on each other via { workspace = "scope/name" },
+and publish/install at the root run for every member. no nested workspaces:
+a member's own globs are never iterated from the outer root, same as pesde. */
 
 use crate::error::Error;
 use crate::project::manifest::{MANIFEST_FILE, Manifest};
@@ -12,24 +10,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct Member {
-    /// Absolute path of the member's directory.
+    /// absolute path of the member's dir.
     pub dir: PathBuf,
     pub manifest: Manifest,
 }
 
 pub struct Workspace {
-    /// Absolute path of the root — the directory whose manifest lists
-    /// member globs under `[target] workspace`.
+    /// absolute path of the root, the dir whose manifest lists the member globs.
     pub root: PathBuf,
-    /// Members in path order. Includes the root itself only when the globs
-    /// contain a literal "." (pesde's self-reference).
+    /** members in path order. the root itself is only included when the globs
+    contain a literal "." (pesde's self-reference). */
     pub members: Vec<Member>,
 }
 
 impl Workspace {
-    /// Opens the workspace rooted at `root`; its manifest must define member
-    /// globs. Every matched directory must be an lpm project — a member
-    /// without lpm.toml is an error, same as pesde.
+    /** opens the workspace rooted at `root`; its manifest must define member globs.
+    a matched dir without lpm.toml is an error, same as pesde. */
     pub fn open(root: &Path) -> Result<Self, Error> {
         let root = absolute(root)?;
         let manifest = Manifest::load_from(&root.join(MANIFEST_FILE))?;
@@ -47,7 +43,7 @@ impl Workspace {
         Ok(Workspace { root, members })
     }
 
-    /// The member publishing under `name`, if any.
+    /// the member publishing under `name`, if any.
     pub fn member(&self, name: &str) -> Option<&Member> {
         self.members
             .iter()
@@ -55,10 +51,9 @@ impl Workspace {
     }
 }
 
-/// The workspace `project_dir` belongs to: walking up, the first ancestor
-/// manifest whose member globs match `project_dir` (pesde's `find_roots`).
-/// Ancestor manifests that don't claim it are passed over. `None` when no
-/// ancestor does.
+/** the workspace `project_dir` belongs to: walk up, take the first ancestor manifest
+whose member globs match it (pesde's `find_roots`). ancestors that don't claim it
+are skipped; None when nothing does. */
 pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
     let project_dir = absolute(project_dir)?;
     let mut current = project_dir.parent();
@@ -79,9 +74,8 @@ pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
     Ok(None)
 }
 
-/// Directories under `root` matching the member globs, sorted. Globs follow
-/// pesde's extensions: a `!` prefix subtracts matches, and a literal "."
-/// makes the root itself a member.
+/** dirs under `root` matching the member globs, sorted. pesde's glob extensions:
+`!` prefix subtracts matches, a literal "." makes the root itself a member. */
 fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
     let invalid = |glob: &str, error: globset::Error| Error::WorkspaceGlobInvalid {
         glob: glob.to_string(),
@@ -100,8 +94,8 @@ fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
             Some(negated) => (&mut negative, negated),
             None => (&mut positive, entry.as_str()),
         };
-        // literal_separator: `*` stays within one path segment (`packages/*`
-        // must not swallow `packages/core/src`); `**` crosses, wax-style.
+        // literal_separator: `*` stays within one path segment, so `packages/`
+        // + `*` won't swallow packages/core/src. `**` crosses, wax-style.
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
             .build()
@@ -140,9 +134,9 @@ fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
     Ok(dirs)
 }
 
-/// Lexical forward-slash path from directory `from` to `to` — no filesystem
-/// access, so both must be absolute or both relative to the same base. Link
-/// files use this to require a workspace member from an output folder.
+/** lexical forward-slash path from dir `from` to `to`. no filesystem access, so
+both must be absolute or share the same base. link files use this to require a
+workspace member from an output folder. */
 pub fn relative_path(from: &Path, to: &Path) -> String {
     let from: Vec<_> = from.components().collect();
     let to: Vec<_> = to.components().collect();
@@ -165,15 +159,13 @@ pub fn relative_path(from: &Path, to: &Path) -> String {
     }
 }
 
-/// `std::path::absolute` with lpm's error type; never canonicalizes (symlink
-/// targets would break the lexical path math above).
+/// `std::path::absolute` with our error type. never canonicalize: symlink targets would break the lexical path math above.
 fn absolute(path: &Path) -> Result<PathBuf, Error> {
     Ok(std::path::absolute(path)?)
 }
 
-/// Runs `f` with the process working directory set to `dir`, restoring it
-/// afterwards even on errors. Workspace-wide commands (install/publish at
-/// the root) reuse the cwd-relative command logic per member through this.
+/** runs `f` with the process cwd set to `dir`, restored afterwards even on error.
+lets workspace-wide install/publish reuse the cwd-relative command logic per member. */
 pub fn in_dir<T>(dir: &Path, f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
     let previous = std::env::current_dir()?;
     std::env::set_current_dir(dir)?;
@@ -196,7 +188,7 @@ mod tests {
         format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n")
     }
 
-    /// chief-shaped tree: a private root with packages/* members.
+    /// chief-shaped tree: private root with packages/* members.
     fn write_workspace(base: &Path) {
         let root = format!(
             "{}private = true\n\n[target]\nenvironment = \"shared\"\n\
@@ -215,7 +207,7 @@ mod tests {
             &manifest("acme/extra", "0.3.0"),
         );
         write(&base.join("packages/skipped"), "lpm.toml", "");
-        // A stray file under packages/ must not be treated as a member.
+        // stray file under packages/ must not count as a member.
         write(base, "packages/README.md", "not a member");
     }
 
@@ -269,7 +261,7 @@ mod tests {
         let workspace = containing(&base.join("packages/core")).unwrap().unwrap();
         assert_eq!(workspace.root, absolute(&base).unwrap());
 
-        // The excluded member and an unrelated dir belong to no workspace.
+        // excluded member and an unrelated dir belong to no workspace.
         assert!(
             containing(&base.join("packages/skipped"))
                 .unwrap()
@@ -287,9 +279,9 @@ mod tests {
     #[test]
     fn relative_paths_are_lexical() {
         let relative = |from: &str, to: &str| relative_path(Path::new(from), Path::new(to));
-        // From an output folder to a sibling member of the same root.
+        // output folder to a sibling member of the same root.
         assert_eq!(relative("packages/shared", "packages/core"), "../core");
-        // From a member's output folder up to a sibling member.
+        // member's output folder up to a sibling member.
         assert_eq!(relative("pkg/packages/shared", "core"), "../../../core");
         assert_eq!(relative("a", "a"), ".");
         assert_eq!(relative("a/b", "a/b/c"), "c");

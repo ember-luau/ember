@@ -1,8 +1,7 @@
-//! An extracted package on disk: where its entry point is, which environment
-//! it targets, and the link file that points at it. This is the part of
-//! installing that reads packages rather than orchestrating downloads, and it
-//! has to understand foreign manifests (pesde.toml, wally.toml, Rojo project
-//! files) because that is all a published package carries.
+/*! an extracted package on disk: entry point, target environment, and the link
+file pointing at it. the reading half of install (no downloads here). has to
+understand foreign manifests (pesde.toml, wally.toml, Rojo project files) since
+that's all a published package carries. */
 
 use crate::error::Error;
 use crate::project::manifest::Environment;
@@ -11,23 +10,23 @@ use full_moon::visitors::Visitor;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Body of a generated link file: requires the stored package and restates
-/// its exported types, e.g.
-///
-/// ```luau
-/// local module = require("./.lpm/scope_pkg/lib")
-/// export type Result<T, E = string> = module.Result<T, E>
-/// return module
-/// ```
-///
-/// A package exporting no types keeps the compact `return require(...)` form.
+/** body of a generated link file: requires the stored package and restates its
+exported types, e.g.
+
+```luau
+local module = require("./.lpm/scope_pkg/lib")
+export type Result<T, E = string> = module.Result<T, E>
+return module
+```
+
+no exported types = the compact `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
     link_contents_at(&format!("./.lpm/{folder}/{entry}"), types)
 }
 
-/// Like [`link_contents`], but for an arbitrary require path — workspace
-/// members link straight to their source dir (`../../packages/core/src/init`)
-/// instead of an extracted copy under `.lpm/`.
+/** like [`link_contents`] but for an arbitrary require path: workspace members
+link straight to their source dir (`../../packages/core/src/init`) instead of an
+extracted copy under `.lpm/`. */
 pub fn link_contents_at(path: &str, types: &[String]) -> String {
     let path = format!("\"{path}\"");
     if types.is_empty() {
@@ -43,8 +42,7 @@ pub fn link_contents_at(path: &str, types: &[String]) -> String {
     contents
 }
 
-/// The file an extensionless entry resolves to, the way Luau string requires
-/// do: `<entry>.luau`, `<entry>.lua`, then the folder's init file.
+/// the file an extensionless entry resolves to, Luau string-require style: `<entry>.luau`, `<entry>.lua`, then the folder's init file.
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     [
         format!("{entry}.luau"),
@@ -57,25 +55,22 @@ pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     .find(|path| path.is_file())
 }
 
-/// full_moon's parser and visitors recurse once per nesting level, so deep
-/// sources need serious stack; parsing gets its own thread with this much.
+/// full_moon recurses per nesting level, so deep sources need serious stack; parsing gets its own thread with this much.
 const PARSE_STACK_BYTES: usize = 64 * 1024 * 1024;
 
-/// Sources nested deeper than this are refused without parsing. A stack
-/// overflow cannot be caught — it aborts the whole process — so the ceiling
-/// has to be enforced before full_moon ever runs. Real Luau tops out around
-/// nesting depth ~50; this is 10x that.
+/** sources nested deeper than this are refused without parsing. a stack overflow
+can't be caught (it aborts the whole process), so the ceiling must be enforced
+before full_moon ever runs. real Luau tops out around depth ~50; this is 10x that. */
 const MAX_NESTING_DEPTH: usize = 500;
 
-/// `export type` re-export lines for a link file. Luau type exports are
-/// lexical — they do not flow through `return require(...)` — so the link
-/// file must restate each one as `export type X<T> = module.X<T>`, the same
-/// scheme as pesde's linker: the declaration side keeps generic defaults,
-/// the use side drops them. Exported type functions re-export the same way,
-/// with their parameters as generics (parameterless ones have no
-/// type-declaration equivalent and are skipped). `None` means the source
-/// couldn't be parsed (invalid, absurdly nested, or a parser panic); the
-/// caller decides how loudly to say so.
+/** `export type` re-export lines for a link file. Luau type exports are lexical,
+they don't flow through `return require(...)`, so the link file must restate each
+one as `export type X<T> = module.X<T>`, same scheme as pesde's linker: the
+declaration side keeps generic defaults, the use side drops them. exported type
+functions re-export the same way with their parameters as generics (parameterless
+ones have no type-declaration equivalent, skipped). None = source couldn't be
+parsed (invalid, absurdly nested, or a parser panic); caller decides how loudly
+to say so. */
 pub fn exported_types(source: &str) -> Option<Vec<String>> {
     if bracket_depth(source) > MAX_NESTING_DEPTH {
         return None;
@@ -87,12 +82,12 @@ pub fn exported_types(source: &str) -> Option<Vec<String>> {
         .spawn(move || extract_types(&source))
         .ok()?
         .join()
-        .ok()? // a full_moon panic reads as "couldn't parse"
+        .ok()? // full_moon panic reads as "couldn't parse"
 }
 
-/// Deepest `(){}[]` nesting in `source`. A cheap over-approximation of the
-/// parser's recursion depth (brackets inside strings and comments count too,
-/// which only ever refuses more, never less).
+/** deepest `(){}[]` nesting in `source`. cheap over-approximation of the parser's
+recursion depth: brackets inside strings/comments count too, which only ever
+refuses more, never less. */
 fn bracket_depth(source: &str) -> usize {
     let mut depth = 0usize;
     let mut deepest = 0;
@@ -156,8 +151,7 @@ fn extract_types(source: &str) -> Option<Vec<String>> {
     Some(visitor.types)
 }
 
-/// AST nodes print with their surrounding trivia (whitespace, comments);
-/// trim the ends so re-exports stay tidy on one line.
+/// AST nodes print with surrounding trivia (whitespace, comments); trim so re-exports stay on one line.
 fn trimmed(node: impl std::fmt::Display) -> String {
     node.to_string().trim().to_string()
 }
@@ -177,10 +171,10 @@ fn reexport(name: &str, declared: &[String], used: &[String]) -> String {
     )
 }
 
-/// Finds a package's entry point relative to its root, without a file
-/// extension (Luau string requires reject them). Checked in order:
-/// lpm.toml `[target].main`, pesde.toml `[target].lib`, a Rojo
-/// default.project.json tree `$path`, then conventional init file locations.
+/** finds a package's entry point relative to its root, extensionless (Luau string
+requires reject extensions). checked in order: lpm.toml `[target].main`, pesde.toml
+`[target].lib`, a Rojo default.project.json tree `$path`, then conventional init
+file locations. */
 pub fn entry_point(dir: &Path) -> Option<String> {
     if let Some(main) = toml_string(dir, "lpm.toml", &["target", "main"]) {
         return Some(normalize_entry(&main));
@@ -211,9 +205,9 @@ pub fn entry_point(dir: &Path) -> Option<String> {
     None
 }
 
-/// Reads an extracted package's own manifest to find its environment:
-/// lpm.toml `[target].environment`, then pesde.toml `[target].environment`
-/// (translated), then wally.toml `[package].realm` (translated).
+/** reads an extracted package's own manifest for its environment: lpm.toml
+`[target].environment`, then pesde.toml's (translated), then wally.toml
+`[package].realm` (translated). */
 pub fn environment(dir: &Path) -> Option<Environment> {
     if let Some(name) = toml_string(dir, "lpm.toml", &["target", "environment"]) {
         return Environment::from_lpm(&name).ok();
@@ -227,8 +221,7 @@ pub fn environment(dir: &Path) -> Option<Environment> {
     None
 }
 
-/// Archives sometimes wrap everything in a single top-level folder
-/// (e.g. GitHub release tarballs); unwrap it so package files sit at the root.
+/// archives sometimes wrap everything in one top-level folder (GitHub release tarballs do); unwrap so package files sit at the root.
 pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
     let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     let [only] = entries.as_slice() else {
@@ -247,8 +240,7 @@ pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// A string at `keys` in one of the package's manifests, if that file exists,
-/// parses, and has it. Missing is the normal case, so nothing here is an error.
+/// string at `keys` in one of the package's manifests, if the file exists, parses, and has it. missing is the normal case, so no errors here.
 fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     let mut value: toml::Value = fs::read_to_string(dir.join(file)).ok()?.parse().ok()?;
     for key in keys {
@@ -257,8 +249,7 @@ fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     value.as_str().map(str::to_string)
 }
 
-/// Normalizes an entry path for a string require: forward slashes, no leading
-/// "./", no .luau/.lua extension (a bare folder resolves its init file).
+/// normalizes an entry path for a string require: forward slashes, no leading "./", no .luau/.lua extension (a bare folder resolves its init file).
 fn normalize_entry(path: &str) -> String {
     let path = path.replace('\\', "/");
     let path = path.trim_start_matches("./").trim_matches('/');
@@ -345,7 +336,7 @@ mod tests {
         write_package(&b, "pesde.toml", "[target]\nlib = \"lib.luau\"");
         assert_eq!(entry_point(&b).as_deref(), Some("lib"));
 
-        // Rojo project tree path (a folder; its init file resolves at require time).
+        // Rojo tree path (a folder; its init file resolves at require time).
         let c = base.join("c");
         write_package(
             &c,
@@ -354,7 +345,7 @@ mod tests {
         );
         assert_eq!(entry_point(&c).as_deref(), Some("src"));
 
-        // Conventional fallbacks.
+        // conventional fallbacks.
         let d = base.join("d");
         write_package(&d.join("src"), "init.lua", "");
         assert_eq!(entry_point(&d).as_deref(), Some("src/init"));
@@ -389,9 +380,9 @@ mod tests {
 
     #[test]
     fn absurdly_nested_sources_are_refused_not_crashed() {
-        // full_moon recurses per nesting level; past the guard's ceiling the
-        // source is refused before the parser can eat the stack. (This once
-        // aborted the whole install with a stack overflow.)
+        /* full_moon recurses per nesting level; past the guard's ceiling the source
+        is refused before the parser can eat the stack. (this once aborted the whole
+        install with a stack overflow.) */
         let depth = 2000;
         let deep = format!(
             "export type Deep = {}number{}\nreturn {{}}\n",
@@ -400,7 +391,7 @@ mod tests {
         );
         assert_eq!(exported_types(&deep), None);
 
-        // Deep-but-sane nesting still parses on the roomy parser thread.
+        // deep-but-sane nesting still parses on the roomy parser thread.
         let sane = format!(
             "export type Deep = {}number{}\nreturn {{}}\n",
             "{ a: ".repeat(100),
@@ -433,14 +424,14 @@ mod tests {
             [
                 "export type Status = module.Status",
                 "export type Promise<T> = module.Promise<T>",
-                // Declaration keeps the default, the use side drops it.
+                // declaration keeps the default, use side drops it.
                 "export type Result<T, E = string> = module.Result<T, E>",
                 "export type Pack<T...> = module.Pack<T...>",
             ]
         );
 
         assert_eq!(exported_types("return {}").unwrap(), Vec::<String>::new());
-        // A file that isn't Luau parses to nothing rather than bad re-exports.
+        // non-Luau input parses to nothing, not bad re-exports.
         assert_eq!(exported_types("local = = ="), None);
     }
 
@@ -456,7 +447,7 @@ mod tests {
             return {}
         "#;
 
-        // Parameterless type functions can't be restated as a declaration.
+        // parameterless type functions can't be restated as a declaration.
         assert_eq!(
             exported_types(source).unwrap(),
             ["export type Partial<ty> = module.Partial<ty>"]

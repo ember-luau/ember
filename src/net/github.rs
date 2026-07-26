@@ -1,6 +1,8 @@
-//! GitHub's REST API: the release endpoints (tool installs, `lpm self
-//! update`) and the user lookup the OAuth device flow ends with. Publishing
-//! no longer touches GitHub — it goes through lpm's own registry API.
+/*!
+GitHub's REST API: the release endpoints (tool installs, `lpm self update`)
+and the user lookup the OAuth device flow ends with. Publishing no longer
+touches GitHub; that goes through lpm's own registry API.
+*/
 
 const BASE_URL: &str = "https://api.github.com";
 const JSON_HEADER_TYPE: &str = "application/vnd.github.v3+json";
@@ -45,9 +47,9 @@ impl GithubAPI {
         headers
     }
 
-    /// Fetches the release tagged `v{version}`, falling back to the bare
-    /// `{version}` tag for repos that don't prefix their tags.
-    /// `version` must not include a leading 'v'.
+    /** Fetches the release tagged `v{version}`, falling back to the bare
+    `{version}` tag for repos that don't prefix. `version` must not carry a
+    leading 'v'. */
     pub fn get_release(&self, repo: &str, version: &str) -> Result<responses::Release, Error> {
         for tag in [format!("v{version}"), version.to_string()] {
             let url = format!("{BASE_URL}/repos/{repo}/releases/tags/{tag}");

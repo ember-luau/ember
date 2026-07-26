@@ -11,8 +11,8 @@ pub fn run(args: RunArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     let script = manifest.script(&args.name)?;
 
-    // Wait rather than exec: a failing script should exit with its own code
-    // (CI reads it), and a successful one still gets lpm's "Done in" line.
+    /* wait rather than exec: a failing script should exit with its own code
+    (CI reads it), and a successful one still gets lpm's "Done in" line */
     let code = process::wait(process::shell(script))?;
     if code != 0 {
         std::process::exit(code);

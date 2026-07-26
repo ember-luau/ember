@@ -9,16 +9,16 @@ use toml::Value;
 const DOWNLOAD_TEMPLATE: &str =
     "{API_URL}/v1/packages/{PACKAGE}/{PACKAGE_VERSION}/{PACKAGE_TARGET}/archive";
 
-/// Root config.toml of a pesde-format index. lpm's own index is this format
-/// too, except its entries each carry a `download` URL, so it needs no `api`.
+/** Root config.toml of a pesde-format index. lpm's own index is this format
+too, except its entries each carry a `download` URL, so it needs no `api`. */
 #[derive(Deserialize)]
 pub struct Config {
-    /// Registry the download URLs are built against. Optional only so a
-    /// config.toml that predates it still parses.
+    /** Registry the download URLs are built against. Optional so a
+    config.toml that predates it still parses. */
     #[serde(default)]
     pub api: Option<String>,
-    /// GitHub OAuth app (device flow) publishes authenticate against.
-    /// Real pesde indices spell this `github_oauth_client_id`.
+    /** GitHub OAuth app (device flow) publishes authenticate against. Real
+    pesde indices spell this `github_oauth_client_id`. */
     #[serde(default, alias = "github_oauth_client_id")]
     pub github_oauth_id: Option<String>,
 }
@@ -31,8 +31,8 @@ pub fn load_config(root: &Path) -> Result<Config, Error> {
 
 struct Candidate {
     version: semver::Version,
-    /// Raw target string ("luau", "roblox", ...) from the entry key or the
-    /// entry's own target table; fills {PACKAGE_TARGET} in download URLs.
+    /** Raw target string ("luau", "roblox", ...) from the entry key or the
+    entry's own target table; fills {PACKAGE_TARGET} in download URLs. */
     target: Option<String>,
     environment: Option<Environment>,
     entry: Value,
@@ -56,9 +56,9 @@ pub fn resolve(
     }
 
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    // Newer pesde files nest entries under an "entries" table (with sibling
-    // metadata like `meta`); older ones put them at the top level. Keys are
-    // "<version> <target>", the target part optional in lpm indices.
+    /* Newer pesde files nest entries under an "entries" table (with sibling
+    metadata like `meta`); older ones put them at the top level. Keys are
+    "<version> <target>", the target part optional in lpm indices. */
     let entries = match file.get("entries") {
         Some(Value::Table(entries)) => entries,
         _ => file.as_table().ok_or_else(|| Error::PackageNotFound {
@@ -80,9 +80,9 @@ pub fn resolve(
             continue;
         }
 
-        // The entry's own target is authoritative — a table with an
-        // `environment` (pesde), or a bare string (lpm API entries). The
-        // key's target part covers entries that don't carry one.
+        /* The entry's own target is authoritative: a table with an
+        `environment` (pesde), or a bare string (lpm API entries). The
+        key's target part covers entries that don't carry one. */
         let target = entry
             .get("target")
             .and_then(|target| match target {
@@ -109,8 +109,8 @@ pub fn resolve(
         });
     };
 
-    // Among the targets published for the best version, prefer the one
-    // matching the project's environment; otherwise take the first.
+    /* Among the best version's targets, prefer the one matching the
+    project's environment; otherwise take the first. */
     let mut same_version: Vec<Candidate> = candidates
         .into_iter()
         .filter(|c| c.version == best_version)
@@ -146,9 +146,9 @@ fn download_source(
     name: &str,
     candidate: &Candidate,
 ) -> Result<DownloadSource, Error> {
-    // Entries in lpm's own index bake in their download URL (that's what lets
-    // the index work without a registry server being up); pesde entries build
-    // theirs from the registry template.
+    /* lpm-index entries bake in their download URL (that's what lets
+    installs work without a registry server being up); pesde entries
+    build theirs from the registry template. */
     if let Some(url) = candidate.entry.get("download").and_then(Value::as_str) {
         return Ok(DownloadSource::TarGz {
             url: url.to_string(),
@@ -191,8 +191,8 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
 
     let mut parsed = Vec::new();
     for spec in dependencies.values() {
-        // Specs are either the specifier table itself or a [specifier, kind]
-        // pair, where kind is "standard", "peer", or "dev".
+        /* Specs are either the specifier table itself or a [specifier, kind]
+        pair, kind being "standard", "peer", or "dev". */
         let (spec, kind) = match spec {
             Value::Array(pair) => match pair.first() {
                 Some(first) => (first, pair.get(1).and_then(Value::as_str)),
@@ -227,8 +227,8 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
             .to_string();
         let index = spec.get("index").and_then(Value::as_str);
 
-        // Published entries name a dependency's index by URL; "default" (or
-        // nothing) means the index the entry itself came from.
+        /* Published entries name a dependency's index by URL; "default" (or
+        nothing) means the index the entry itself came from. */
         let dep_index_url = match index {
             Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
                 Some(url.to_string())
@@ -306,8 +306,8 @@ mod tests {
 
     #[test]
     fn config_parses_both_oauth_spellings_and_tolerates_extras() {
-        // Real pesde configs spell the oauth id the long way and carry other
-        // registry settings lpm ignores.
+        /* Real pesde configs spell the oauth id the long way and carry other
+        registry settings lpm ignores. */
         let config: Config = toml::from_str(
             r#"
             api = "https://registry.example.com"
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn entry_download_url_wins_over_the_template() {
-        // lpm's own index: entries carry their download URL, so no `api` is
-        // needed — and one being set wouldn't override the entry.
+        /* lpm's own index: entries carry their download URL, so no `api` is
+        needed, and one being set wouldn't override the entry. */
         let config = Config {
             api: Some("https://registry.example.com".to_string()),
             github_oauth_id: None,
@@ -459,8 +459,8 @@ mod tests {
 
     #[test]
     fn resolves_lpm_index_entries_with_baked_downloads() {
-        // The shape the lpm API writes: no root `api`, per-entry `download`,
-        // target as a table with just `environment`.
+        /* The shape the lpm API writes: no root `api`, per-entry `download`,
+        target as a table with just `environment`. */
         let index = TempIndex::new("lpm-format", r#"github_oauth_id = "Ov23abc""#);
         index.write_package(
             "chief/core",
@@ -502,8 +502,8 @@ mod tests {
 
     #[test]
     fn resolves_top_level_entries_from_disk() {
-        // Entry keys carry the target after the version; older files put the
-        // entries at the top level instead of under [entries].
+        /* Entry keys carry the target after the version; older files put
+        entries at the top level instead of under [entries]. */
         let index = TempIndex::new("top-level", r#"api = "https://registry.example.com""#);
         index.write_package(
             "scope/pkg",

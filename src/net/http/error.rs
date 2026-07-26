@@ -24,8 +24,8 @@ pub enum HttpError {
     RateLimited,
 }
 
-// Boxed by hand because ureq::Error is large enough that carrying it inline
-// would bloat every Result<_, Error>.
+/* Boxed because ureq::Error is big enough to bloat every Result<_, Error>
+if carried inline. */
 impl From<ureq::Error> for HttpError {
     fn from(error: ureq::Error) -> Self {
         match error {

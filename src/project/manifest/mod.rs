@@ -8,13 +8,13 @@ use std::path::Path;
 
 pub const MANIFEST_FILE: &str = "lpm.toml";
 
-/// Key under [indices] used for dependencies that name no index.
+/// [indices] key used for dependencies that name no index.
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
-/// lpm's own package index, used for dependencies that name no index when the
-/// project doesn't define a `default` one. Pesde-format entries whose
-/// `download` URLs point at the registry CDN; written only by the lpm API as
-/// part of publishing, read by the CLI like any other git index.
+/** lpm's own package index, the fallback for dependencies naming no index when
+the project defines no `default` one. pesde-format entries whose `download` URLs
+point at the registry CDN; written only by the lpm API at publish time, read by
+the CLI like any other git index. */
 pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -30,15 +30,15 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, Dependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, Tool>,
-    /// Shell commands runnable with `lpm run <name>`.
+    /// shell commands runnable with `lpm run <name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scripts: BTreeMap<String, String>,
-    /// What `lpm studio open` opens in Roblox Studio.
+    /// what `lpm studio open` opens in Roblox Studio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub studio: Option<Studio>,
 }
 
-/// Per-environment install locations; each defaults to "packages/<env>".
+/// per-environment install locations; each defaults to "packages/<env>".
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
     #[serde(
@@ -73,8 +73,8 @@ impl Config {
 pub struct Package {
     pub name: String,
     pub version: String,
-    /// Never published. Workspace roots that only exist to hold members set
-    /// this so publish skips them (chief's root manifest is the archetype).
+    /** never published. workspace roots that only exist to hold members set this
+    so publish skips them (chief's root manifest is the archetype). */
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,16 +90,14 @@ pub struct Package {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Target {
     pub environment: Environment,
-    /// Entry point of the package, e.g. "src/init.luau". Not needed when
-    /// `workspace` is set — a workspace root has no code of its own to
-    /// require.
+    /** entry point, e.g. "src/init.luau". not needed when `workspace` is set,
+    a workspace root has no code of its own to require. */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
-    /// Globs (relative to this manifest) naming the member projects of a
-    /// workspace: `workspace = ["packages/*"]` (`!` negates, a literal "."
-    /// includes the root). A manifest with members is a workspace root;
-    /// `lpm publish`/`lpm install` there run for every member. The pesde
-    /// spelling `workspace_members` is accepted as an alias. Read through
+    /// member globs (relative to this manifest): `workspace = ["packages/*"]`
+    /// (`!` negates, literal "." includes the root). having members makes this
+    /// a workspace root; publish/install there run for every member. pesde's
+    /// spelling `workspace_members` is accepted as an alias. read through
     /// [`Manifest::workspace_members`].
     #[serde(
         rename = "workspace",
@@ -108,31 +106,30 @@ pub struct Target {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub workspace: Vec<String>,
-    /// What goes into the published archive: plain file or directory paths
-    /// (a directory covers everything under it) or globs (`src/*`). Empty
-    /// means "everything sensible" — the default walk minus VCS/output dirs.
+    /// what goes into the published archive: plain file/dir paths (a dir
+    /// covers everything under it) or globs like `src/*`. empty = "everything
+    /// sensible", the default walk minus VCS/output dirs.
     #[serde(default, alias = "include", skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<String>,
-    /// Subtracted from whatever `includes` (or the default walk) selected;
-    /// same path-or-glob entries. lpm.toml always ships.
+    /** subtracted from whatever `includes` (or the default walk) selected; same
+    path-or-glob entries. lpm.toml always ships. */
     #[serde(default, alias = "exclude", skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<String>,
 }
 
-/// Where a package's Luau code runs. Output folders under packages/ use the
-/// serialized (lowercase) form.
+/// where a package's Luau code runs. output folders under packages/ use the serialized (lowercase) form.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
-    /// Luau code that must be run in Roblox
+    /// Luau code that must run in Roblox
     Shared,
-    /// Roblox server-side code only
+    /// Roblox server-side only
     Server,
-    /// Requires the Lune runtime
+    /// needs the Lune runtime
     Lune,
-    /// Standalone Luau, runnable with the luau CLI
+    /// standalone Luau, runnable with the luau CLI
     Luau,
-    /// Requires the Lute runtime
+    /// needs the Lute runtime
     Lute,
 }
 
@@ -155,7 +152,7 @@ impl Environment {
         }
     }
 
-    /// Translates a pesde `target.environment` value.
+    /// translates a pesde `target.environment` value.
     pub fn from_pesde(environment: &str) -> Result<Self, Error> {
         match environment {
             "roblox" => Ok(Environment::Shared),
@@ -167,7 +164,7 @@ impl Environment {
         }
     }
 
-    /// Translates a wally `realm` value.
+    /// translates a wally `realm` value.
     pub fn from_wally_realm(realm: &str) -> Result<Self, Error> {
         match realm {
             "shared" => Ok(Environment::Shared),
@@ -176,7 +173,7 @@ impl Environment {
         }
     }
 
-    /// Parses lpm's own environment names ("shared", "lune", ...).
+    /// parses lpm's own environment names ("shared", "lune", ...).
     pub fn from_lpm(environment: &str) -> Result<Self, Error> {
         match environment {
             "shared" => Ok(Environment::Shared),
@@ -195,39 +192,37 @@ impl fmt::Display for Environment {
     }
 }
 
-/// The [studio] table: either a published place (both IDs) or a local place
-/// file.
+/// the [studio] table: either a published place (both IDs) or a local place file.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Studio {
-    /// Universe (experience) ID the place belongs to.
+    /// universe (experience) ID the place belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub universe: Option<u64>,
-    /// Place ID inside the universe.
+    /// place ID inside the universe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub place: Option<u64>,
-    /// Path to a .rbxl/.rbxlx place file, relative to lpm.toml.
+    /// path to a .rbxl/.rbxlx place file, relative to lpm.toml.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// Anything else written under [studio]. The table is hand-edited often
-    /// and a typo'd key would otherwise read as "unconfigured", so `target()`
-    /// reports these — but only there, keeping a [studio] typo from failing
-    /// unrelated commands the way `deny_unknown_fields` would.
+    /** anything else written under [studio]. the table gets hand-edited a lot and
+    a typo'd key would otherwise read as "unconfigured", so `target()` reports
+    these. only there, though: `deny_unknown_fields` would let a [studio] typo
+    fail unrelated commands. */
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
 }
 
-/// A validated [studio] table: the one thing `lpm studio open` should open.
+/// a validated [studio] table: the one thing `lpm studio open` should open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StudioTarget {
-    /// A published place, opened through the roblox-studio: protocol.
+    /// published place, opened through the roblox-studio: protocol.
     Place { universe: u64, place: u64 },
-    /// A local place file, opened through the OS file association.
+    /// local place file, opened through the OS file association.
     File(String),
 }
 
 impl Studio {
-    /// Reduces the table to what to open. Everything that can be wrong with a
-    /// hand-written [studio] is caught here, before any launch attempt.
+    /// reduces the table to what to open. everything that can be wrong with a hand-written [studio] gets caught here, before any launch attempt.
     pub fn target(&self) -> Result<StudioTarget, Error> {
         if let Some((key, _)) = self.unknown.first_key_value() {
             return Err(Error::StudioUnknownKey(key.clone()));
@@ -268,22 +263,21 @@ impl Studio {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Dependency {
-    /// A package from an index:
-    /// `{ name = "scope/pkg", version = "^", index = "wally" }`.
+    /// package from an index: `{ name = "scope/pkg", version = "^", index = "wally" }`.
     Registry {
-        /// Package identifier in "scope/name" form.
+        /// "scope/name" identifier.
         name: String,
-        /// Semver requirement; "^" alone means "latest".
+        /// semver requirement; "^" alone means "latest".
         version: String,
-        /// Key into [indices]; None means the default luaupm index.
+        /// key into [indices]; None means the default luaupm index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
     },
-    /// Another member of this workspace, pesde-style:
-    /// `{ workspace = "scope/pkg", version = "^" }`. Linked in place during
-    /// development; `version` is a version TYPE (`^`, `~`, `=`, `*`) or a
-    /// full requirement, applied to the member's current version only when
-    /// publishing (see [`workspace_version_req`]).
+    /** another member of this workspace, pesde-style:
+    `{ workspace = "scope/pkg", version = "^" }`. linked in place during
+    development; `version` is a version TYPE (`^`, `~`, `=`, `*`) or a full
+    requirement, applied to the member's current version only at publish time
+    (see [`workspace_version_req`]). */
     Workspace {
         workspace: String,
         #[serde(default = "default_workspace_version")]
@@ -295,10 +289,10 @@ fn default_workspace_version() -> String {
     "^".to_string()
 }
 
-/// The registry requirement a workspace dependency publishes as, pesde's
-/// rules exactly: `^`/`~`/`=` prefix the member's current version
-/// (`^` + `1.2.3` → `^1.2.3`), `*` stays "any", and anything else must
-/// already be a full semver requirement, passed through unchanged.
+/** the registry requirement a workspace dependency publishes as, pesde's rules
+exactly: `^`/`~`/`=` prefix the member's current version (`^` + `1.2.3` ->
+`^1.2.3`), `*` stays "any", anything else must already be a full semver
+requirement and passes through unchanged. */
 pub fn workspace_version_req(
     version: &str,
     member_version: &semver::Version,
@@ -316,18 +310,17 @@ pub fn workspace_version_req(
     })
 }
 
-/// A GitHub-released binary tool, written in lpm.toml as the single string
-/// "owner/repo@version" under [tools] (key = alias).
+/// a GitHub-released binary tool, written in lpm.toml as the single string "owner/repo@version" under [tools] (key = alias).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
-    /// GitHub repository in "owner/repo" form.
+    /// "owner/repo" GitHub repository.
     pub repository: String,
-    /// Exact release version, without a leading 'v'.
+    /// exact release version, no leading 'v'.
     pub version: String,
 }
 
 impl Tool {
-    /// Parses an "owner/repo@version" tool spec.
+    /// parses an "owner/repo@version" tool spec.
     pub fn parse(spec: &str) -> Result<Self, Error> {
         let invalid = || Error::InvalidToolSpec(spec.to_string());
 
@@ -343,10 +336,10 @@ impl Tool {
         })
     }
 
-    /// Splits an "owner/repo" GitHub repository name. Unlike index package
-    /// names (see `split_package_name`), GitHub owners and repos may contain
-    /// uppercase letters and dots (e.g. "JohnnyMorganz/StyLua"), so only the
-    /// shape is validated: exactly one '/', both halves non-empty.
+    /** splits an "owner/repo" GitHub repository name. unlike index package names
+    (see `split_package_name`), GitHub owners/repos may contain uppercase and dots
+    ("JohnnyMorganz/StyLua"), so only the shape is validated: exactly one '/',
+    both halves non-empty. */
     pub fn split_repository(repository: &str) -> Result<(&str, &str), Error> {
         match repository.split_once('/') {
             Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() && !repo.contains('/') => {
@@ -383,13 +376,12 @@ impl<'de> Deserialize<'de> for Tool {
 }
 
 impl Manifest {
-    /// Loads the manifest from the current directory.
+    /// loads the manifest from the current directory.
     pub fn load() -> Result<Self, Error> {
         Self::load_from(Path::new(MANIFEST_FILE))
     }
 
-    /// Member globs of this workspace, from `[target] workspace`. Empty
-    /// means this project is not a workspace root.
+    /// member globs from [target] workspace. empty = not a workspace root.
     pub fn workspace_members(&self) -> &[String] {
         self.target
             .as_ref()
@@ -404,7 +396,7 @@ impl Manifest {
         Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
     }
 
-    /// Folder an environment's packages (and their link files) install to.
+    /// folder an environment's packages (and their link files) install to.
     pub fn packages_out(&self, environment: Environment) -> std::path::PathBuf {
         let configured = match environment {
             Environment::Shared => &self.config.shared_packages_out,
@@ -419,9 +411,8 @@ impl Manifest {
         }
     }
 
-    /// Resolves a dependency's `index` key to an index URL. No key means the
-    /// `default` entry under [indices] when the project defines one, and lpm's
-    /// own index otherwise.
+    /** resolves a dependency's `index` key to an index URL. no key = the `default`
+    entry under [indices] when the project defines one, lpm's own index otherwise. */
     pub fn index_url(&self, index: Option<&str>) -> Result<&str, Error> {
         match index {
             None => Ok(self
@@ -437,8 +428,7 @@ impl Manifest {
         }
     }
 
-    /// The command a `[scripts]` entry runs. Editing the manifest goes
-    /// through `edit::ManifestDoc`; this is the read side, used by `lpm run`.
+    /// the command a `[scripts]` entry runs. read side only, used by `lpm run`; edits go through `edit::ManifestDoc`.
     pub fn script(&self, name: &str) -> Result<&str, Error> {
         self.scripts
             .get(name)
@@ -447,11 +437,11 @@ impl Manifest {
     }
 }
 
-/// Shape of a GitHub username: 1-39 characters, alphanumeric or dashes, with
-/// no leading, trailing, or consecutive dash. `[package] authors` must pass
-/// this — the registry appends authors to the scope's owner list on publish
-/// (co-ownership) and 400s anything that isn't a username. Shape only; whether
-/// the account exists is not checked anywhere, so typos still bite.
+/** shape of a GitHub username: 1-39 chars, alphanumeric or dashes, no leading/
+trailing/consecutive dash. `[package] authors` must pass this: the registry
+appends authors to the scope's owner list on publish (co-ownership) and 400s
+anything that isn't a username. shape only; account existence is never checked,
+so typos still bite. */
 pub fn is_github_username(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 39
@@ -461,8 +451,7 @@ pub fn is_github_username(name: &str) -> bool {
         && !name.contains("--")
 }
 
-/// Splits a "scope/name" package identifier. Wally allows dashes, so parts
-/// accept lowercase letters, digits, and dashes/underscores.
+/// splits a "scope/name" package identifier. wally allows dashes, so parts accept lowercase letters, digits, dashes, underscores.
 pub fn split_package_name(name: &str) -> Result<(&str, &str), Error> {
     let is_valid_part = |part: &str| {
         !part.is_empty()
@@ -477,7 +466,7 @@ pub fn split_package_name(name: &str) -> Result<(&str, &str), Error> {
     }
 }
 
-/// Parses a manifest version requirement. A bare "^" (or "*") means "latest".
+/// parses a manifest version requirement. bare "^" (or "*") means "latest".
 pub fn parse_version_req(req: &str) -> Result<semver::VersionReq, Error> {
     let trimmed = req.trim();
     if trimmed == "^" || trimmed == "*" || trimmed.is_empty() {
@@ -560,7 +549,7 @@ mod tests {
         )
         .unwrap();
 
-        // No `default` key: bare dependencies fall back to lpm's own index.
+        // no `default` key: bare deps fall back to lpm's own index.
         assert_eq!(manifest.index_url(None).unwrap(), DEFAULT_INDEX_URL);
         assert_eq!(
             manifest.index_url(Some("wally")).unwrap(),
@@ -645,8 +634,8 @@ mod tests {
 
     #[test]
     fn parses_workspace_manifests_and_dependencies() {
-        // The chief repo's shape: a private root listing member globs, and
-        // members depending on each other with workspace specifiers.
+        /* the chief repo's shape: private root listing member globs, members
+        depending on each other with workspace specifiers. */
         let root: Manifest = toml::from_str(
             r#"
             [package]
@@ -661,11 +650,11 @@ mod tests {
         )
         .unwrap();
         assert!(root.package.private);
-        // A root needs a [target] but no `main` — members carry the code.
+        // a root needs a [target] but no `main`; members carry the code.
         assert!(root.target.as_ref().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
 
-        // pesde's spelling still parses, so converted repos keep working.
+        // pesde's spelling still parses so converted repos keep working.
         let aliased: Manifest = toml::from_str(
             r#"
             [package]
@@ -703,7 +692,7 @@ mod tests {
             Dependency::Workspace { version, .. } if version == "^"
         ));
 
-        // Not-a-workspace manifests don't accidentally gain the fields.
+        // not-a-workspace manifests don't accidentally gain the fields.
         let plain: Manifest = toml::from_str(
             r#"
             [package]
@@ -727,7 +716,7 @@ mod tests {
         assert_eq!(workspace_version_req("=", &version).unwrap(), "=2.1.5");
         assert_eq!(workspace_version_req("*", &version).unwrap(), "*");
         assert_eq!(workspace_version_req("", &version).unwrap(), "^2.1.5");
-        // A full requirement passes through unchanged.
+        // a full requirement passes through unchanged.
         assert_eq!(workspace_version_req("^2.1.0", &version).unwrap(), "^2.1.0");
         assert!(workspace_version_req("not a req", &version).is_err());
     }
@@ -843,7 +832,7 @@ mod tests {
         assert_eq!(reparsed.includes, target.includes);
         assert_eq!(reparsed.excludes, target.excludes);
 
-        // The singular spellings parse too.
+        // the singular spellings parse too.
         let aliased: Manifest = toml::from_str(
             r#"
             [package]
@@ -860,7 +849,7 @@ mod tests {
         assert_eq!(aliased.target.as_ref().unwrap().includes, ["src"]);
         assert_eq!(aliased.target.as_ref().unwrap().excludes, ["tests"]);
 
-        // Absent lists stay absent on write.
+        // absent lists stay absent on write.
         let bare: Manifest = toml::from_str(
             r#"
             [package]
@@ -931,7 +920,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Both forms at once is ambiguous, even when the ID half is partial.
+        // both forms at once is ambiguous, even with only half the IDs.
         assert!(matches!(
             studio(Some(1), Some(2), Some("a.rbxl")).target(),
             Err(Error::StudioConflict)
@@ -941,7 +930,7 @@ mod tests {
             Err(Error::StudioConflict)
         ));
 
-        // One ID without the other.
+        // one ID without the other.
         assert!(matches!(
             studio(Some(1), None, None).target(),
             Err(Error::StudioIncomplete {
@@ -957,7 +946,7 @@ mod tests {
             })
         ));
 
-        // Nothing at all, zero IDs, and a blank file path.
+        // nothing at all, zero IDs, blank file path.
         assert!(matches!(
             studio(None, None, None).target(),
             Err(Error::StudioUnconfigured)
@@ -975,7 +964,7 @@ mod tests {
             Err(Error::StudioEmptyFile)
         ));
 
-        // Surrounding whitespace in the path is tolerated.
+        // surrounding whitespace in the path is tolerated.
         assert_eq!(
             studio(None, None, Some(" place.rbxl ")).target().unwrap(),
             StudioTarget::File("place.rbxl".to_string())
@@ -984,8 +973,8 @@ mod tests {
 
     #[test]
     fn studio_flags_unknown_keys_without_failing_the_manifest() {
-        // A typo'd key must not break `Manifest::load` — that would take
-        // `install`/`add`/`run` down with it — but `target()` names it.
+        /* a typo'd key must not break `Manifest::load` (that would take
+        install/add/run down with it), but `target()` names it. */
         let manifest: Manifest = toml::from_str(
             r#"
             [package]

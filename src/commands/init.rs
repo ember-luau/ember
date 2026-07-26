@@ -39,8 +39,8 @@ struct Defaults {
 }
 
 impl Defaults {
-    /// Best-effort prompt defaults scraped from git: `name` prefers owner/repo
-    /// from the origin remote, falling back to `<git user>/<current dir>`.
+    /** best-effort prompt defaults scraped from git: `name` prefers owner/repo
+    from the origin remote, falls back to `<git user>/<current dir>`. */
     fn guess() -> Self {
         let remote = git::output(&["remote", "get-url", "origin"]);
         let repository = remote.as_deref().and_then(git::remote_https_url);
@@ -56,11 +56,11 @@ impl Defaults {
                 (!scope.is_empty() && !name.is_empty()).then(|| format!("{scope}/{name}"))
             });
 
-        // Authors must be GitHub usernames (the registry makes them scope
-        // co-owners on publish and rejects anything else), so only guess from
-        // sources that hold one: the login a previous `lpm publish` stored,
-        // then the owner of a github.com origin remote. Never git user.name
-        // or user.email — those are display identities, not usernames.
+        /* authors must be GitHub usernames (the registry makes them scope
+        co-owners on publish, rejects anything else), so only guess from
+        sources that actually hold one: the login a previous `lpm publish`
+        stored, then the owner of a github.com origin remote. never git
+        user.name or user.email, those are display identities not usernames */
         let authors = auth::load()
             .ok()
             .flatten()
@@ -75,9 +75,9 @@ impl Defaults {
     }
 }
 
-/// Owner segment of a github.com https URL, kept verbatim (usernames are
-/// case-sensitive-ish and may contain dashes, so no sanitizing). Other hosts
-/// give None — a GitLab owner is not a GitHub username.
+/** owner segment of a github.com https url, kept verbatim (usernames can
+have dashes, so no sanitizing). other hosts give None; a GitLab owner is
+not a GitHub username. */
 fn github_owner(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://github.com/")?;
     let owner = rest.split('/').next()?;
@@ -205,9 +205,8 @@ pub fn run() -> Result<(), Error> {
     Ok(())
 }
 
-/// Makes sure the packages folder is git-ignored, creating .gitignore when
-/// missing. Returns a message describing what changed, or `None` if the
-/// folder was already ignored.
+/** git-ignores the packages folder, creating .gitignore if missing.
+returns a message saying what changed, None if already ignored. */
 fn gitignore_lpm(path: &Path) -> Result<Option<&'static str>, Error> {
     const ENTRY: &str = "packages/";
 
@@ -254,8 +253,8 @@ fn parse_authors(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// At least one author, all shaped like GitHub usernames — the registry
-/// rejects the publish otherwise.
+/** at least one author, all shaped like GitHub usernames; the registry
+rejects the publish otherwise. */
 fn validate_authors(input: &str) -> Validation {
     let authors = parse_authors(input);
     if authors.is_empty() {
@@ -318,8 +317,8 @@ mod tests {
             Validation::Valid
         ));
         assert!(matches!(validate_authors("Luau-PM"), Validation::Valid));
-        // The old default shape ("Name <email>") must be rejected, not just
-        // no longer guessed.
+        /* the old default shape ("Name <email>") must be rejected,
+        not just no longer guessed */
         assert!(matches!(
             validate_authors("Jane Doe <jane@example.com>"),
             Validation::Invalid(_)
@@ -375,20 +374,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".gitignore");
 
-        // Missing file is created.
+        // missing file gets created
         assert_eq!(
             gitignore_lpm(&path).unwrap(),
             Some("Created .gitignore with packages/")
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "packages/\n");
 
-        // Entry already present (in any common spelling) is left alone.
+        // entry already there (any common spelling) is left alone
         assert_eq!(gitignore_lpm(&path).unwrap(), None);
         std::fs::write(&path, "/target\npackages\n").unwrap();
         assert_eq!(gitignore_lpm(&path).unwrap(), None);
 
-        // Existing file without the entry gets it appended, even when the
-        // file lacks a trailing newline.
+        /* file without the entry gets it appended, even with
+        no trailing newline */
         std::fs::write(&path, "/target").unwrap();
         assert_eq!(
             gitignore_lpm(&path).unwrap(),

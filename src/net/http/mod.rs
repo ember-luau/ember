@@ -16,9 +16,9 @@ fn with_headers(mut request: ureq::Request, headers: &[(&str, &str)]) -> ureq::R
     request
 }
 
-/// Some GitHub endpoints answer 201/204 with an empty body, which serde
-/// refuses to parse; treat that as JSON `null` so `T = serde_json::Value`
-/// (or an Option) still deserializes.
+/** Some GitHub endpoints answer 201/204 with an empty body, which serde
+won't parse; treat that as JSON `null` so `T = serde_json::Value` (or an
+Option) still deserializes. */
 fn parse_json<T: DeserializeOwned>(response: ureq::Response) -> Result<T, HttpError> {
     let body = response.into_string()?;
     if body.trim().is_empty() {
@@ -42,8 +42,9 @@ pub fn post_form<T: DeserializeOwned>(
     parse_json(response)
 }
 
-/// GETs `url`, following redirects (ureq only auto-follows 301/302/303;
-/// some hosts, like pesde's registry or GitHub's asset redirects, use 307).
+/** GETs `url`, following redirects by hand: ureq 2 only auto-follows
+301/302/303, and some hosts (pesde's registry, GitHub asset redirects)
+answer 307. */
 pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
     let mut url = url.to_string();
     for _ in 0..5 {

@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-/// GitHub repo `self update` pulls releases from.
+/// github repo `self update` pulls releases from
 const REPO: &str = "luaupm/cli";
 
 #[derive(Subcommand, Debug)]
@@ -62,7 +62,7 @@ fn update() -> Result<(), Error> {
         return Ok(());
     }
 
-    // Must match the asset names release.yml uploads: lpm-{os}-{arch}[.exe].
+    // must match the asset names release.yml uploads: lpm-{os}-{arch}[.exe]
     let asset_name = format!(
         "lpm-{}-{}{}",
         env::consts::OS,
@@ -109,8 +109,8 @@ fn uninstall() -> Result<(), Error> {
 
     remove_from_path(&dir.join("bin"))?;
 
-    // Deleting the directory we are running from needs the self-delete dance;
-    // when running from elsewhere (e.g. a dev build), plain removal works.
+    /* deleting the directory we're running from needs the self-delete dance;
+    running from elsewhere (e.g. a dev build), plain removal works */
     let running_from_install = env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok())
@@ -138,8 +138,8 @@ fn add_to_path(bin_dir: &Path) -> Result<(), Error> {
     let new_path = if path.trim().is_empty() {
         dir.to_string()
     } else {
-        // Prepended so lpm's tool shims win over other toolchain managers'
-        // (aftman/rokit) shims for the same tools later in PATH.
+        /* prepended so lpm's tool shims win over other toolchain managers'
+        (aftman/rokit) shims for the same tools later in PATH */
         format!("{dir};{path}")
     };
     write_user_path(&env_key, &new_path)?;
@@ -191,7 +191,7 @@ fn write_user_path(env_key: &winreg::RegKey, path: &str) -> Result<(), Error> {
     use winreg::RegValue;
     use winreg::enums::RegType;
 
-    // REG_EXPAND_SZ (not REG_SZ) so existing %VAR% entries in PATH keep expanding.
+    // REG_EXPAND_SZ (not REG_SZ) so existing %VAR% entries in PATH keep expanding
     let bytes = path
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -208,8 +208,8 @@ fn write_user_path(env_key: &winreg::RegKey, path: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Tells running applications (e.g. Explorer) that the environment changed, so
-/// new terminals pick up the PATH edit without logging out.
+/** tells running apps (e.g. Explorer) the environment changed, so new
+terminals pick up the PATH edit without logging out. */
 #[cfg(windows)]
 fn broadcast_environment_change() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{

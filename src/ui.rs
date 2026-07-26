@@ -5,7 +5,7 @@ use clap::builder::styling;
 use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
 
-/// Theme accent (#e61048), shared by the prompt UI, help output, and errors.
+/// theme accent (#e61048). the only place the color lives; everything derives from it.
 pub const ACCENT: (u8, u8, u8) = (0xe6, 0x10, 0x48);
 
 fn accent() -> crossterm::style::Color {
@@ -13,20 +13,20 @@ fn accent() -> crossterm::style::Color {
     crossterm::style::Color::Rgb { r, g, b }
 }
 
-/// Styles clap's help/usage/error output to match the prompt theme:
-/// regular section headers, accent command/flag names, dimmed placeholders.
+/** Styles clap's help/usage/error output to match the prompt theme: plain
+section headers, accent command/flag names, dimmed placeholders. */
 pub fn help_styles() -> styling::Styles {
     let (r, g, b) = ACCENT;
     let accent = styling::Style::new().fg_color(Some(styling::RgbColor(r, g, b).into()));
     let dimmed = styling::Style::new().fg_color(Some(styling::AnsiColor::BrightBlack.into()));
 
     styling::Styles::styled()
-        // Section headers ("Usage:", "Commands:", "Options:")
+        // section headers ("Usage:", "Commands:", "Options:")
         .header(styling::Style::new())
         .usage(styling::Style::new())
-        // Command, flag, and value names as typed literally
+        // command/flag/value names as typed literally
         .literal(accent)
-        // Placeholder metavariables like <COMMAND>
+        // metavariables like <COMMAND>
         .placeholder(dimmed)
         // clap's own parse errors and valid/invalid value hints
         .error(accent)
@@ -34,35 +34,35 @@ pub fn help_styles() -> styling::Styles {
         .invalid(dimmed)
 }
 
-/// Prints an error line to stderr as "✗ message" in the accent color.
+/// accent "✗ message" line to stderr.
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("✗ {message}").with(accent()));
 }
 
-/// The "✓ message" line print_success emits, as a string so progress bars
-/// can `bar.println(...)` it without fighting stdout.
+/** the "✓ message" line print_success emits, as a string so progress bars
+can `bar.println(...)` it without fighting stdout. */
 pub fn success_line(message: &str) -> String {
     format!("{} {message}", "✓".with(accent()))
 }
 
-/// Prints a progress line as an accent "✓" followed by the message.
+/// accent "✓" followed by the message, to stdout.
 pub fn print_success(message: &str) {
     println!("{}", success_line(message));
 }
 
-/// Prints a line to stdout while `bar` is live. `ProgressBar::println` routes
-/// through the bar's draw target, which writes to stderr on a terminal and
-/// swallows the line entirely when output is piped; suspending instead keeps
-/// the line on stdout in both worlds.
+/** Prints a line to stdout while `bar` is live. `ProgressBar::println` goes
+through the bar's draw target, which writes to stderr on a terminal and
+swallows the line entirely when piped; suspending keeps the line on
+stdout in both worlds. */
 pub fn bar_println(bar: &indicatif::ProgressBar, line: &str) {
     bar.suspend(|| println!("{line}"));
 }
 
-/// A `{msg} ━━━╸─── {pos}/{len}` bar with the filled portion in the accent
-/// color. indicatif templates only speak ANSI-16/256, so the exact accent RGB
-/// is smuggled in as crossterm escapes around the bar placeholder — literal
-/// template text passes through untouched (and width measurement is
-/// escape-aware).
+/** A `{msg} ━━━╸─── {pos}/{len}` bar with the filled portion in the accent
+color. indicatif templates only speak ANSI-16/256, so the exact accent
+RGB gets smuggled in as crossterm escapes around the bar placeholder;
+literal template text passes through untouched, and width measurement is
+escape-aware. */
 pub fn progress_bar(len: u64) -> indicatif::ProgressBar {
     let template = format!("{{msg}} {} {{pos}}/{{len}}", "{bar:40}".with(accent()));
     let style = indicatif::ProgressStyle::with_template(&template)
@@ -74,8 +74,7 @@ pub fn progress_bar(len: u64) -> indicatif::ProgressBar {
     bar
 }
 
-/// An accent spinner with a message, ticking on its own. The caller finishes
-/// or clears it.
+/// accent spinner, self-ticking; the caller finishes or clears it.
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     let template = format!("{} {{msg}}", "{spinner}".with(accent()));
     let style =
@@ -88,8 +87,8 @@ pub fn spinner(message: &str) -> indicatif::ProgressBar {
     spinner
 }
 
-/// Runs `work` under a spinner. The spinner is always cleared first, so an
-/// error message never lands on top of a live one.
+/** Runs `work` under a spinner. the spinner always gets cleared first, so
+an error message never lands on top of a live one. */
 pub fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
     let spinner = spinner(message);
     let result = work();
@@ -97,8 +96,7 @@ pub fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T, Error>) -
     result
 }
 
-/// Runs `work` with a progress bar of `len` steps, clearing it afterwards
-/// whether the work succeeded or not.
+/// runs `work` with a `len`-step bar, cleared afterwards even on error.
 pub fn with_progress<T>(
     len: u64,
     work: impl FnOnce(&indicatif::ProgressBar) -> Result<T, Error>,
@@ -109,7 +107,7 @@ pub fn with_progress<T>(
     result
 }
 
-/// "" for one, "s" for any other count, for summary lines.
+/// "" for one, "s" for anything else.
 pub fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -129,7 +127,7 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// Prints a dimmed "Done in 142ms" line.
+/// dimmed "Done in 142ms" line.
 pub fn print_elapsed(duration: Duration) {
     println!(
         "{}",
@@ -142,20 +140,20 @@ pub fn render_config() -> RenderConfig<'static> {
     let accent = Color::rgb(r, g, b);
 
     RenderConfig::default_colored()
-        // The "?" in front of a pending question and the "✓" once answered
+        // "?" while a question is pending, "✓" once answered
         .with_prompt_prefix(Styled::new("?").with_fg(Color::DarkGrey))
         .with_answered_prompt_prefix(Styled::new("✓").with_fg(accent))
-        // The value you type / the answer shown after confirming
+        // the value being typed / the answer shown after confirming
         .with_text_input(StyleSheet::new().with_fg(Color::White))
         .with_answer(StyleSheet::new().with_fg(accent))
-        // The dimmed description line below each prompt
+        // dimmed description line below each prompt
         .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey))
-        // The inline "(default)" hint shown when a guessed default is available
+        // the inline "(default)" hint
         .with_default_value(StyleSheet::new().with_fg(Color::DarkGrey))
-        // The ">" cursor and the highlighted row in select lists
+        // ">" cursor and highlighted row in select lists
         .with_highlighted_option_prefix(Styled::new(">").with_fg(accent))
         .with_selected_option(Some(StyleSheet::new().with_fg(accent)))
-        // The validation error line shown below a prompt (default prefix is "#")
+        // validation errors below a prompt (inquire's default prefix is "#")
         .with_error_message(
             ErrorMessageRenderConfig::default_colored()
                 .with_prefix(Styled::new("✗").with_fg(accent))

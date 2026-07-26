@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Version reported to wally registries, which reject clients that don't send
-/// a recent-enough Wally-Version header (HTTP 426 otherwise).
+/** Version sent as the Wally-Version header. Wally registries answer 426 to
+clients without a recent-enough one. */
 pub const VERSION_HEADER: &str = "0.3.2";
 
 /// Root config.json of a wally index.
@@ -15,8 +15,8 @@ pub struct Config {
     pub api: String,
 }
 
-/// One JSON line of a wally index package file. Dev-dependencies are left
-/// unmodeled: lpm never installs them.
+/** One JSON line of a wally index package file. Dev-dependencies aren't
+modeled; lpm never installs them. */
 #[derive(Deserialize)]
 struct Entry {
     package: EntryPackage,
@@ -54,8 +54,8 @@ pub fn resolve(
         });
     }
 
-    // One JSON object per line, one line per published version; unparsable
-    // lines are skipped so a single odd entry can't sink the whole resolve.
+    /* One JSON object per line, one line per published version; unparsable
+    lines are skipped so one odd entry can't sink the whole resolve. */
     let best = std::fs::read_to_string(&path)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
@@ -72,8 +72,8 @@ pub fn resolve(
         });
     };
 
-    // Both realms' dependencies resolve in this same wally index; each dep's
-    // own realm decides its install environment.
+    /* Both realms' deps resolve in this same wally index; each dep's own
+    realm decides its install environment. */
     let dependencies = entry
         .dependencies
         .values()

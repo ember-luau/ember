@@ -24,8 +24,8 @@ pub enum IndexCommand {
     },
 }
 
-/// Indices offered as autocomplete suggestions. Suggestions only — any name
-/// and URL the user types is accepted as-is.
+/** autocomplete suggestions only; any name and url the user
+types is accepted as-is. */
 const KNOWN_INDICES: &[(&str, &str)] = &[
     ("pesde", "https://github.com/pesde-pkg/index"),
     ("wally", "https://github.com/UpliftGames/wally-index"),
@@ -38,9 +38,9 @@ fn known_url(name: &str) -> Option<&'static str> {
         .map(|(_, url)| *url)
 }
 
-/// Case-insensitive contains filter over a fixed suggestion list. Tab
-/// completes the highlighted suggestion, or the only match when just one
-/// remains; free-form input is never blocked.
+/** case-insensitive contains filter over a fixed list. tab completes
+the highlighted suggestion, or the only match left; free-form input
+is never blocked. */
 #[derive(Clone)]
 struct Suggestions(Vec<String>);
 
@@ -76,7 +76,7 @@ pub fn run(command: IndexCommand) -> Result<(), Error> {
 }
 
 fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
-    // Open first so a missing or unparsable manifest fails before prompting.
+    // open first so a missing/broken manifest fails before we prompt
     let mut document = ManifestDoc::open(Scope::Project)?;
     inquire::set_global_render_config(ui::render_config());
 
@@ -101,7 +101,7 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
 
     let url = match url {
         Some(url) => url,
-        // A well-known name already tells us the URL; only ask otherwise.
+        // well-known name already gives us the url; only ask otherwise
         None => match known_url(&name) {
             Some(url) => url.to_string(),
             None => inquire::Text::new("Index URL:")
@@ -137,7 +137,7 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
 }
 
 fn remove(name: Option<String>) -> Result<(), Error> {
-    // Read before editing so the dependents warning below sees the same file.
+    // read before editing so the dependents warning below sees the same file
     let manifest = Manifest::load()?;
 
     let mut document = ManifestDoc::open(Scope::Project)?;
@@ -166,8 +166,8 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     document.save()?;
     ui::print_success(&format!("Removed index {name} from lpm.toml"));
 
-    // Dependencies keyed to the removed index break at the next resolve;
-    // point at them now rather than letting install fail mysteriously later.
+    /* deps keyed to the removed index break at the next resolve;
+    warn now instead of letting install fail mysteriously later */
     let dependents = manifest
         .dependencies
         .values()
@@ -228,7 +228,7 @@ mod tests {
             suggestions.get_completion("wal", None).unwrap(),
             Some("wally".to_string())
         );
-        // Two candidates left: nothing to complete to yet.
+        // two candidates left: nothing to complete to yet
         assert_eq!(suggestions.get_completion("", None).unwrap(), None);
     }
 }

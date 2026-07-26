@@ -75,18 +75,18 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     let name = tools::expand_shorthand(&name);
     let (owner, repo) = Tool::split_repository(&name)?;
 
-    // Resolve the release first so a bad name/version never touches the file
+    // resolve the release first so a bad name/version never touches the file
     let release = match &version {
         Some(version) => github.get_release(&name, version.trim_start_matches('v'))?,
         None => github.get_latest_release(&name)?,
     };
 
-    // Global tools live in ~/.lpm/tools.toml (created on first use) and
-    // resolve in any directory; project tools only inside their project
+    /* global tools live in ~/.lpm/tools.toml (created on first use) and
+    resolve in any directory; project tools only inside their project */
     let mut manifest = ManifestDoc::open_or_create(Scope::from_global(global))?;
 
-    // The alias key defaults to the repo short name; the bin shim takes the
-    // same name, which is what `delete` relies on when removing it
+    /* alias key defaults to the repo short name; the bin shim takes the
+    same name, which is what `delete` relies on when removing it */
     let version = release.tag_name.trim_start_matches('v');
     manifest.table_or_create("tools")?[repo] =
         toml_edit::value(format!("{owner}/{repo}@{version}"));
@@ -105,21 +105,21 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
 fn remove(name: String, global: bool) -> Result<(), Error> {
     let scope = Scope::from_global(global);
 
-    // No global tools file at all means nothing was ever pinned globally
+    // no global tools file at all means nothing was ever pinned globally
     let mut manifest = match ManifestDoc::open(scope) {
         Err(Error::ManifestMissing) if global => return Err(Error::ToolMissing(name)),
         opened => opened?,
     };
     let table = manifest.require_table("tools")?;
 
-    // Try the exact alias key first; keys are short names, so a shorthand or
-    // full "owner/repo" falls back to matching table values by repository
+    /* try the exact alias key first; keys are short names, so a shorthand
+    or full "owner/repo" falls back to matching table values by repository */
     let mut removed = table.remove(&name).is_some();
     if !removed {
         let repository = tools::shorthand_repository(&name).unwrap_or(&name);
         let prefix = format!("{repository}@");
 
-        // GitHub repository names are case-insensitive, so match ignoring case
+        // github repo names are case-insensitive, so match ignoring case
         let key = table.iter().find_map(|(key, item)| {
             item.as_str()
                 .and_then(|spec| spec.trim().get(..prefix.len()))
@@ -146,8 +146,8 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/// True when `latest` is newer than `current`. Both are compared as semver
-/// when possible; otherwise any plain string difference counts as outdated.
+/** true when `latest` is newer than `current`. compared as semver when
+possible; otherwise any plain string difference counts as outdated. */
 fn is_outdated(current: &str, latest: &str) -> bool {
     match (Version::parse(current), Version::parse(latest)) {
         (Ok(current), Ok(latest)) => latest > current,
@@ -164,7 +164,7 @@ fn update() -> Result<(), Error> {
         return Ok(());
     };
 
-    // Snapshot the entries up front so the table can be edited while looping
+    // snapshot the entries up front so the table can be edited while looping
     let entries = table
         .iter()
         .map(|(alias, item)| {
@@ -213,9 +213,9 @@ fn update() -> Result<(), Error> {
 }
 
 fn list() -> Result<(), Error> {
-    // Everything known about one version of a tool: whether its binaries are
-    // stored, and which manifests pin it. Pins without storage still show up
-    // (as "not installed") so a fresh `tool add` never looks like a ghost.
+    /* everything known about one version of a tool: whether its binaries are
+    stored, and which manifests pin it. pins without storage still show up
+    (as "not installed") so a fresh `tool add` never looks like a ghost */
     #[derive(Default)]
     struct VersionState {
         installed: bool,
@@ -223,8 +223,8 @@ fn list() -> Result<(), Error> {
         global: bool,
     }
 
-    // Keyed by lowercased "owner/repo": manifests may spell the repository
-    // with different casing than the storage folder was created with
+    /* keyed by lowercased "owner/repo": manifests may spell the repository
+    with different casing than the storage folder was created with */
     type Seen = BTreeMap<String, (String, BTreeMap<String, VersionState>)>;
     fn state_of<'a>(seen: &'a mut Seen, name: &str, version: String) -> &'a mut VersionState {
         let entry = seen
@@ -235,7 +235,7 @@ fn list() -> Result<(), Error> {
 
     let mut seen: Seen = BTreeMap::new();
 
-    // What is stored on disk
+    // what's stored on disk
     let tools_dir = paths::tools_dir()?;
     if tools_dir.is_dir() {
         for entry in fs::read_dir(&tools_dir)? {
@@ -244,8 +244,8 @@ fn list() -> Result<(), Error> {
                 continue;
             }
 
-            // GitHub owners can never contain '_', so the first '_' in the
-            // directory name splits owner from repo
+            /* github owners can never contain '_', so the first '_' in the
+            directory name splits owner from repo */
             let dir_name = entry.file_name().to_string_lossy().into_owned();
             let Some((owner, repo)) = dir_name.split_once('_') else {
                 continue;
@@ -262,7 +262,7 @@ fn list() -> Result<(), Error> {
         }
     }
 
-    // What the surrounding project and the global tools file pin
+    // what the surrounding project and the global tools file pin
     let project = tools::shim::project_tools(&std::env::current_dir()?)?;
     let global = tools::shim::global_tools()?;
     for (tools, is_global) in [(&project, false), (&global, true)] {
@@ -281,11 +281,11 @@ fn list() -> Result<(), Error> {
         return Ok(());
     }
 
-    // One accent "✓ name@version" line per tool, matching install's output;
-    // multiple versions share the line, each annotated with its scopes
+    /* one accent check line ("name@version") per tool, matching install's
+    output; multiple versions share the line, each annotated with its scopes */
     for (name, versions) in seen.into_values() {
         let mut versions: Vec<_> = versions.into_iter().collect();
-        // Order versions semver-aware where possible
+        // order versions semver-aware where possible
         versions.sort_by(
             |(a, _), (b, _)| match (Version::parse(a), Version::parse(b)) {
                 (Ok(a), Ok(b)) => a.cmp(&b),
@@ -328,7 +328,7 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
         .as_deref()
         .map(|version| version.trim_start_matches('v'));
 
-    // With --version only remove that version's subdir, otherwise the tool
+    // with --version only remove that version's subdir, otherwise the tool
     let target = match version {
         Some(version) => tool_dir.join(version),
         None => tool_dir.clone(),
@@ -338,9 +338,9 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     }
     fs::remove_dir_all(&target)?;
 
-    // When the whole tool (or its last version) is gone, drop the shim too.
-    // Manifest pins stay: `tool list` shows it as "not installed" and the
-    // next `lpm install` puts it back
+    /* when the whole tool (or its last version) is gone, drop the shim too.
+    manifest pins stay: `tool list` shows it as "not installed" and the
+    next `lpm install` puts it back */
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
             .map(|mut dir| dir.next().is_none())

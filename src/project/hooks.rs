@@ -1,5 +1,4 @@
-// Nothing dispatches these yet, and CI runs clippy with -D warnings, so the
-// stub needs this until something does.
+// nothing dispatches these yet; clippy runs with -D warnings, so the allow stays until something does.
 #[allow(dead_code)]
 pub enum Hooks {
     PreInstall,
