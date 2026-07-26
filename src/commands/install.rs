@@ -11,8 +11,9 @@ use crate::tools;
 use crate::ui;
 use clap::Args;
 use indicatif::ProgressBar;
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub struct InstallArgs {
@@ -112,6 +113,33 @@ fn install_project(
         fs::remove_dir_all(&staging)?;
     }
 
+    /* second pass, now that everything is extracted: link files *inside*
+    each stored package for the dependencies it declares */
+    let stored: Vec<StoredPackage> = locked
+        .iter()
+        .map(|package| match &package.source {
+            /* members link in place, so they're link targets like anything
+            else but never get written into: that would dirty a source tree
+            the user edits */
+            index::DownloadSource::Workspace { path } => StoredPackage {
+                name: package.name.to_lowercase(),
+                storage: PathBuf::from(path),
+                environment: package.environment,
+                in_place: true,
+            },
+            _ => StoredPackage {
+                name: package.name.to_lowercase(),
+                storage: manifest
+                    .packages_out(package.environment)
+                    .join(".lpm")
+                    .join(package.name.replace('/', "_")),
+                environment: package.environment,
+                in_place: false,
+            },
+        })
+        .collect();
+    link_nested_dependencies(&stored, &mut |message| eprintln!("{message}"));
+
     let package_count = locked.len();
     if !args.locked {
         // written even when empty, so lpm.lock always mirrors the manifest
@@ -191,7 +219,7 @@ fn install_packages(
                     if !require.starts_with("..") {
                         require = format!("./{require}");
                     }
-                    let types = link_types(member_dir, &entry, &job.name, bar);
+                    let types = link_types(member_dir, &entry, &job.name, &mut bar_warn(bar));
                     let link_path = out.join(format!("{}.luau", job.link));
                     fs::write(&link_path, package::link_contents_at(&require, &types))?;
                 }
@@ -251,7 +279,7 @@ fn install_packages(
                 string requires so they work without an instance tree. string
                 require packages come through unchanged */
                 requires::rewrite_instance_requires(&storage, &entry)?;
-                let types = link_types(&storage, &entry, &job.name, bar);
+                let types = link_types(&storage, &entry, &job.name, &mut bar_warn(bar));
                 let link_path = out.join(format!("{}.luau", job.link));
                 fs::write(&link_path, package::link_contents(&folder, &entry, &types))?;
             }
@@ -278,22 +306,146 @@ fn install_packages(
     Ok(locked)
 }
 
+/** one installed package, as the nested-link pass sees it. */
+struct StoredPackage {
+    /// lowercased "scope/name", the form dependency declarations resolve by
+    name: String,
+    /// where the contents live: <out>/.lpm/<scope>_<name>, or a member's own directory
+    storage: PathBuf,
+    environment: Environment,
+    /// a workspace member: fine to link *to*, never written into
+    in_place: bool,
+}
+
+/** link files *inside* a stored package for its own declared dependencies,
+at `<storage>/packages/<env>/<alias>.luau`. that folder name is the default
+layout, literally: published code was compiled against it (see Chief's
+build), so a consumer's `[config]` output customization deliberately doesn't
+apply inside packages. (a package published from a project that customized
+*its* output dirs would want those names instead; nothing has needed that
+yet.) each link requires the dependency's store entry directly.
+
+nothing here is fatal: the install has already downloaded and extracted
+everything, so a package that can't be linked warns and is skipped rather
+than taking the whole run (and the lockfile write that follows) with it. */
+fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(String)) {
+    let by_name: HashMap<&str, &StoredPackage> = packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    // exported types depend only on the dependency, so parse each once
+    let mut types_cache: HashMap<String, Vec<String>> = HashMap::new();
+
+    for package in packages.iter().filter(|package| !package.in_place) {
+        for (alias, dependency) in package::declared_dependencies(&package.storage) {
+            /* aliases are TOML keys from a *downloaded* manifest, and TOML
+            keys can be quoted anything: a "../.." or absolute one would put
+            the link outside the package (or outside the project) */
+            if !is_plain_file_name(&alias) {
+                warn(format!(
+                    "warning: {} declares dependency {dependency} under the unusable alias '{alias}'; no nested link generated",
+                    package.name
+                ));
+                continue;
+            }
+            let Some(dep) = by_name.get(dependency.as_str()) else {
+                warn(format!(
+                    "warning: {} declares dependency {dependency} which is not installed; no nested link generated",
+                    package.name
+                ));
+                continue;
+            };
+            let Some(entry) = package::entry_point(&dep.storage) else {
+                warn(format!(
+                    "warning: could not find an entry point for {dependency}; no nested link generated in {}",
+                    package.name
+                ));
+                continue;
+            };
+
+            let link_dir = package
+                .storage
+                .join("packages")
+                .join(dep.environment.dir_name());
+            if let Err(error) = fs::create_dir_all(&link_dir) {
+                warn(format!(
+                    "warning: could not create {} ({error}); no nested link generated for {dependency}",
+                    link_dir.display()
+                ));
+                continue;
+            }
+
+            /* relative_path is lexical, so both sides go through
+            std::path::absolute first: that drops the "." component a
+            `[config]` dir like "./packages/shared" would otherwise
+            contribute, and gives absolute out dirs a common prefix to
+            measure from */
+            let from = std::path::absolute(&link_dir).unwrap_or_else(|_| link_dir.clone());
+            let to = std::path::absolute(&dep.storage).unwrap_or_else(|_| dep.storage.clone());
+            let mut require = workspace::relative_path(&from, &to);
+            if !entry.is_empty() {
+                require = format!("{require}/{entry}");
+            }
+            if !require.starts_with("..") {
+                require = format!("./{require}");
+            }
+
+            let types = types_cache
+                .entry(dependency.clone())
+                .or_insert_with(|| {
+                    /* install_packages already parsed (and complained about)
+                    every stored entry point, so no warn sink here: it would
+                    just say the same thing twice */
+                    package::entry_source(&dep.storage, &entry)
+                        .and_then(|path| fs::read_to_string(path).ok())
+                        .and_then(|source| package::exported_types(&source))
+                        .unwrap_or_default()
+                })
+                .clone();
+            let link_path = link_dir.join(format!("{alias}.luau"));
+            if let Err(error) = fs::write(&link_path, package::link_contents_at(&require, &types)) {
+                warn(format!(
+                    "warning: could not write {} ({error})",
+                    link_path.display()
+                ));
+            }
+        }
+    }
+}
+
+/// one ordinary path segment: no separators, no drive letter, not `.`/`..`.
+fn is_plain_file_name(alias: &str) -> bool {
+    !alias.is_empty()
+        && alias != "."
+        && alias != ".."
+        && !alias.contains(['/', '\\', ':'])
+        && !Path::new(alias).is_absolute()
+}
+
 /** exported types have to be restated in the link file to survive the
 wrapper; an unparseable entry point still links, just without its types. */
-fn link_types(package_dir: &Path, entry: &str, name: &str, bar: &ProgressBar) -> Vec<String> {
+fn link_types(
+    package_dir: &Path,
+    entry: &str,
+    name: &str,
+    warn: &mut impl FnMut(String),
+) -> Vec<String> {
     let Some(source) =
         package::entry_source(package_dir, entry).and_then(|path| fs::read_to_string(path).ok())
     else {
         return Vec::new();
     };
     package::exported_types(&source).unwrap_or_else(|| {
-        bar.suspend(|| {
-            eprintln!(
-                "warning: could not parse the entry point of {name}; its types are not re-exported"
-            )
-        });
+        warn(format!(
+            "warning: could not parse the entry point of {name}; its types are not re-exported"
+        ));
         Vec::new()
     })
+}
+
+/// routes a warning line around the live progress bar.
+fn bar_warn(bar: &ProgressBar) -> impl FnMut(String) + '_ {
+    move |message: String| bar.suspend(|| eprintln!("{message}"))
 }
 
 fn warn_no_entry(name: &str, bar: &ProgressBar) {
@@ -341,4 +493,179 @@ fn install_tools(jobs: &[(String, Tool, bool)], bar: &ProgressBar) -> Result<(),
         bar.inc(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, file: &str, contents: &str) {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn stored(name: &str, storage: PathBuf, environment: Environment) -> StoredPackage {
+        StoredPackage {
+            // production lowercases here; mirror that so the tests exercise it
+            name: name.to_lowercase(),
+            storage,
+            environment,
+            in_place: false,
+        }
+    }
+
+    #[test]
+    fn writes_nested_links_for_stored_dependencies() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+        let luau = base.join("packages/luau");
+
+        /* chief-shaped fixture: `lifecycles` depends on same-environment
+        `core` (which exports a type) and cross-environment `util` (whose
+        entry is its root init file) */
+        let core = shared.join(".lpm/acme_core");
+        write(&core, "lpm.toml", "[target]\nmain = \"out/lpm\"\n");
+        write(
+            &core,
+            "out/lpm/init.luau",
+            "export type Entry = { id: number }\nreturn {}\n",
+        );
+        let util = luau.join(".lpm/acme_util");
+        write(&util, "init.luau", "return {}\n");
+        let lifecycles = shared.join(".lpm/acme_lifecycles");
+        write(
+            &lifecycles,
+            "lpm.toml",
+            "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n\
+             util = { name = \"acme/util\", version = \"^\" }\n",
+        );
+        write(&lifecycles, "out/lpm/init.luau", "return {}\n");
+
+        let packages = [
+            stored("Acme/Core", core.clone(), Environment::Shared),
+            stored("acme/util", util, Environment::Luau),
+            stored("acme/lifecycles", lifecycles.clone(), Environment::Shared),
+        ];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        /* the same-environment link: three hops up to the store, entry
+        appended, exported types restated */
+        assert_eq!(
+            fs::read_to_string(lifecycles.join("packages/shared/core.luau")).unwrap(),
+            "local module = require(\"../../../acme_core/out/lpm\")\n\
+             export type Entry = module.Entry\n\
+             return module\n"
+        );
+        /* the cross-environment link climbs out to the other output root;
+        a root-init entry adds no suffix */
+        assert_eq!(
+            fs::read_to_string(lifecycles.join("packages/luau/util.luau")).unwrap(),
+            "return require(\"../../../../../luau/.lpm/acme_util\")\n"
+        );
+        // packages without dependencies get no packages/ folder at all
+        assert!(!core.join("packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn missing_dependencies_warn_and_skip() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-missing");
+        let _ = fs::remove_dir_all(&base);
+        let storage = base.join("packages/shared/.lpm/acme_thing");
+        write(
+            &storage,
+            "lpm.toml",
+            "[dependencies]\ngone = { name = \"acme/gone\", version = \"^\" }\n",
+        );
+
+        let packages = [stored("acme/thing", storage.clone(), Environment::Shared)];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("acme/gone"));
+        assert!(warnings[0].contains("not installed"));
+        assert!(!storage.join("packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn aliases_cannot_escape_the_package() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-escape");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+
+        let dep = shared.join(".lpm/acme_dep");
+        write(&dep, "init.luau", "return {}\n");
+        /* a downloaded manifest can quote anything as a key; neither of
+        these may put a file outside the package */
+        let hostile = shared.join(".lpm/acme_hostile");
+        write(
+            &hostile,
+            "lpm.toml",
+            "[dependencies]\n\"../../../../../../escaped\" = { name = \"acme/dep\", version = \"^\" }\n\
+             \"C:/Windows/Temp/lpm-escaped\" = { name = \"acme/dep\", version = \"^\" }\n",
+        );
+
+        let packages = [
+            stored("acme/dep", dep, Environment::Shared),
+            stored("acme/hostile", hostile.clone(), Environment::Shared),
+        ];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings.iter().all(|line| line.contains("unusable alias")));
+        assert!(!hostile.join("packages").exists());
+        assert!(!base.join("escaped.luau").exists());
+        assert!(!Path::new("C:/Windows/Temp/lpm-escaped.luau").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn workspace_members_are_link_targets_but_never_written_into() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-member");
+        let _ = fs::remove_dir_all(&base);
+
+        /* a member consumed by the root shadows the registry copy of the
+        same name, so packages depending on it must still link */
+        let member = base.join("packages/core");
+        write(&member, "lpm.toml", "[target]\nmain = \"src/init.luau\"\n");
+        write(&member, "src/init.luau", "return {}\n");
+        let consumer = base.join("packages/shared/.lpm/acme_extras");
+        write(
+            &consumer,
+            "lpm.toml",
+            "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n",
+        );
+
+        let packages = [
+            StoredPackage {
+                name: "acme/core".to_string(),
+                storage: member.clone(),
+                environment: Environment::Shared,
+                in_place: true,
+            },
+            stored("acme/extras", consumer.clone(), Environment::Shared),
+        ];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(consumer.join("packages/shared/core.luau")).unwrap(),
+            "return require(\"../../../../../core/src\")\n"
+        );
+        // the member's own source tree stays untouched
+        assert!(!member.join("packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
