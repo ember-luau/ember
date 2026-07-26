@@ -4,6 +4,7 @@ use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, Tool};
 use crate::project::package;
 use crate::project::requires;
+use crate::project::rojo;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
 use crate::registry::resolver;
@@ -271,7 +272,14 @@ fn install_packages(
         }
         fs::rename(staging, &storage)?;
 
-        match package::entry_point(&storage) {
+        /* a project file the package ships would mount it under its own
+        name and tree, which our link files (and the package's own relative
+        requires) don't spell; make it mirror the disk instead. after
+        entry_point, so the entry is read from what the package shipped */
+        let entry = package::entry_point(&storage);
+        rojo::mirror_disk_layout(&storage, &mut bar_warn(bar));
+
+        match entry {
             Some(entry) => {
                 /* packages from any index can talk roblox instance paths
                 (require(script.Parent.X)), wally stuff especially but ports
