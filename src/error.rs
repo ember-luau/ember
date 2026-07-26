@@ -171,6 +171,12 @@ pub enum Error {
     #[error("Could not launch Roblox Studio: {0}")]
     StudioLaunch(String),
 
+    #[error("VS Code was not found ({0} were checked under the standard user config folders)")]
+    VscodeNotFound(String),
+
+    #[error("Could not update {}: {reason}", .path.display())]
+    VscodeSettings { path: PathBuf, reason: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

@@ -56,6 +56,16 @@ cargo install luaupm     # the crate is luaupm, the binary is lpm
 lpm self install         # still worth running — tool shims live in ~/.lpm/bin
 ```
 
+### VS Code IntelliSense
+
+```sh
+lpm self code    # lpm.toml autocomplete + validation via Even Better TOML
+```
+
+Points your VS Code (or Insiders / VSCodium / Cursor) settings at the
+[lpm.toml schema](https://luaupm.com/lpm.schema.json). Comments and existing
+entries in `settings.json` survive the edit.
+
 ## Docs
 
 Commands, the manifest, workspaces, publishing — everything lives at
