@@ -38,14 +38,10 @@ lpm is in beta and moving. Here is what stands today and what is being built:
 | Area | State |
 | --- | --- |
 | Installing from wally and pesde indices | Works |
+| Installing from lpm's own registry | Works — the default for dependencies that name no index |
 | Tools, scripts, lockfile, linker | Works |
-| lpm's own package index | Being replaced by a first-party API |
-| `lpm publish` | Packs your project, then stops. Uploading waits on that API |
+| `lpm publish` | Works — uploads to the lpm registry API (GitHub login, first publish claims your scope) |
 | Extensions | In design. A Rust API for extending lpm itself |
-
-Until the API lands, a dependency that does not name an index needs a
-`default` entry under `[indices]`, and publishing is unavailable. Everything
-left to build is marked `TODO(api)` in the source.
 
 ### Extensions
 
