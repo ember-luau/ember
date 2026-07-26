@@ -5,6 +5,7 @@ that's all a published package carries. */
 
 use crate::error::Error;
 use crate::project::manifest::Environment;
+use crate::project::rojo::PROJECT_FILE;
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
 use std::fs;
@@ -193,10 +194,10 @@ pub fn entry_point(dir: &Path) -> Option<String> {
     if let Some(lib) = toml_string(dir, "pesde.toml", &["target", "lib"]) {
         return Some(normalize_entry(&lib));
     }
-    if let Some(path) = fs::read_to_string(dir.join("default.project.json"))
+    if let Some(path) = fs::read_to_string(dir.join(PROJECT_FILE))
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|json| Some(json.get("tree")?.get("$path")?.as_str()?.to_string()))
+        .and_then(|json| project_tree_path(json.get("tree")?))
     {
         return Some(normalize_entry(&path));
     }
@@ -214,6 +215,37 @@ pub fn entry_point(dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/** the folder a Rojo tree mounts as the package. usually the root's own
+`$path`, but `rojo::mirror_disk_layout` re-nests that under folders named
+for the require path, so a single chain of them is followed down to the
+`$path` it ends at — the entry reads the same before and after the rewrite.
+
+only plain folders are followed: a package shipping a place-style project
+(a DataModel of services, say) names no single entry, and guessing one from
+whatever it mounts first would be worse than falling through to the
+conventional locations. */
+fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
+    let mut node = tree;
+    loop {
+        if let Some(path) = node.get("$path").and_then(serde_json::Value::as_str) {
+            return Some(path.to_string());
+        }
+        let object = node.as_object()?;
+        match object.get("$className").and_then(serde_json::Value::as_str) {
+            None | Some("Folder") => {}
+            Some(_) => return None,
+        }
+        // $className and friends describe the node; anything else is a child
+        let mut children = object.iter().filter(|(key, _)| !key.starts_with('$'));
+        let (_, only) = children.next()?;
+        if children.next().is_some() {
+            // several children: no single folder is "the package"
+            return None;
+        }
+        node = only;
+    }
 }
 
 /** reads an extracted package's own manifest for its environment: lpm.toml
@@ -314,7 +346,7 @@ fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
 }
 
 /// normalizes an entry path for a string require: forward slashes, no leading "./", no .luau/.lua extension (a bare folder resolves its init file).
-fn normalize_entry(path: &str) -> String {
+pub(crate) fn normalize_entry(path: &str) -> String {
     let path = path.replace('\\', "/");
     let path = path.trim_start_matches("./").trim_matches('/');
     let path = path
@@ -508,6 +540,55 @@ mod tests {
         let e = base.join("e");
         fs::create_dir_all(&e).unwrap();
         assert_eq!(entry_point(&e), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn entry_point_survives_the_rojo_rewrite() {
+        /* install mirrors a shipped project file onto the disk layout after
+        reading the entry; later passes (nested links) read it again, so
+        both shapes have to answer the same */
+        let base = std::env::temp_dir().join("lpm-test-entry-after-rewrite");
+        let _ = fs::remove_dir_all(&base);
+        let rewrite = |dir: &Path| {
+            crate::project::rojo::mirror_disk_layout(dir, &mut |message| {
+                panic!("unexpected warning: {message}")
+            })
+        };
+
+        // a folder mount, and a file mount that resolves to the same entry
+        for path in ["lib", "lib/init.luau"] {
+            let package = base.join(path.replace('/', "_"));
+            write_package(
+                &package,
+                PROJECT_FILE,
+                &format!(r#"{{"name": "promise", "tree": {{"$path": "{path}"}}}}"#),
+            );
+            write_package(&package.join("lib"), "init.luau", "return {}");
+
+            assert_eq!(entry_point(&package).as_deref(), Some("lib"), "for {path}");
+            rewrite(&package);
+            assert_eq!(
+                entry_point(&package).as_deref(),
+                Some("lib"),
+                "after rewriting {path}"
+            );
+        }
+
+        /* a place-style project names no single entry, so it keeps falling
+        through to the conventional locations rather than mounting whatever
+        it happens to reach first */
+        let place = base.join("place");
+        write_package(
+            &place,
+            PROJECT_FILE,
+            r#"{"name": "x", "tree": {"$className": "DataModel",
+                "ReplicatedStorage": {"Packages": {"$path": "Packages"}}}}"#,
+        );
+        assert_eq!(entry_point(&place), None);
+        write_package(&place.join("src"), "init.luau", "return {}");
+        assert_eq!(entry_point(&place).as_deref(), Some("src"));
 
         let _ = fs::remove_dir_all(&base);
     }

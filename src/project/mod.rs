@@ -5,4 +5,5 @@ pub mod lockfile;
 pub mod manifest;
 pub mod package;
 pub mod requires;
+pub mod rojo;
 pub mod workspace;
