@@ -14,7 +14,7 @@ use crate::tools;
 use crate::ui;
 use clap::Args;
 use indicatif::ProgressBar;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -49,6 +49,8 @@ struct Job {
     source: index::DownloadSource,
     index_url: String,
     link: String,
+    /// [overrides]-rewritten edges of this package: declared alias -> replacement name.
+    redirects: BTreeMap<String, String>,
 }
 
 /// how many packages download and unpack at once.
@@ -128,6 +130,7 @@ fn install_project(
                 source: package.source,
                 index_url: package.index,
                 link: package.link,
+                redirects: package.redirects,
             })
             .collect()
     } else {
@@ -137,9 +140,15 @@ fn install_project(
         } else {
             index::Refresh::Ttl
         };
+        /* collected, not printed, inside the spinner: a bare eprintln
+        would land mid-frame and get redrawn over */
+        let mut warnings = Vec::new();
         let resolved = ui::with_spinner("Resolving dependencies", || {
-            resolver::resolve(manifest, Path::new("."), mode)
+            resolver::resolve(manifest, Path::new("."), mode, &mut warnings)
         })?;
+        for warning in &warnings {
+            eprintln!("{warning}");
+        }
         ui::timing("resolve", resolve_started);
         resolved
             .into_iter()
@@ -150,6 +159,7 @@ fn install_project(
                 source: package.source,
                 index_url: package.index_url,
                 link: package.link,
+                redirects: package.redirects,
             })
             .collect()
     };
@@ -207,6 +217,7 @@ fn install_project(
                 storage: PathBuf::from(path),
                 environment: package.environment,
                 in_place: true,
+                redirects: package.redirects.clone(),
             },
             _ => StoredPackage {
                 name: package.name.to_lowercase(),
@@ -216,6 +227,7 @@ fn install_project(
                     .join(package.name.replace('/', "_")),
                 environment: package.environment,
                 in_place: false,
+                redirects: package.redirects.clone(),
             },
         })
         .collect();
@@ -445,6 +457,9 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                 && job.link == locked.link
                 && job.index_url == locked.index
                 && job.source == locked.source
+                /* redirects shape the nested links on disk; an [overrides]
+                edit that lands on the same versions still has to rebuild */
+                && job.redirects == locked.redirects
                 && job
                     .environment
                     .is_none_or(|environment| environment == locked.environment)
@@ -600,6 +615,7 @@ fn install_packages(
                         environment: extracted.environment,
                         link: job.link,
                         index: job.index_url,
+                        redirects: job.redirects,
                         source: job.source,
                     });
                 }
@@ -785,6 +801,7 @@ fn link_workspace_member(
         environment,
         link: job.link,
         index: job.index_url,
+        redirects: job.redirects,
         source: job.source,
     })
 }
@@ -798,6 +815,10 @@ struct StoredPackage {
     environment: Environment,
     /// a workspace member: fine to link *to*, never written into
     in_place: bool,
+    /** [overrides]-rewritten edges: declared alias -> replacement package
+    name. the manifest on disk still declares the original, so link
+    generation must consult this before trusting what it reads back. */
+    redirects: BTreeMap<String, String>,
 }
 
 /** link files *inside* a stored package for its own declared dependencies,
@@ -820,7 +841,14 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
     let mut types_cache: HashMap<String, Vec<String>> = HashMap::new();
 
     for package in packages.iter().filter(|package| !package.in_place) {
-        for (alias, dependency) in package::declared_dependencies(&package.storage) {
+        for (alias, declared) in package::declared_dependencies(&package.storage) {
+            /* the shipped manifest declares the ORIGINAL package; an
+            [overrides] redirect on this edge means the alias must link to
+            the replacement instead */
+            let dependency = package
+                .redirects
+                .get(&alias)
+                .map_or(declared, |replacement| replacement.clone());
             /* aliases are TOML keys from a *downloaded* manifest, and TOML
             keys can be quoted anything: a "../.." or absolute one would put
             the link outside the package (or outside the project) */
@@ -1035,6 +1063,7 @@ mod tests {
             },
             index_url: "https://example.com/index".to_string(),
             link: "thing".to_string(),
+            redirects: BTreeMap::new(),
         };
         let lock = Lockfile::new(vec![LockedPackage {
             name: "acme/thing".to_string(),
@@ -1042,6 +1071,7 @@ mod tests {
             environment: Environment::Shared,
             link: "thing".to_string(),
             index: "https://example.com/index".to_string(),
+            redirects: BTreeMap::new(),
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -1131,6 +1161,7 @@ mod tests {
             storage,
             environment,
             in_place: false,
+            redirects: BTreeMap::new(),
         }
     }
 
@@ -1187,6 +1218,39 @@ mod tests {
         );
         // packages without dependencies get no packages/ folder at all
         assert!(!core.join("packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn redirected_edges_link_the_replacement() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-redirect");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+
+        /* the shipped manifest still declares acme/bar, but [overrides]
+        swapped the edge for acme/qux: the nested link must follow the
+        redirect, not the manifest */
+        let qux = shared.join(".lpm/acme_qux");
+        write(&qux, "init.luau", "return {}\n");
+        let consumer = shared.join(".lpm/acme_foo");
+        write(
+            &consumer,
+            "lpm.toml",
+            "[dependencies]\nbar = { name = \"acme/bar\", version = \"^1\" }\n",
+        );
+
+        let mut redirected = stored("acme/foo", consumer.clone(), Environment::Shared);
+        redirected.redirects = [("bar".to_string(), "acme/qux".to_string())].into();
+        let packages = [stored("acme/qux", qux, Environment::Shared), redirected];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(consumer.join("packages/shared/bar.luau")).unwrap(),
+            "return require(\"../../../acme_qux\")\n"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1271,6 +1335,7 @@ mod tests {
                 storage: member.clone(),
                 environment: Environment::Shared,
                 in_place: true,
+                redirects: BTreeMap::new(),
             },
             stored("acme/extras", consumer.clone(), Environment::Shared),
         ];

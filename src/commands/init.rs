@@ -190,6 +190,7 @@ pub fn run() -> Result<(), Error> {
         config: Default::default(),
         indices: Default::default(),
         dependencies: Default::default(),
+        overrides: Default::default(),
         tools: Default::default(),
         scripts: Default::default(),
         studio: Default::default(),

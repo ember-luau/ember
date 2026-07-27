@@ -190,7 +190,7 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
     };
 
     let mut parsed = Vec::new();
-    for spec in dependencies.values() {
+    for (alias, spec) in dependencies {
         /* Specs are either the specifier table itself or a [specifier, kind]
         pair, kind being "standard", "peer", or "dev". */
         let (spec, kind) = match spec {
@@ -250,6 +250,7 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
             name: name.to_lowercase(),
             version_req,
             index_url: dep_index_url,
+            alias: alias.clone(),
         });
     }
 
