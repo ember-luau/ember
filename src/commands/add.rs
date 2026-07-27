@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{Manifest, parse_version_req, split_package_name};
-use crate::registry::index::Index;
+use crate::registry::index::{Index, Refresh};
 use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
@@ -19,6 +19,9 @@ pub struct AddArgs {
     /// Key written to [dependencies] (default: package short name)
     #[arg(long)]
     alias: Option<String>,
+    /// Re-fetch the index even if it was refreshed recently
+    #[arg(long)]
+    refresh: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -38,12 +41,22 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let req = parse_version_req(&req_text)?;
 
     // resolve first so a typo'd package or version fails before we touch the manifest
-    let index = Index::open(&index_url, true)?;
-    let package = index.resolve(
-        &name,
-        &req,
-        manifest.target.as_ref().map(|target| target.environment),
-    )?;
+    let mode = if args.refresh {
+        Refresh::Force
+    } else {
+        Refresh::Ttl
+    };
+    let prefer = manifest.target.as_ref().map(|target| target.environment);
+    let index = Index::open(&index_url, mode)?;
+    let package = match index.resolve(&name, &req, prefer) {
+        Ok(package) => package,
+        /* the TTL may have kept us on a stale index that simply hasn't
+        seen this package or version yet; one forced refresh, one retry */
+        Err(_) if index.ttl_skipped() => {
+            Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer)?
+        }
+        Err(error) => return Err(error),
+    };
 
     /* edit the raw document instead of re-serializing `manifest`,
     so comments and formatting in lpm.toml survive */

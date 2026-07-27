@@ -1,4 +1,5 @@
 pub mod add;
+pub mod cache;
 pub mod index;
 pub mod init;
 pub mod install;

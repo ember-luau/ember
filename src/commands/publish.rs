@@ -243,7 +243,9 @@ fn upload(token: &str, archive: &[u8]) -> Result<(), Error> {
 /** OAuth app client id for the device flow. lives in the lpm index's
 config.toml (not in the binary) so it can rotate without a CLI release. */
 fn oauth_client_id() -> Result<String, Error> {
-    let index = Index::open(DEFAULT_INDEX_URL, true)?;
+    /* a stale oauth id is harmless (it rotates roughly never), so any
+    cached copy will do; a first-ever run still clones */
+    let index = Index::open(DEFAULT_INDEX_URL, crate::registry::index::Refresh::Never)?;
     index
         .github_oauth_id()
         .map(str::to_string)

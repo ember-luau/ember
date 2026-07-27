@@ -98,7 +98,10 @@ pub fn resolve(
 fn parse_dependency(spec: &str) -> Option<TransitiveDependency> {
     let (name, req) = spec.split_once('@')?;
     Some(TransitiveDependency {
-        name: name.to_string(),
+        /* lowercased like every other name entering the install set: two
+        case-variants of one package must never become two parallel jobs
+        racing on the same storage folder */
+        name: name.to_lowercase(),
         version_req: req.to_string(),
         index_url: None,
     })

@@ -35,6 +35,18 @@ pub fn index_cache_dir() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("index-cache"))
 }
 
+/// ~/.lpm/archive-cache, downloaded package archives; `lpm cache clean` deletes it.
+pub fn archive_cache_root() -> Result<PathBuf, Error> {
+    Ok(lpm_dir()?.join("archive-cache"))
+}
+
+/** the versioned layer inside the archive cache: bump the folder name when
+the entry format changes and old entries just stop being found, instead of
+being misread. */
+pub fn archive_cache_dir() -> Result<PathBuf, Error> {
+    Ok(archive_cache_root()?.join("v1"))
+}
+
 /** Whether two paths point at the same thing on disk. canonicalizing
 handles symlinks and casing; paths that won't canonicalize (missing
 files) count as different. */

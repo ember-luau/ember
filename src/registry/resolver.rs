@@ -3,7 +3,7 @@ use crate::project::manifest::{
     Dependency, Environment, Manifest, parse_version_req, split_package_name,
 };
 use crate::project::workspace::{self, Workspace};
-use crate::registry::index::{DownloadSource, Index};
+use crate::registry::index::{DownloadSource, Index, Refresh};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 
@@ -40,7 +40,27 @@ projects on disk and bring their own deps into the same set. */
 pub fn resolve(
     manifest: &Manifest,
     project_dir: &Path,
-    refresh: bool,
+    refresh: Refresh,
+) -> Result<Vec<ResolvedInstall>, Error> {
+    let mut ttl_skipped = false;
+    match resolve_once(manifest, project_dir, refresh, &mut ttl_skipped) {
+        /* an index whose pull was skipped by the TTL can be stale, and most
+        resolver errors don't say which index they came from — so any
+        failure after a skip earns one full forced refresh and a re-run.
+        the second outcome, good or bad, is the one that stands. */
+        Err(_) if refresh == Refresh::Ttl && ttl_skipped => {
+            let mut ignored = false;
+            resolve_once(manifest, project_dir, Refresh::Force, &mut ignored)
+        }
+        result => result,
+    }
+}
+
+fn resolve_once(
+    manifest: &Manifest,
+    project_dir: &Path,
+    refresh: Refresh,
+    ttl_skipped: &mut bool,
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let prefer_environment = manifest.target.as_ref().map(|target| target.environment);
     let mut indices: HashMap<String, Index> = HashMap::new();
@@ -85,7 +105,7 @@ pub fn resolve(
 
         let install = match request {
             Request::Registry { index_url, .. } => {
-                let index = open_index(&mut indices, &index_url, refresh)?;
+                let index = open_index(&mut indices, &index_url, refresh, ttl_skipped)?;
                 let package = index.resolve(&name, &req, prefer_environment)?;
 
                 for dependency in &package.dependencies {
@@ -201,10 +221,13 @@ fn workspace_context<'memo>(
 fn open_index<'a>(
     indices: &'a mut HashMap<String, Index>,
     url: &str,
-    refresh: bool,
+    refresh: Refresh,
+    ttl_skipped: &mut bool,
 ) -> Result<&'a Index, Error> {
     if !indices.contains_key(url) {
-        indices.insert(url.to_string(), Index::open(url, refresh)?);
+        let index = Index::open(url, refresh)?;
+        *ttl_skipped |= index.ttl_skipped();
+        indices.insert(url.to_string(), index);
     }
     Ok(&indices[url])
 }
@@ -249,7 +272,7 @@ mod tests {
         workspace dep all land in the install set, linked in place. */
         let member_dir = base.join("packages/extra");
         let manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
-        let installs = resolve(&manifest, &member_dir, false).unwrap();
+        let installs = resolve(&manifest, &member_dir, Refresh::Never).unwrap();
 
         assert_eq!(installs.len(), 1);
         let core = &installs[0];
@@ -270,7 +293,7 @@ mod tests {
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";
         write(&base, "lpm.toml", root_manifest_text);
         let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
-        let installs = resolve(&manifest, &base, false).unwrap();
+        let installs = resolve(&manifest, &base, Refresh::Never).unwrap();
         let names: Vec<_> = installs
             .iter()
             .map(|install| install.name.as_str())
@@ -297,7 +320,7 @@ mod tests {
 
         let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
         assert!(matches!(
-            resolve(&manifest, &base, false),
+            resolve(&manifest, &base, Refresh::Never),
             Err(Error::NotInWorkspace(_))
         ));
 

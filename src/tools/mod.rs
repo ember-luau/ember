@@ -54,6 +54,13 @@ fn stored_executable(repository: &str, version: &str) -> Result<PathBuf, Error> 
     Ok(storage_dir(repository, version)?.join(executable_name(repo_short_name(repository))))
 }
 
+/** whether a pinned tool is fully present: version stored and alias
+shimmed. the cheap check install's fast path runs instead of the full tool
+phase — a few stats, no network. */
+pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
+    Ok(stored_executable(&tool.repository, &tool.version)?.exists() && shim::path(alias)?.exists())
+}
+
 /** Installs a manifest tool, skipping the network when the version is
 already stored. true = downloaded, false = cache reused; the bin shim
 gets refreshed either way. */
