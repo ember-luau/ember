@@ -112,6 +112,14 @@ pub fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/** prints "timing: <label> <elapsed>" to stderr when LPM_TIMINGS is set;
+free when it isn't. labels end up in benchmark diffs, so keep them stable. */
+pub fn timing(label: &str, started: std::time::Instant) {
+    if std::env::var_os("LPM_TIMINGS").is_some() {
+        eprintln!("timing: {label} {}", format_duration(started.elapsed()));
+    }
+}
+
 /// "<1ms", "142ms", "1.42s", or "1m 12s" depending on magnitude.
 pub fn format_duration(duration: Duration) -> String {
     let millis = duration.as_millis();

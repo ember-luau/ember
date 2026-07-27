@@ -34,7 +34,9 @@ lpm.toml, 403 scope owned by someone else (first publish claims a scope),
 409 version already exists, 413 over the size cap. */
 pub fn publish(token: &str, archive: &[u8]) -> Result<(), Error> {
     let url = format!("{API_URL}/v1/publish");
-    let response = ureq::post(&url)
+    // bulk: a package archive on a slow uplink shouldn't die at the minute mark
+    let response = http::bulk_agent()
+        .post(&url)
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"))
         .set("Content-Type", "application/gzip")
