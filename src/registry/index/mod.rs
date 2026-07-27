@@ -80,6 +80,8 @@ pub struct TransitiveDependency {
     pub version_req: String,
     /// None = resolve in the same index as the parent package.
     pub index_url: Option<String>,
+    /// the alias the parent declared this dependency under; [overrides] paths address edges by it.
+    pub alias: String,
 }
 
 /** Everything needed to re-download a resolved package; also stored in
@@ -351,7 +353,7 @@ fn meta_path(entry: &Path) -> PathBuf {
 stable in practice within a compiler release series but documented as
 unstable; fnv1a_parts with a marker keeps the same "slug-hash" shape under
 a deliberate, stable function. old-key caches are simply re-cloned once. */
-fn cache_dir(url: &str) -> Result<PathBuf, Error> {
+pub(crate) fn cache_dir(url: &str) -> Result<PathBuf, Error> {
     let slug: String = url
         .trim_end_matches('/')
         .rsplit('/')
@@ -607,7 +609,8 @@ mod tests {
         .unwrap();
         // project_dir only matters for workspace deps; origin keeps it hermetic
         let resolved =
-            crate::registry::resolver::resolve(&manifest, &origin, Refresh::Ttl).unwrap();
+            crate::registry::resolver::resolve(&manifest, &origin, Refresh::Ttl, &mut Vec::new())
+                .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].version, semver::Version::new(2, 0, 0));
 

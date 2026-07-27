@@ -76,9 +76,9 @@ pub fn resolve(
     realm decides its install environment. */
     let dependencies = entry
         .dependencies
-        .values()
-        .chain(entry.server_dependencies.values())
-        .filter_map(|spec| parse_dependency(spec))
+        .iter()
+        .chain(entry.server_dependencies.iter())
+        .filter_map(|(alias, spec)| parse_dependency(alias, spec))
         .collect();
 
     let download_url = format!(
@@ -95,7 +95,7 @@ pub fn resolve(
 }
 
 /// Wally dependency specs are "scope/name@version-requirement".
-fn parse_dependency(spec: &str) -> Option<TransitiveDependency> {
+fn parse_dependency(alias: &str, spec: &str) -> Option<TransitiveDependency> {
     let (name, req) = spec.split_once('@')?;
     Some(TransitiveDependency {
         /* lowercased like every other name entering the install set: two
@@ -104,6 +104,7 @@ fn parse_dependency(spec: &str) -> Option<TransitiveDependency> {
         name: name.to_lowercase(),
         version_req: req.to_string(),
         index_url: None,
+        alias: alias.to_string(),
     })
 }
 
@@ -123,9 +124,10 @@ mod tests {
 
     #[test]
     fn parses_dependency_specs() {
-        let dep = parse_dependency("evaera/promise@^4.0.0").unwrap();
+        let dep = parse_dependency("Promise", "evaera/Promise@^4.0.0").unwrap();
         assert_eq!(dep.name, "evaera/promise");
         assert_eq!(dep.version_req, "^4.0.0");
-        assert!(parse_dependency("missing-at-sign").is_none());
+        assert_eq!(dep.alias, "Promise");
+        assert!(parse_dependency("Broken", "missing-at-sign").is_none());
     }
 }

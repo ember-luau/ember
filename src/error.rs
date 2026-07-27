@@ -123,6 +123,17 @@ pub enum Error {
     #[error("No script named '{0}' under [scripts] in lpm.toml")]
     ScriptMissing(String),
 
+    #[error(
+        "[overrides] key '{0}' must be a dot-separated path like 'parent.child' (commas separate multiple paths)"
+    )]
+    OverrideBadPath(String),
+
+    #[error("Override '{path}' points at '{alias}', which is not under [dependencies]")]
+    OverrideAliasMissing { path: String, alias: String },
+
+    #[error("Two [overrides] keys both cover the path '{0}'")]
+    OverrideDuplicatePath(String),
+
     #[error("No [studio] table in lpm.toml; run `lpm studio init` to create one")]
     StudioMissing,
 

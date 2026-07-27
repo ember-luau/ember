@@ -111,6 +111,10 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
     /* workspace deps become registry ones in the archive's manifest;
     the on-disk lpm.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
+    /* [overrides] never travel: only the installing project's table is
+    consulted, and an alias-form value refers to aliases only this
+    manifest has — shipping it would just mislead readers */
+    manifest.overrides.clear();
 
     let root = Path::new(".");
     let files = pack::packed_files(root, &manifest)?;

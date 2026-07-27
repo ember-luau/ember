@@ -28,6 +28,9 @@ pub struct Manifest {
     pub indices: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
+    /// replacements for dependencies of dependencies; see [`Override`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, Override>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, Tool>,
     /// shell commands runnable with `lpm run <name>`.
@@ -287,6 +290,57 @@ pub enum Dependency {
 
 fn default_workspace_version() -> String {
     "^".to_string()
+}
+
+/** an [overrides] value: what an alias path should resolve to instead of
+what the dependency's own manifest asked for. keys name an edge — in
+`"Foo.Bar"`, `Foo` is an alias under this manifest's [dependencies] and
+`Bar` is the alias Foo's own manifest declares (aliases are case-sensitive
+and spelled exactly as each parent wrote them; package names are not what
+paths are made of). values are either the alias of one of this manifest's
+own [dependencies] entries (`"Foo.Bar" = "Bar"`: use mine) or a full
+specifier.
+
+semantics under lpm's flat install model, plainly: an override redirects
+that one edge. other dependents that ask for the original package by
+name keep it, and both packages then coexist in the set, each linked
+where it was asked for. only the root manifest's [overrides] is
+consulted — a workspace member's own table applies when the member
+itself installs, and a published package's is inert. a package's edges
+are walked once, on its first discovery (root aliases seed in
+alphabetical order), so a three-segment path must spell that first
+route; segments below an overridden edge address the *replacement's*
+dependencies. */
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum Override {
+    /// alias of an entry under this manifest's own [dependencies]
+    Alias(String),
+    /// a dependency specifier, same shapes as a [dependencies] value
+    Specifier(Dependency),
+}
+
+/** expands an [overrides] key into alias paths: dot-separated chains from
+a direct dependency down, with one key able to cover several paths
+separated by commas (`"foo.bar, baz.bar" = ...`). a path needs at least
+two segments — a single alias would name one of your own [dependencies],
+which you can just edit. aliases that themselves contain dots or
+whitespace can't be addressed; pick the specifier form under a different
+alias if that ever bites. */
+pub fn override_paths(key: &str) -> Result<Vec<Vec<String>>, Error> {
+    key.split(',')
+        .map(|path| {
+            let segments: Vec<String> = path.trim().split('.').map(str::to_string).collect();
+            let valid = segments.len() >= 2
+                && segments
+                    .iter()
+                    .all(|segment| !segment.is_empty() && !segment.contains(char::is_whitespace));
+            if !valid {
+                return Err(Error::OverrideBadPath(key.to_string()));
+            }
+            Ok(segments)
+        })
+        .collect()
 }
 
 /** the registry requirement a workspace dependency publishes as, pesde's rules
@@ -1006,6 +1060,64 @@ mod tests {
         .unwrap();
         assert!(manifest.studio.is_none());
         assert!(!toml::to_string(&manifest).unwrap().contains("studio"));
+    }
+
+    #[test]
+    fn expands_override_paths() {
+        assert_eq!(
+            override_paths("foo.bar").unwrap(),
+            [vec!["foo".to_string(), "bar".to_string()]]
+        );
+        // one key can cover several paths; whitespace around commas is noise
+        assert_eq!(
+            override_paths("foo.bar, baz.qux.bar").unwrap(),
+            [
+                vec!["foo".to_string(), "bar".to_string()],
+                vec!["baz".to_string(), "qux".to_string(), "bar".to_string()],
+            ]
+        );
+
+        // a single alias, empty segments, and stray dots are all authoring errors
+        for key in ["foo", "foo.", ".bar", "foo..bar", "", "a.b,c"] {
+            assert!(
+                matches!(override_paths(key), Err(Error::OverrideBadPath(_))),
+                "key {key:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_override_values_in_both_forms() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [dependencies]
+            Bar = { name = "acme/bar", version = "^2" }
+
+            [overrides]
+            "foo.bar" = "Bar"
+            "foo.baz" = { name = "acme/qux", version = "^1", index = "wally" }
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &manifest.overrides["foo.bar"],
+            Override::Alias(alias) if alias == "Bar"
+        ));
+        assert!(matches!(
+            &manifest.overrides["foo.baz"],
+            Override::Specifier(Dependency::Registry { name, index, .. })
+                if name == "acme/qux" && index.as_deref() == Some("wally")
+        ));
+
+        // absent table stays absent on write
+        let bare: Manifest =
+            toml::from_str("[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n").unwrap();
+        assert!(!toml::to_string(&bare).unwrap().contains("overrides"));
     }
 
     #[test]

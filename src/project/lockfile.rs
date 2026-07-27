@@ -22,6 +22,11 @@ pub struct LockedPackage {
     /// link file name in the environment folder.
     pub link: String,
     pub index: String,
+    /** this package's [overrides]-rewritten edges: declared alias -> the
+    replacement's package name. additive — locks without it parse fine —
+    and required for `--locked` to relink redirected dependencies. */
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub redirects: std::collections::BTreeMap<String, String>,
     #[serde(flatten)]
     pub source: DownloadSource,
 }
@@ -63,6 +68,7 @@ mod tests {
                 environment: Environment::Shared,
                 link: "Promise".to_string(),
                 index: "https://github.com/UpliftGames/wally-index".to_string(),
+                redirects: [("Signal".to_string(), "acme/signal-fork".to_string())].into(),
                 source: DownloadSource::Zip {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
@@ -74,6 +80,7 @@ mod tests {
                 environment: Environment::Luau,
                 link: "hello".to_string(),
                 index: "https://github.com/pesde-pkg/index".to_string(),
+                redirects: Default::default(),
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },
@@ -85,6 +92,16 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.packages.len(), 2);
         assert_eq!(parsed.packages[0].name, "evaera/promise");
+        // redirects round-trip when present and stay absent otherwise
+        assert_eq!(
+            parsed.packages[0]
+                .redirects
+                .get("Signal")
+                .map(String::as_str),
+            Some("acme/signal-fork")
+        );
+        assert!(parsed.packages[1].redirects.is_empty());
+        assert_eq!(text.matches("redirects").count(), 1);
         assert!(matches!(
             &parsed.packages[1].source,
             DownloadSource::TarGz { url } if url.contains("pesde%2Fhello")
