@@ -49,6 +49,11 @@ enum Commands {
 
     /// Publish this package to the lpm registry
     Publish(commands::publish::PublishArgs),
+
+    /// Manage lpm's caches
+    #[command(subcommand)]
+    Cache(commands::cache::CacheCommand),
+
     /// Manage this lpm installation
     #[command(subcommand, name = "self")]
     SelfManage(SelfCommand),
@@ -77,6 +82,7 @@ fn main() {
         Commands::Index(command) => commands::index::run(command),
         Commands::Install(args) => commands::install::run(args),
         Commands::Publish(args) => commands::publish::run(args),
+        Commands::Cache(command) => commands::cache::run(command),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),
         Commands::Studio { command } => commands::studio::run(command),
