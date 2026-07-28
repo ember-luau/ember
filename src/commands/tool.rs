@@ -54,6 +54,16 @@ pub enum ToolCommand {
         #[arg(short, long)]
         version: Option<String>,
     },
+
+    /// Manage the stored tool binaries under ~/.lpm/tools
+    #[command(subcommand)]
+    Cache(ToolCacheCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ToolCacheCommand {
+    /// Delete every stored tool binary (manifest pins and shims remain)
+    Clean,
 }
 
 pub fn run(command: ToolCommand) -> Result<(), Error> {
@@ -67,13 +77,82 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
         ToolCommand::Update => update(),
         ToolCommand::Delete { name, version } => delete(name, version),
         ToolCommand::List => list(),
+        ToolCommand::Cache(ToolCacheCommand::Clean) => cache_clean(),
     }
+}
+
+/** wipes the tool store: every version of every tool, plus the `.latest`
+stamps `lpm execute` keeps beside them. shims, manifest pins, and the
+global tools file survive — a shim without storage errors with "run
+`lpm install`", and that (or the next lpx run) is the repair path. */
+fn cache_clean() -> Result<(), Error> {
+    let (freed, skipped) = sweep_tool_store(&paths::tools_dir()?);
+
+    /* a tool that is running right now can't be deleted on windows; say
+    which ones were left rather than aborting the sweep mid-way */
+    for (name, error) in &skipped {
+        eprintln!("warning: skipped {name} (still running?): {error}");
+    }
+
+    if freed == 0 && skipped.is_empty() {
+        println!("Nothing stored");
+        return Ok(());
+    }
+
+    ui::print_success(&format!(
+        "Removed stored tool binaries ({:.1} MiB)",
+        freed as f64 / (1024.0 * 1024.0)
+    ));
+    println!(
+        "Pinned tools reinstall with `lpm install` in each project; lpx runs re-download on demand"
+    );
+    Ok(())
+}
+
+/** removes every entry of the tool store one by one, so a single locked
+binary only survives the sweep instead of aborting it. returns the bytes
+freed and the entries that would not go. */
+fn sweep_tool_store(tools_dir: &std::path::Path) -> (u64, Vec<(String, std::io::Error)>) {
+    let Ok(entries) = fs::read_dir(tools_dir) else {
+        return (0, Vec::new());
+    };
+
+    let mut freed = 0;
+    let mut skipped = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let (size, removed) = if path.is_dir() {
+            (
+                crate::commands::cache::dir_size(&path),
+                fs::remove_dir_all(&path),
+            )
+        } else {
+            (
+                entry.metadata().map_or(0, |meta| meta.len()),
+                fs::remove_file(&path),
+            )
+        };
+        match removed {
+            Ok(()) => freed += size,
+            Err(error) => skipped.push((entry.file_name().to_string_lossy().into_owned(), error)),
+        }
+    }
+
+    // drop the now-empty root too; harmless to leave if something survived
+    let _ = fs::remove_dir(tools_dir);
+    (freed, skipped)
 }
 
 fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
     let github = GithubAPI::new();
     let name = tools::expand_shorthand(&name);
     let (owner, repo) = Tool::split_repository(&name)?;
+
+    /* the repo short name becomes the alias key and its bin shim; a repo
+    named lpm or lpx would shadow lpm's own binaries there */
+    if tools::is_reserved_alias(repo) {
+        return Err(Error::ReservedToolAlias(repo.to_string()));
+    }
 
     // resolve the release first so a bad name/version never touches the file
     let release = match &version {
@@ -340,13 +419,15 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
 
     /* when the whole tool (or its last version) is gone, drop the shim too.
     manifest pins stay: `tool list` shows it as "not installed" and the
-    next `lpm install` puts it back */
+    next `lpm install` puts it back. only version *directories* count —
+    the `.latest` stamp `lpm execute` leaves beside them must not keep a
+    deleted tool half-alive (and gets swept along with the dir). */
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
-            .map(|mut dir| dir.next().is_none())
+            .map(|mut dir| !dir.any(|entry| entry.is_ok_and(|entry| entry.path().is_dir())))
             .unwrap_or(true);
     if tool_gone {
-        let _ = fs::remove_dir(&tool_dir);
+        let _ = fs::remove_dir_all(&tool_dir);
         if let Ok(bin_dir) = paths::bin_dir() {
             let _ = fs::remove_file(bin_dir.join(format!("{repo}{EXE_SUFFIX}")));
         }
@@ -359,4 +440,33 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     ui::print_success(&message);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweeping_the_store_removes_tools_and_stamps() {
+        let store = std::env::temp_dir().join("lpm-test-tool-store-sweep");
+        let _ = fs::remove_dir_all(&store);
+        fs::create_dir_all(store.join("acme_tool").join("1.0.0")).unwrap();
+        fs::write(
+            store.join("acme_tool").join("1.0.0").join("tool"),
+            [0u8; 64],
+        )
+        .unwrap();
+        fs::write(store.join("acme_tool").join(".latest"), "1.0.0\n").unwrap();
+        fs::write(store.join("stray-file"), [0u8; 8]).unwrap();
+
+        let (freed, skipped) = sweep_tool_store(&store);
+        assert_eq!(freed, 64 + 6 + 8);
+        assert!(skipped.is_empty());
+        assert!(!store.exists());
+
+        // a missing store is a quiet no-op, not an error
+        let (freed, skipped) = sweep_tool_store(&store);
+        assert_eq!(freed, 0);
+        assert!(skipped.is_empty());
+    }
 }

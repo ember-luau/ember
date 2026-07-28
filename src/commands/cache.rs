@@ -41,7 +41,7 @@ fn clean() -> Result<(), Error> {
 }
 
 /// best-effort recursive size; an unreadable entry just doesn't count.
-fn dir_size(dir: &Path) -> u64 {
+pub(crate) fn dir_size(dir: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
     };

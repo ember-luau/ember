@@ -49,7 +49,36 @@ fn install() -> Result<(), Error> {
         );
     }
 
+    /* lpx: `lpm execute` under its own name, so `lpx thing` runs things
+    npx-style. a copy of the binary, like the tool shims. */
+    if write_lpx_launcher(&bin_dir, &current) {
+        println!("Installed the lpx launcher beside it");
+    }
+
     add_to_path(&bin_dir)
+}
+
+/// "lpx.exe" on windows, "lpx" elsewhere.
+fn lpx_name() -> String {
+    format!("lpx{}", env::consts::EXE_SUFFIX)
+}
+
+/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning: on
+windows the launcher stays locked for as long as anything it started is
+still running, and that must never sink the install or update this rides
+along with. fs::copy carries the executable bit over on unix. */
+fn write_lpx_launcher(bin_dir: &Path, source: &Path) -> bool {
+    let lpx = bin_dir.join(lpx_name());
+    match fs::copy(source, &lpx) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!(
+                "warning: could not write the lpx launcher {}: {error}",
+                lpx.display()
+            );
+            false
+        }
+    }
 }
 
 fn update() -> Result<(), Error> {
@@ -62,6 +91,16 @@ fn update() -> Result<(), Error> {
     let latest = Version::parse(release.tag_name.trim_start_matches('v'))?;
     if latest <= current {
         println!("lpm is already up to date");
+        /* installs from before lpx existed still gain the launcher here,
+        so "run `self update`" is the whole migration story even for
+        users already on the newest release */
+        let bin_dir = paths::bin_dir()?;
+        if bin_dir.is_dir()
+            && !bin_dir.join(lpx_name()).exists()
+            && write_lpx_launcher(&bin_dir, &env::current_exe()?)
+        {
+            println!("Installed the lpx launcher (new in this version)");
+        }
         return Ok(());
     }
 
@@ -85,10 +124,22 @@ fn update() -> Result<(), Error> {
 
     let bytes = crate::net::http::get_bytes(&asset.browser_download_url, &[])?;
 
+    /* the path is captured before the swap: current_exe() itself can go
+    stale after self_replace renames the running file out of the way,
+    but the path keeps pointing at the freshly installed binary */
+    let exe_path = env::current_exe()?;
     let staged = env::temp_dir().join(&asset_name);
     fs::write(&staged, &bytes)?;
     self_replace::self_replace(&staged)?;
     fs::remove_file(&staged)?;
+
+    /* keep the lpx launcher (a copy of the binary) in step with what was
+    just installed; created on update too, so existing installs gain lpx
+    without re-running `self install` */
+    let bin_dir = paths::bin_dir()?;
+    if bin_dir.is_dir() {
+        write_lpx_launcher(&bin_dir, &exe_path);
+    }
 
     println!("Updated lpm v{current} -> v{latest}");
     Ok(())

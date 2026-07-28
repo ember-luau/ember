@@ -25,6 +25,10 @@ enum Commands {
     /// Runs a script from lpm.toml
     Run(commands::run::RunArgs),
 
+    /// Download (if needed) and run a GitHub-released executable
+    #[command(visible_alias = "x")]
+    Execute(commands::execute::ExecuteArgs),
+
     /// Set up and open this project's place in Roblox Studio
     #[command(arg_required_else_help = true)]
     Studio {
@@ -73,11 +77,24 @@ fn main() {
         }
     }
 
-    let cli = parse_cli();
+    /* lpx is `lpm execute` under its own name — a copy `self install`
+    drops beside lpm — so every argument belongs to execute. */
+    let cli = if tools::shim::invoked_as_lpx() {
+        let prefix: [std::ffi::OsString; 2] = ["lpm".into(), "execute".into()];
+        parse_cli(prefix.into_iter().chain(std::env::args_os().skip(1)))
+    } else {
+        parse_cli(std::env::args_os())
+    };
 
     let started = std::time::Instant::now();
     let result = match cli.command {
         Commands::Init => commands::init::run(),
+        /* execute hands the terminal to another program: its exit code
+        passes through as-is, with no "Done in" line in its output */
+        Commands::Execute(args) => match commands::execute::run(args) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => Err(err),
+        },
         Commands::Add(args) => commands::add::run(args),
         Commands::Index(command) => commands::index::run(command),
         Commands::Install(args) => commands::install::run(args),
@@ -100,8 +117,8 @@ fn main() {
 
 /** Parses arguments, restyling clap's hardcoded "error: <message>" line as
 an accent "✗ <message>" while keeping the styled usage/tip lines below. */
-fn parse_cli() -> Cli {
-    Cli::try_parse().unwrap_or_else(|err| {
+fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
+    Cli::try_parse_from(args).unwrap_or_else(|err| {
         let plain = err.render().to_string();
         // help and version output pass through clap untouched.
         let Some(rest) = plain.strip_prefix("error: ") else {

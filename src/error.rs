@@ -86,6 +86,26 @@ pub enum Error {
     #[error("Tool '{0}' is not installed; run `lpm install` to install it")]
     ToolNotInstalled(String),
 
+    #[error("Alias '{0}' is reserved for lpm itself and can't name a tool")]
+    ReservedToolAlias(String),
+
+    #[error("Invalid spec '{0}': expected a name or 'owner/repo', optionally with '@version'")]
+    ExecuteSpecInvalid(String),
+
+    #[error(
+        "'{alias}' is pinned to {pinned} here; drop '@{requested}' to run the pin, or use the full owner/repo form for another version"
+    )]
+    ExecutePinConflict {
+        alias: String,
+        pinned: String,
+        requested: String,
+    },
+
+    #[error(
+        "'{0}' is not a pinned tool alias or a known shorthand; use the full 'owner/repo' GitHub name"
+    )]
+    ExecuteUnknownName(String),
+
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
 
