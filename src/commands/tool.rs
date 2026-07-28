@@ -75,6 +75,12 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     let name = tools::expand_shorthand(&name);
     let (owner, repo) = Tool::split_repository(&name)?;
 
+    /* the repo short name becomes the alias key and its bin shim; a repo
+    named lpm or lpx would shadow lpm's own binaries there */
+    if tools::is_reserved_alias(repo) {
+        return Err(Error::ReservedToolAlias(repo.to_string()));
+    }
+
     // resolve the release first so a bad name/version never touches the file
     let release = match &version {
         Some(version) => github.get_release(&name, version.trim_start_matches('v'))?,
@@ -340,13 +346,15 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
 
     /* when the whole tool (or its last version) is gone, drop the shim too.
     manifest pins stay: `tool list` shows it as "not installed" and the
-    next `lpm install` puts it back */
+    next `lpm install` puts it back. only version *directories* count —
+    the `.latest` stamp `lpm execute` leaves beside them must not keep a
+    deleted tool half-alive (and gets swept along with the dir). */
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
-            .map(|mut dir| dir.next().is_none())
+            .map(|mut dir| !dir.any(|entry| entry.is_ok_and(|entry| entry.path().is_dir())))
             .unwrap_or(true);
     if tool_gone {
-        let _ = fs::remove_dir(&tool_dir);
+        let _ = fs::remove_dir_all(&tool_dir);
         if let Ok(bin_dir) = paths::bin_dir() {
             let _ = fs::remove_file(bin_dir.join(format!("{repo}{EXE_SUFFIX}")));
         }

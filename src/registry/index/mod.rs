@@ -33,7 +33,7 @@ const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
 value should warn exactly once, not per index. a garbage value falls back
 to the default *with* a warning — silently ignoring "-1" or "30s" would
 read as the variable doing nothing. */
-fn index_ttl() -> Duration {
+pub(crate) fn index_ttl() -> Duration {
     static TTL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| match std::env::var("LPM_INDEX_TTL_SECS") {
         Err(_) => DEFAULT_INDEX_TTL,
@@ -419,8 +419,10 @@ pub fn is_fresh(url: &str) -> bool {
 /// marks when an index cache last attempted a refresh (see `Refresh`).
 const REFRESH_STAMP: &str = ".lpm-refreshed";
 
-/// whether `stamp` exists and is younger than `ttl`. a zero ttl is never fresh.
-fn stamp_fresh(stamp: &Path, ttl: Duration) -> bool {
+/** whether `stamp` exists and is younger than `ttl`. a zero ttl is never
+fresh. also behind the tools module's latest-release stamps, which share
+the index TTL knob on purpose. */
+pub(crate) fn stamp_fresh(stamp: &Path, ttl: Duration) -> bool {
     if ttl.is_zero() {
         return false;
     }

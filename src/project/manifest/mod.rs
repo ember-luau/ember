@@ -392,11 +392,15 @@ impl Tool {
 
     /** splits an "owner/repo" GitHub repository name. unlike index package names
     (see `split_package_name`), GitHub owners/repos may contain uppercase and dots
-    ("JohnnyMorganz/StyLua"), so only the shape is validated: exactly one '/',
-    both halves non-empty. */
+    ("JohnnyMorganz/StyLua"), so mostly the shape is validated: exactly one '/',
+    both halves non-empty. backslashes and dot-only components are rejected —
+    GitHub never allows them, and either could steer the storage path out of
+    ~/.lpm/tools on windows. */
     pub fn split_repository(repository: &str) -> Result<(&str, &str), Error> {
+        let valid =
+            |half: &str| !half.is_empty() && half != "." && half != ".." && !half.contains('\\');
         match repository.split_once('/') {
-            Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() && !repo.contains('/') => {
+            Some((owner, repo)) if valid(owner) && valid(repo) && !repo.contains('/') => {
                 Ok((owner, repo))
             }
             _ => Err(Error::InvalidToolSpec(repository.to_string())),
@@ -830,6 +834,10 @@ mod tests {
             "/repo@1.0",
             "owner/repo@1.0@2.0",
             "",
+            // path-shaped names must never reach storage_dir
+            "../evil@1.0",
+            "owner/..@1.0",
+            "owner/re\\po@1.0",
         ] {
             assert!(
                 matches!(Tool::parse(spec), Err(Error::InvalidToolSpec(_))),
