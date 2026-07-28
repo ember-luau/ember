@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 /** The alias this process was invoked under, or None when running as the
 real CLI. "lpm" itself and "lpm-*" stems count as the CLI because
-release assets are named "lpm-{os}-{arch}". */
+release assets are named "lpm-{os}-{arch}"; "lpx" counts too — it's the
+`lpm execute` launcher, routed separately in main. */
 pub fn shim_alias() -> Option<String> {
     let exe = env::current_exe().ok()?;
     alias_from_stem(exe.file_stem()?.to_str()?)
@@ -25,11 +26,23 @@ pub fn shim_alias() -> Option<String> {
 
 fn alias_from_stem(stem: &str) -> Option<String> {
     let lower = stem.to_ascii_lowercase();
-    if lower == "lpm" || lower.starts_with("lpm-") {
+    if lower == "lpm" || lower.starts_with("lpm-") || lower == "lpx" {
         None
     } else {
         Some(stem.to_string())
     }
+}
+
+/** whether this process was started as the lpx launcher (a copy of lpm
+that `self install` drops in ~/.lpm/bin), in which case every CLI
+argument belongs to `lpm execute`. */
+pub fn invoked_as_lpx() -> bool {
+    let Ok(exe) = env::current_exe() else {
+        return false;
+    };
+    exe.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("lpx"))
 }
 
 /** Runs `alias` as a tool shim. on unix the tool replaces this process; the
@@ -83,21 +96,27 @@ pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
 }
 
 /** Which tool an alias means: the nearest lpm.toml walking up from `start`
-whose [tools] lists it wins, then the global tools file. */
-fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error> {
+whose [tools] lists it wins, then the global tools file. None when
+nothing pins it — what `lpm execute` asks before trying shorthands. */
+pub fn find_alias(alias: &str, start: &Path, global: &Path) -> Result<Option<Tool>, Error> {
     for dir in start.ancestors() {
         if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))?
             && let Some(tool) = get_tool(&tools, alias)
         {
-            return Ok(tool.clone());
+            return Ok(Some(tool.clone()));
         }
     }
     if let Some(tools) = tools_in(global)?
         && let Some(tool) = get_tool(&tools, alias)
     {
-        return Ok(tool.clone());
+        return Ok(Some(tool.clone()));
     }
-    Err(Error::ToolNotManaged(alias.to_string()))
+    Ok(None)
+}
+
+/// `find_alias`, with absence as the error a shim exits with.
+fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error> {
+    find_alias(alias, start, global)?.ok_or_else(|| Error::ToolNotManaged(alias.to_string()))
 }
 
 /** Tools visible from `start` through project manifests: the union over
@@ -156,6 +175,9 @@ mod tests {
         assert_eq!(alias_from_stem("LPM"), None);
         // release assets run before `self install` renames them.
         assert_eq!(alias_from_stem("lpm-windows-x86_64"), None);
+        // the lpx launcher is the CLI too, never a tool shim.
+        assert_eq!(alias_from_stem("lpx"), None);
+        assert_eq!(alias_from_stem("LPX"), None);
         assert_eq!(alias_from_stem("rojo"), Some("rojo".to_string()));
         assert_eq!(alias_from_stem("StyLua"), Some("StyLua".to_string()));
     }

@@ -66,6 +66,20 @@ Points your VS Code (or Insiders / VSCodium / Cursor) settings at the
 [lpm.toml schema](https://luaupm.com/lpm.schema.json). Comments and existing
 entries in `settings.json` survive the edit.
 
+## `lpx`: run without installing
+
+```sh
+lpx create-chief-project my-game    # scaffold a project, zero setup
+lpx stylua --check .                # one-off run of any released tool
+lpx JohnnyMorganz/StyLua@2.0.2 .    # any GitHub repo, exact versions too
+```
+
+`lpx` (installed by `self install`, same command as `lpm x`) downloads a
+GitHub-released executable on first use, caches it under `~/.lpm/tools`, and
+hands your terminal straight to it — nothing is added to any manifest. Names
+pinned under `[tools]` run their pinned version; other bare names come from
+lpm's shorthand list; anything else is `owner/repo`.
+
 ## Docs
 
 Commands, the manifest, workspaces, publishing — everything lives at
