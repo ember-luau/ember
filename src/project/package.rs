@@ -643,6 +643,36 @@ mod tests {
         assert_eq!(bracket_depth("plain"), 0);
     }
 
+    /** the guard's own ceiling, parsed for real.
+
+    `absurdly_nested_sources_are_refused_not_crashed` covers depth 2000 (refused
+    before the parser runs) and depth 100 (parses comfortably), which leaves the
+    case that actually costs the most stack — one notch under MAX_NESTING_DEPTH,
+    so it clears the guard and then recurses all the way down — untested.
+
+    that gap is worth closing because the margin is a budget with a compiler on
+    the other side of it: PARSE_STACK_BYTES against however many bytes per
+    recursion level full_moon compiles down to, and inlining decisions move the
+    second number. lto, opt-level, and a toolchain bump all change inlining, and
+    the failure mode is a stack overflow, which aborts the process and cannot be
+    caught (see MAX_NESTING_DEPTH's comment). run this under `--release` as well
+    as dev: a dev-profile pass proves nothing about a release inlining change. */
+    #[test]
+    fn nesting_just_under_the_ceiling_still_parses() {
+        let depth = MAX_NESTING_DEPTH - 5;
+        let deep = format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(depth),
+            " }".repeat(depth)
+        );
+        // the fixture is only meaningful if it gets past the guard and reaches full_moon
+        assert!(bracket_depth(&deep) <= MAX_NESTING_DEPTH);
+        assert_eq!(
+            exported_types(&deep).unwrap(),
+            ["export type Deep = module.Deep"]
+        );
+    }
+
     #[test]
     fn extracts_exported_types_for_reexport() {
         let source = r#"
