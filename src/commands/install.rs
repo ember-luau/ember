@@ -45,10 +45,14 @@ pub struct InstallArgs {
 struct Job {
     name: String,
     version: String,
+    /// the package's own environment; None = detect from the archive.
     environment: Option<Environment>,
+    /// the output root: the environment of the dependency tree's root.
+    context: Environment,
     source: index::DownloadSource,
     index_url: String,
-    link: String,
+    /// top-level link name; None for transitives, which never get one.
+    link: Option<String>,
     /// [overrides]-rewritten edges of this package: declared alias -> replacement name.
     redirects: BTreeMap<String, String>,
 }
@@ -120,13 +124,22 @@ fn install_project(
     let state_inputs = state_inputs(include_global_tools);
 
     let jobs: Vec<Job> = if args.locked {
-        Lockfile::load()?
-            .packages
+        let lock = Lockfile::load()?;
+        /* a v1 lock predates contexts: replaying it would scatter a
+        dependent and its deps across environment roots, and the nested
+        pass (which looks up within one context) would silently link
+        nothing. --locked never rewrites the lock, so refuse loudly
+        instead of shipping a broken tree forever */
+        if lock.version < 2 {
+            return Err(Error::LockfileOutdated(lock.version));
+        }
+        lock.packages
             .into_iter()
             .map(|package| Job {
                 name: package.name,
                 version: package.version,
                 environment: Some(package.environment),
+                context: package.context.unwrap_or(package.environment),
                 source: package.source,
                 index_url: package.index,
                 link: package.link,
@@ -156,6 +169,7 @@ fn install_project(
                 name: package.name,
                 version: package.version.to_string(),
                 environment: package.environment,
+                context: package.context,
                 source: package.source,
                 index_url: package.index_url,
                 link: package.link,
@@ -163,6 +177,10 @@ fn install_project(
             })
             .collect()
     };
+
+    /* two [config] keys pointed at one folder would let one context's
+    storage silently overwrite the other's; refuse before touching disk */
+    assert_distinct_roots(manifest, &jobs)?;
 
     /* the recheck half of the fast path: local inputs were unchanged but
     the indices were stale, so resolution ran fresh (pulling them). when it
@@ -216,16 +234,18 @@ fn install_project(
                 name: package.name.to_lowercase(),
                 storage: PathBuf::from(path),
                 environment: package.environment,
+                context: package.context(),
                 in_place: true,
                 redirects: package.redirects.clone(),
             },
             _ => StoredPackage {
                 name: package.name.to_lowercase(),
                 storage: manifest
-                    .packages_out(package.environment)
+                    .packages_out(package.context())
                     .join(".lpm")
                     .join(package.name.replace('/', "_")),
                 environment: package.environment,
+                context: package.context(),
                 in_place: false,
                 redirects: package.redirects.clone(),
             },
@@ -236,8 +256,9 @@ fn install_project(
     ui::timing("nested-links", nested_started);
 
     let package_count = locked.len();
+    // stamps land in the folders actually written: the contexts
     let environments: BTreeSet<Environment> =
-        locked.iter().map(|package| package.environment).collect();
+        locked.iter().map(|package| package.context()).collect();
     if !args.locked {
         // written even when empty, so lpm.lock always mirrors the manifest
         Lockfile::new(locked).save()?;
@@ -313,7 +334,11 @@ fn state_hash(manifest_text: &str, lock_text: &str, tools_text: &str) -> String 
         lock_text.as_bytes(),
         tools_text.as_bytes(),
     ]);
-    format!("lpm-state-v1:{hash:016x}\n")
+    /* v2: bumped with the self-contained-roots layout change, so every
+    project's first install under the new binary misses its old stamps and
+    rebuilds into the new layout — the fast path can't skip past a
+    migration it can't see in its inputs */
+    format!("lpm-state-v2:{hash:016x}\n")
 }
 
 /** the manifest and global-tools inputs of the state hash, as text. read
@@ -407,7 +432,7 @@ fn fast_path(
     let environments: BTreeSet<Environment> = lock
         .packages
         .iter()
-        .map(|package| package.environment)
+        .map(|package| package.context())
         .collect();
     for environment in environments {
         let stamp = manifest
@@ -446,25 +471,57 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
     if jobs.len() != lock.packages.len() {
         return false;
     }
-    let by_name: HashMap<&str, &LockedPackage> = lock
+    /* keyed by (name, context): one package may be locked once per
+    environment root, and each copy has to match its own entry */
+    let by_key: HashMap<(&str, Environment), &LockedPackage> = lock
         .packages
         .iter()
-        .map(|package| (package.name.as_str(), package))
+        .map(|package| ((package.name.as_str(), package.context()), package))
         .collect();
     jobs.iter().all(|job| {
-        by_name.get(job.name.as_str()).is_some_and(|locked| {
-            job.version == locked.version
-                && job.link == locked.link
-                && job.index_url == locked.index
-                && job.source == locked.source
-                /* redirects shape the nested links on disk; an [overrides]
-                edit that lands on the same versions still has to rebuild */
-                && job.redirects == locked.redirects
-                && job
-                    .environment
-                    .is_none_or(|environment| environment == locked.environment)
-        })
+        by_key
+            .get(&(job.name.as_str(), job.context))
+            .is_some_and(|locked| {
+                job.version == locked.version
+                    && job.link == locked.link
+                    && job.index_url == locked.index
+                    && job.source == locked.source
+                    /* redirects shape the nested links on disk; an [overrides]
+                    edit that lands on the same versions still has to rebuild */
+                    && job.redirects == locked.redirects
+                    && job
+                        .environment
+                        .is_none_or(|environment| environment == locked.environment)
+            })
     })
+}
+
+/** refuses an install whose contexts map to one output folder: `[config]`
+lets users repoint each environment's out dir, and two contexts sharing a
+folder would race their `.lpm` stores against each other. */
+fn assert_distinct_roots(manifest: &Manifest, jobs: &[Job]) -> Result<(), Error> {
+    let contexts: Vec<Environment> = jobs
+        .iter()
+        .map(|job| job.context)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for (position, first) in contexts.iter().enumerate() {
+        for second in &contexts[position + 1..] {
+            let out_first = std::path::absolute(manifest.packages_out(*first));
+            let out_second = std::path::absolute(manifest.packages_out(*second));
+            if let (Ok(out_first), Ok(out_second)) = (out_first, out_second)
+                && out_first == out_second
+            {
+                return Err(Error::PackagesOutCollision {
+                    first: *first,
+                    second: *second,
+                    path: out_first.display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /** the tail every skipped install shares: verify the pinned tools (a few
@@ -571,7 +628,14 @@ fn install_packages(
                     let next = queue.lock().expect("job queue lock").pop_front();
                     let Some((slot, job)) = next else { break };
 
-                    let staging = staging_root.join(job.name.replace('/', "_"));
+                    /* context-suffixed: the same package installing under
+                    two roots is two concurrent jobs, and they must not
+                    tear down each other's staging */
+                    let staging = staging_root.join(format!(
+                        "{}_{}",
+                        job.name.replace('/', "_"),
+                        job.context.dir_name()
+                    ));
                     let result = install_one(manifest, &job, &staging, cache, bar);
                     if result.is_err() {
                         failed.store(true, Ordering::Relaxed);
@@ -601,11 +665,16 @@ fn install_packages(
                         continue;
                     }
                     bar.set_message(job.name.clone());
+                    // transitives have no link; show where they landed instead
+                    let shown = job
+                        .link
+                        .clone()
+                        .unwrap_or_else(|| format!(".lpm/{}", job.name.replace('/', "_")));
                     ui::bar_println(
                         bar,
                         &ui::success_line(&format!(
-                            "{}@{} → {}/{}",
-                            job.name, job.version, extracted.environment, job.link
+                            "{}@{} → {}/{shown}",
+                            job.name, job.version, job.context
                         )),
                     );
                     bar.inc(1);
@@ -613,6 +682,7 @@ fn install_packages(
                         name: job.name,
                         version: job.version,
                         environment: extracted.environment,
+                        context: (job.context != extracted.environment).then_some(job.context),
                         link: job.link,
                         index: job.index_url,
                         redirects: job.redirects,
@@ -680,12 +750,14 @@ fn install_one(
             .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
     };
 
-    /* real contents live under <out>/.lpm/<scope>_<name>/. workers race to
-    create the same .lpm parent (create_dir_all treats existing as success)
-    and Windows occasionally answers concurrent creation or a fresh rename
-    with a transient denial worth one retry */
+    /* real contents live under <out>/.lpm/<scope>_<name>/ — <out> being the
+    CONTEXT's folder, not the package's own environment: each root is
+    self-contained, so a server package's shared deps stay under server.
+    workers race to create the same .lpm parent (create_dir_all treats
+    existing as success) and Windows occasionally answers concurrent
+    creation or a fresh rename with a transient denial worth one retry */
     let folder = job.name.replace('/', "_");
-    let out = manifest.packages_out(environment);
+    let out = manifest.packages_out(job.context);
     let storage = out.join(".lpm").join(&folder);
     with_retry(|| fs::create_dir_all(storage.parent().expect("storage dir has a parent")))?;
     if storage.exists() {
@@ -732,24 +804,29 @@ fn with_retry(operation: impl Fn() -> std::io::Result<()>) -> std::io::Result<()
 }
 
 /** the consumer-level `<out>/<link>.luau` for one extracted package;
-runs on the main thread once a worker reports in. */
+runs on the main thread once a worker reports in. only direct
+dependencies (link = Some) get one — transitives are reachable through
+their dependents' nested links alone. */
 fn write_registry_link(
     manifest: &Manifest,
     job: &Job,
     extracted: &Extracted,
     bar: &ProgressBar,
 ) -> Result<(), Error> {
-    match &extracted.entry {
-        Some(entry) => {
-            let out = manifest.packages_out(extracted.environment);
+    match (&job.link, &extracted.entry) {
+        (Some(link), Some(entry)) => {
+            let out = manifest.packages_out(job.context);
             let folder = job.name.replace('/', "_");
-            let link_path = out.join(format!("{}.luau", job.link));
+            let link_path = out.join(format!("{link}.luau"));
             fs::write(
                 &link_path,
                 package::link_contents(&folder, entry, &extracted.types),
             )?;
         }
-        None => warn_no_entry(&job.name, bar),
+        // entry-less packages warn even without a link to write: nothing
+        // else warns when the only dependent links in place
+        (_, None) => warn_no_entry(&job.name, bar),
+        (None, Some(_)) => {}
     }
     Ok(())
 }
@@ -769,11 +846,11 @@ fn link_workspace_member(
     let environment = job
         .environment
         .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?;
-    let out = manifest.packages_out(environment);
+    let out = manifest.packages_out(job.context);
     fs::create_dir_all(&out)?;
 
-    match package::entry_point(member_dir) {
-        Some(entry) => {
+    match (&job.link, package::entry_point(member_dir)) {
+        (Some(link), Some(entry)) => {
             let mut require = workspace::relative_path(&out, member_dir);
             if !entry.is_empty() {
                 require = format!("{require}/{entry}");
@@ -782,23 +859,30 @@ fn link_workspace_member(
                 require = format!("./{require}");
             }
             let types = link_types(member_dir, &entry, &job.name, &mut bar_warn(bar));
-            let link_path = out.join(format!("{}.luau", job.link));
+            let link_path = out.join(format!("{link}.luau"));
             fs::write(&link_path, package::link_contents_at(&require, &types))?;
         }
-        None => warn_no_entry(&job.name, bar),
+        (_, None) => warn_no_entry(&job.name, bar),
+        // a transitively-pulled member: link targets exist, no link written
+        (None, Some(_)) => {}
     }
 
+    let shown = job
+        .link
+        .clone()
+        .unwrap_or_else(|| job.name.replace('/', "_"));
     ui::bar_println(
         bar,
         &ui::success_line(&format!(
-            "{}@{} → {}/{} (workspace)",
-            job.name, job.version, environment, job.link
+            "{}@{} → {}/{shown} (workspace)",
+            job.name, job.version, job.context
         )),
     );
     Ok(LockedPackage {
         name: job.name,
         version: job.version,
         environment,
+        context: (job.context != environment).then_some(job.context),
         link: job.link,
         index: job.index_url,
         redirects: job.redirects,
@@ -810,9 +894,12 @@ fn link_workspace_member(
 struct StoredPackage {
     /// lowercased "scope/name", the form dependency declarations resolve by
     name: String,
-    /// where the contents live: <out>/.lpm/<scope>_<name>, or a member's own directory
+    /// where the contents live: <context out>/.lpm/<scope>_<name>, or a member's own directory
     storage: PathBuf,
+    /// the package's own environment: names the nested-link folder dependents use
     environment: Environment,
+    /// the environment root it installed under; lookups stay within one context
+    context: Environment,
     /// a workspace member: fine to link *to*, never written into
     in_place: bool,
     /** [overrides]-rewritten edges: declared alias -> replacement package
@@ -833,14 +920,21 @@ nothing here is fatal: the install has already downloaded and extracted
 everything, so a package that can't be linked warns and is skipped rather
 than taking the whole run (and the lockfile write that follows) with it. */
 fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(String)) {
-    let by_name: HashMap<&str, &StoredPackage> = packages
+    /* keyed by (name, context): a dependent only ever links dependencies
+    installed in its own tree, which is what keeps every require inside
+    one output root */
+    let by_name: HashMap<(&str, Environment), &StoredPackage> = packages
         .iter()
-        .map(|package| (package.name.as_str(), package))
+        .map(|package| ((package.name.as_str(), package.context), package))
         .collect();
-    // exported types depend only on the dependency, so parse each once
-    let mut types_cache: HashMap<String, Vec<String>> = HashMap::new();
+    /* exported types depend on the dependency AND its context: the same
+    name can resolve to different targets (different archives) per tree */
+    let mut types_cache: HashMap<(String, Environment), Vec<String>> = HashMap::new();
 
     for package in packages.iter().filter(|package| !package.in_place) {
+        /* alias -> environment folder, for the escape-require rewrite
+        below; only aliases that actually linked make it in */
+        let mut escape_aliases: BTreeMap<String, String> = BTreeMap::new();
         for (alias, declared) in package::declared_dependencies(&package.storage) {
             /* the shipped manifest declares the ORIGINAL package; an
             [overrides] redirect on this edge means the alias must link to
@@ -859,7 +953,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 ));
                 continue;
             }
-            let Some(dep) = by_name.get(dependency.as_str()) else {
+            let Some(dep) = by_name.get(&(dependency.as_str(), package.context)) else {
                 warn(format!(
                     "warning: {} declares dependency {dependency} which is not installed; no nested link generated",
                     package.name
@@ -902,7 +996,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             }
 
             let types = types_cache
-                .entry(dependency.clone())
+                .entry((dependency.clone(), package.context))
                 .or_insert_with(|| {
                     /* install_packages already parsed (and complained about)
                     every stored entry point, so no warn sink here: it would
@@ -914,12 +1008,33 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 })
                 .clone();
             let link_path = link_dir.join(format!("{alias}.luau"));
-            if let Err(error) = fs::write(&link_path, package::link_contents_at(&require, &types)) {
-                warn(format!(
+            match fs::write(&link_path, package::link_contents_at(&require, &types)) {
+                /* only now is the alias safe to retarget escape requires
+                at: rewriting toward a link that failed to write would
+                turn a maybe-working chain into a certainly-broken one */
+                Ok(()) => {
+                    escape_aliases.insert(alias.clone(), dep.environment.dir_name().to_string());
+                }
+                Err(error) => warn(format!(
                     "warning: could not write {} ({error})",
                     link_path.display()
-                ));
+                )),
             }
+        }
+
+        /* the second half of the instance-require rewrite: chains that
+        climb into wally's alias zone couldn't be mapped on the workers
+        (dependency environments were unknown); with this package's nested
+        links decided, retarget them at packages/<env>/<alias> */
+        if !escape_aliases.is_empty()
+            && let Some(entry) = package::entry_point(&package.storage)
+            && let Err(error) =
+                requires::rewrite_escape_requires(&package.storage, &entry, &escape_aliases)
+        {
+            warn(format!(
+                "warning: could not rewrite requires in {} ({error})",
+                package.name
+            ));
         }
     }
 }
@@ -1014,7 +1129,7 @@ mod tests {
     #[test]
     fn state_hash_tracks_every_input() {
         let base = state_hash("manifest", "lock", "tools");
-        assert!(base.starts_with("lpm-state-v1:"));
+        assert!(base.starts_with("lpm-state-v2:"));
         assert_eq!(base, state_hash("manifest", "lock", "tools"));
 
         // each input moves the hash, and boundaries are unambiguous
@@ -1058,24 +1173,27 @@ mod tests {
             name: "acme/thing".to_string(),
             version: version.to_string(),
             environment: None,
+            context: Environment::Shared,
             source: index::DownloadSource::Zip {
                 url: url.to_string(),
             },
             index_url: "https://example.com/index".to_string(),
-            link: "thing".to_string(),
+            link: Some("thing".to_string()),
             redirects: BTreeMap::new(),
         };
-        let lock = Lockfile::new(vec![LockedPackage {
+        let locked = |context: Option<Environment>| LockedPackage {
             name: "acme/thing".to_string(),
             version: "1.0.0".to_string(),
             environment: Environment::Shared,
-            link: "thing".to_string(),
+            context,
+            link: Some("thing".to_string()),
             index: "https://example.com/index".to_string(),
             redirects: BTreeMap::new(),
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
-        }]);
+        };
+        let lock = Lockfile::new(vec![locked(None)]);
 
         // identical resolution: rebuild skippable (env None tolerated)
         assert!(jobs_match_lock(
@@ -1101,6 +1219,115 @@ mod tests {
         let mut shared = job("1.0.0", "https://example.com/thing/1.0.0");
         shared.environment = Some(Environment::Shared);
         assert!(jobs_match_lock(&[shared], &lock));
+
+        // a moved context or a dropped link is a layout change: rebuild
+        let mut moved = job("1.0.0", "https://example.com/thing/1.0.0");
+        moved.context = Environment::Server;
+        assert!(!jobs_match_lock(&[moved], &lock));
+        let mut unlinked = job("1.0.0", "https://example.com/thing/1.0.0");
+        unlinked.link = None;
+        assert!(!jobs_match_lock(&[unlinked], &lock));
+
+        /* one package under two contexts matches a two-entry lock — keyed
+        by name alone the entries would collapse and never match */
+        let two_contexts = Lockfile::new(vec![locked(None), locked(Some(Environment::Server))]);
+        let mut server_copy = job("1.0.0", "https://example.com/thing/1.0.0");
+        server_copy.context = Environment::Server;
+        assert!(jobs_match_lock(
+            &[job("1.0.0", "https://example.com/thing/1.0.0"), server_copy],
+            &two_contexts
+        ));
+    }
+
+    #[test]
+    fn top_level_links_are_for_direct_dependencies_only() {
+        let base = std::env::temp_dir().join("lpm-test-top-links");
+        let _ = fs::remove_dir_all(&base);
+        let out = base.join("packages/shared");
+        fs::create_dir_all(&out).unwrap();
+        let manifest: Manifest = toml::from_str(&format!(
+            "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
+             shared-packages-out = \"{}/packages/shared\"\n",
+            base.to_string_lossy().replace('\\', "/")
+        ))
+        .unwrap();
+        let job = |link: Option<&str>| Job {
+            name: "acme/thing".to_string(),
+            version: "1.0.0".to_string(),
+            environment: Some(Environment::Shared),
+            context: Environment::Shared,
+            source: index::DownloadSource::Zip {
+                url: "https://example.com/thing/1.0.0".to_string(),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: link.map(str::to_string),
+            redirects: BTreeMap::new(),
+        };
+        let extracted = |entry: Option<&str>| Extracted {
+            environment: Environment::Shared,
+            entry: entry.map(str::to_string),
+            types: Vec::new(),
+        };
+        let bar = ProgressBar::hidden();
+
+        // a direct dependency gets its consumer-level link
+        write_registry_link(&manifest, &job(Some("thing")), &extracted(Some("")), &bar).unwrap();
+        let link = fs::read_to_string(out.join("thing.luau")).unwrap();
+        assert!(link.contains("./.lpm/acme_thing"), "{link}");
+
+        // a transitive writes nothing at the top level
+        write_registry_link(&manifest, &job(None), &extracted(Some("")), &bar).unwrap();
+        // an entry-less package (direct or not) writes nothing either
+        write_registry_link(&manifest, &job(Some("broken")), &extracted(None), &bar).unwrap();
+        let files: Vec<String> = fs::read_dir(&out)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, ["thing.luau"]);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn colliding_output_roots_are_refused() {
+        let manifest: Manifest = toml::from_str(
+            "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
+             shared-packages-out = \"packages/everything\"\n\
+             server-packages-out = \"packages/everything\"\n",
+        )
+        .unwrap();
+        let job = |context: Environment| Job {
+            name: "acme/thing".to_string(),
+            version: "1.0.0".to_string(),
+            environment: None,
+            context,
+            source: index::DownloadSource::Zip {
+                url: "https://example.com/thing/1.0.0".to_string(),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: None,
+            redirects: BTreeMap::new(),
+        };
+
+        // one context: no collision possible, whatever [config] says
+        assert!(assert_distinct_roots(&manifest, &[job(Environment::Shared)]).is_ok());
+        // two contexts mapped onto one folder must refuse the install
+        assert!(matches!(
+            assert_distinct_roots(
+                &manifest,
+                &[job(Environment::Shared), job(Environment::Server)]
+            ),
+            Err(Error::PackagesOutCollision { .. })
+        ));
+        // distinct folders stay fine
+        assert!(
+            assert_distinct_roots(
+                &manifest,
+                &[job(Environment::Shared), job(Environment::Lune)]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1155,11 +1382,21 @@ mod tests {
     }
 
     fn stored(name: &str, storage: PathBuf, environment: Environment) -> StoredPackage {
+        stored_in(name, storage, environment, environment)
+    }
+
+    fn stored_in(
+        name: &str,
+        storage: PathBuf,
+        environment: Environment,
+        context: Environment,
+    ) -> StoredPackage {
         StoredPackage {
             // production lowercases here; mirror that so the tests exercise it
             name: name.to_lowercase(),
             storage,
             environment,
+            context,
             in_place: false,
             redirects: BTreeMap::new(),
         }
@@ -1170,11 +1407,11 @@ mod tests {
         let base = std::env::temp_dir().join("lpm-test-nested-links");
         let _ = fs::remove_dir_all(&base);
         let shared = base.join("packages/shared");
-        let luau = base.join("packages/luau");
 
-        /* chief-shaped fixture: `lifecycles` depends on same-environment
-        `core` (which exports a type) and cross-environment `util` (whose
-        entry is its root init file) */
+        /* chief-shaped fixture: `lifecycles` depends on `core` (which
+        exports a type) and on `util`, a luau-environment package pulled
+        into the shared tree — same context, so its storage sits in the
+        shared root while its link folder keeps the luau name */
         let core = shared.join(".lpm/acme_core");
         write(&core, "lpm.toml", "[target]\nmain = \"out/lpm\"\n");
         write(
@@ -1182,7 +1419,7 @@ mod tests {
             "out/lpm/init.luau",
             "export type Entry = { id: number }\nreturn {}\n",
         );
-        let util = luau.join(".lpm/acme_util");
+        let util = shared.join(".lpm/acme_util");
         write(&util, "init.luau", "return {}\n");
         let lifecycles = shared.join(".lpm/acme_lifecycles");
         write(
@@ -1195,7 +1432,7 @@ mod tests {
 
         let packages = [
             stored("Acme/Core", core.clone(), Environment::Shared),
-            stored("acme/util", util, Environment::Luau),
+            stored_in("acme/util", util, Environment::Luau, Environment::Shared),
             stored("acme/lifecycles", lifecycles.clone(), Environment::Shared),
         ];
         let mut warnings = Vec::new();
@@ -1210,14 +1447,63 @@ mod tests {
              export type Entry = module.Entry\n\
              return module\n"
         );
-        /* the cross-environment link climbs out to the other output root;
-        a root-init entry adds no suffix */
+        /* the luau-environment dependency: the link folder keeps the
+        dependency's own environment name, but its target stays inside
+        this same output root — no `..` ever escapes it */
         assert_eq!(
             fs::read_to_string(lifecycles.join("packages/luau/util.luau")).unwrap(),
-            "return require(\"../../../../../luau/.lpm/acme_util\")\n"
+            "return require(\"../../../acme_util\")\n"
         );
         // packages without dependencies get no packages/ folder at all
         assert!(!core.join("packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn contexts_keep_their_trees_apart() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-contexts");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+        let server = base.join("packages/server");
+
+        /* the same dependency name installed under both roots: each
+        consumer must link the copy in its OWN tree */
+        let shared_dep = shared.join(".lpm/acme_dep");
+        write(&shared_dep, "init.luau", "return { tree = \"shared\" }\n");
+        let server_dep = server.join(".lpm/acme_dep");
+        write(&server_dep, "init.luau", "return { tree = \"server\" }\n");
+        let consumer = server.join(".lpm/acme_service");
+        write(
+            &consumer,
+            "lpm.toml",
+            "[dependencies]\ndep = { name = \"acme/dep\", version = \"^\" }\n",
+        );
+        write(&consumer, "init.luau", "return {}\n");
+
+        let packages = [
+            stored("acme/dep", shared_dep, Environment::Shared),
+            stored_in(
+                "acme/dep",
+                server_dep,
+                Environment::Shared,
+                Environment::Server,
+            ),
+            stored_in(
+                "acme/service",
+                consumer.clone(),
+                Environment::Server,
+                Environment::Server,
+            ),
+        ];
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        /* the link folder is named for the dep's own environment (shared),
+        but the require resolves within the server root */
+        let link = fs::read_to_string(consumer.join("packages/shared/dep.luau")).unwrap();
+        assert_eq!(link, "return require(\"../../../acme_dep\")\n");
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1334,6 +1620,7 @@ mod tests {
                 name: "acme/core".to_string(),
                 storage: member.clone(),
                 environment: Environment::Shared,
+                context: Environment::Shared,
                 in_place: true,
                 redirects: BTreeMap::new(),
             },

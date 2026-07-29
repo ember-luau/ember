@@ -1,7 +1,6 @@
 use crate::error::Error;
 use crate::project::manifest::{
     Dependency, Environment, Manifest, Override, override_paths, parse_version_req,
-    split_package_name,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::{DownloadSource, Index, Refresh};
@@ -15,11 +14,17 @@ pub struct ResolvedInstall {
     pub version: semver::Version,
     /// None means the environment must be detected from the extracted files.
     pub environment: Option<Environment>,
+    /** The environment root this package installs under: the environment of
+    the direct dependency whose subtree discovered it. Every root is
+    self-contained — a server package's shared dependencies live under
+    packages/server — so one package can resolve once per context. */
+    pub context: Environment,
     pub source: DownloadSource,
     pub index_url: String,
-    /** Name of the generated link file: the [dependencies] alias for direct
-    deps, the package's short name for transitive ones. */
-    pub link: String,
+    /** Name of the generated top-level link file: the [dependencies] alias
+    for direct deps. None for transitives — only declared dependencies are
+    part of the project's require surface. */
+    pub link: Option<String>,
     /** Edges of THIS package that [overrides] rewrote: its declared alias ->
     the replacement's package name. The nested-link pass reads a package's
     declared dependencies back off disk by name, so a name-changing override
@@ -39,6 +44,19 @@ enum Request {
     the specifier is ignored locally; you get the member's current version
     (the req only matters when publishing). */
     Workspace,
+}
+
+/// One dependency waiting to resolve.
+struct QueueEntry {
+    name: String,
+    request: Request,
+    /// manifest alias for direct deps (their top-level link); None for transitives.
+    link: Option<String>,
+    /// alias path from the root, for [overrides] matching and diagnostics.
+    alias_path: Vec<String>,
+    /** the inherited install root. None only for seeds, whose own resolve
+    decides it — by the time children are queued, it's always known. */
+    context: Option<Environment>,
 }
 
 /** Resolves the manifest's dependency graph breadth-first. Transitive deps
@@ -103,56 +121,99 @@ fn resolve_once(
     }
     let mut overrides_matched: HashSet<Vec<String>> = HashSet::new();
     /* enough breadcrumbs to say WHY an override never fired: every queued
-    edge path and its package, and the one path each package was walked
-    under (children are only enumerated on first discovery) */
+    edge path and its package, the one path each package was walked under
+    per context (children are enumerated once per context), and each root
+    alias's context, so diagnostics look in the right tree */
     let mut discovered: HashMap<Vec<String>, String> = HashMap::new();
-    let mut walked_at: HashMap<String, Vec<String>> = HashMap::new();
+    let mut walked_at: HashMap<(String, Environment), Vec<String>> = HashMap::new();
+    let mut seed_contexts: HashMap<String, Environment> = HashMap::new();
 
-    let mut queue: VecDeque<(String, Request, Option<String>, Vec<String>)> = VecDeque::new();
+    let mut queue: VecDeque<QueueEntry> = VecDeque::new();
 
     /* Seed all direct deps before any transitive one is discovered: first
-    entry per name wins, so a package that also shows up transitively
-    still links under its manifest alias. */
+    entry per (name, context) wins, so a package that also shows up
+    transitively still links under its manifest alias. */
     for (alias, dependency) in &manifest.dependencies {
         let name = dependency_name(dependency).to_lowercase();
         discovered.insert(vec![alias.clone()], name.clone());
-        queue.push_back((
+        queue.push_back(QueueEntry {
             name,
-            request_for(dependency, manifest)?,
-            Some(alias.clone()),
-            vec![alias.clone()],
-        ));
+            request: request_for(dependency, manifest)?,
+            link: Some(alias.clone()),
+            alias_path: vec![alias.clone()],
+            context: None,
+        });
     }
 
-    /* name -> (what we resolved, the req that won). BTreeMap keeps the
-    install set, and the lockfile written from it, in name order. */
-    let mut resolved: BTreeMap<String, (ResolvedInstall, String)> = BTreeMap::new();
+    /* (name, context) -> (what we resolved, the req that won). BTreeMap
+    keeps the install set, and the lockfile written from it, in name order
+    (context breaking ties). one package may appear once per context:
+    every environment root is self-contained, wally-style. */
+    let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String)> = BTreeMap::new();
 
-    while let Some((name, request, link, alias_path)) = queue.pop_front() {
+    while let Some(QueueEntry {
+        name,
+        request,
+        link,
+        alias_path,
+        context,
+    }) = queue.pop_front()
+    {
         let req_text = match &request {
             Request::Registry { req_text, .. } => req_text.clone(),
             Request::Workspace => "*".to_string(),
         };
         let req = parse_version_req(&req_text)?;
 
-        if let Some((existing, first_req)) = resolved.get(&name) {
+        /* transitives inherit their context, so their dedup gate runs
+        before any network; a seed's context is decided by its own resolve,
+        so its gate has to wait until just after (below) */
+        if let Some(context) = context
+            && let Some((existing, first_req)) = resolved.get(&(name.clone(), context))
+        {
             if req.matches(&existing.version) {
                 continue;
             }
             return Err(Error::DependencyConflict {
                 name,
+                context,
                 first: first_req.clone(),
                 second: req_text,
             });
         }
 
-        walked_at.entry(name.clone()).or_insert(alias_path.clone());
-        let mut redirects: BTreeMap<String, String> = BTreeMap::new();
+        /* a workspace member shadows the registry copy of its name in
+        EVERY context: the member is the copy being developed, and a
+        server tree quietly pulling the published version while shared
+        uses the local one would split the two. seeds all resolve before
+        any transitive pops, so a seeded member is always visible here. */
+        let request = match request {
+            Request::Registry { .. }
+                if resolved.iter().any(|((resolved_name, _), (install, _))| {
+                    *resolved_name == name
+                        && matches!(install.source, DownloadSource::Workspace { .. })
+                }) =>
+            {
+                Request::Workspace
+            }
+            request => request,
+        };
 
-        let install = match request {
+        /* children are collected, not queued: whether this package's edges
+        walk at all is decided by the gates, and the side effects (matched
+        overrides, discovered paths, redirects) must not land for a walk
+        that never happens */
+        let mut redirects: BTreeMap<String, String> = BTreeMap::new();
+        let mut pending_matched: Vec<Vec<String>> = Vec::new();
+        let mut pending_discovered: Vec<(Vec<String>, String)> = Vec::new();
+        let mut children: Vec<(String, Request, Vec<String>)> = Vec::new();
+
+        let (version, environment, source, index_url) = match request {
             Request::Registry { index_url, .. } => {
                 let index = open_index(&mut indices, &index_url, refresh, ttl_skipped)?;
-                let package = index.resolve(&name, &req, prefer_environment)?;
+                /* a multi-target entry should pick the target of the tree
+                it installs into; seeds fall back to the project's own */
+                let package = index.resolve(&name, &req, context.or(prefer_environment))?;
 
                 for dependency in &package.dependencies {
                     let mut child_path = alias_path.clone();
@@ -160,7 +221,7 @@ fn resolve_once(
 
                     let (child_name, child_request) = match overrides.get(&child_path) {
                         Some((child_name, child_request)) => {
-                            overrides_matched.insert(child_path.clone());
+                            pending_matched.push(child_path.clone());
                             redirects.insert(dependency.alias.clone(), child_name.clone());
                             (child_name.clone(), child_request.clone())
                         }
@@ -175,19 +236,16 @@ fn resolve_once(
                             },
                         ),
                     };
-                    discovered.insert(child_path.clone(), child_name.clone());
-                    queue.push_back((child_name, child_request, None, child_path));
+                    pending_discovered.push((child_path.clone(), child_name.clone()));
+                    children.push((child_name, child_request, child_path));
                 }
 
-                ResolvedInstall {
-                    name: name.clone(),
-                    version: package.version,
-                    environment: package.environment,
-                    source: package.source,
+                (
+                    package.version,
+                    package.environment,
+                    package.source,
                     index_url,
-                    link: String::new(),
-                    redirects: BTreeMap::new(),
-                }
+                )
             }
             Request::Workspace => {
                 let workspace = workspace_context(&mut workspace_memo, manifest, project_dir)?
@@ -212,7 +270,7 @@ fn resolve_once(
 
                     let (child_name, child_request) = match overrides.get(&child_path) {
                         Some((child_name, child_request)) => {
-                            overrides_matched.insert(child_path.clone());
+                            pending_matched.push(child_path.clone());
                             redirects.insert(alias.clone(), child_name.clone());
                             (child_name.clone(), child_request.clone())
                         }
@@ -221,36 +279,85 @@ fn resolve_once(
                             request_for(dependency, &member.manifest)?,
                         ),
                     };
-                    discovered.insert(child_path.clone(), child_name.clone());
-                    queue.push_back((child_name, child_request, None, child_path));
+                    pending_discovered.push((child_path.clone(), child_name.clone()));
+                    children.push((child_name, child_request, child_path));
                 }
 
                 let path =
                     workspace::relative_path(&std::path::absolute(project_dir)?, &member.dir);
-                ResolvedInstall {
-                    name: name.clone(),
+                (
                     version,
-                    environment: Some(environment),
-                    source: DownloadSource::Workspace { path },
-                    index_url: "workspace".to_string(),
-                    link: String::new(),
-                    redirects: BTreeMap::new(),
-                }
+                    Some(environment),
+                    DownloadSource::Workspace { path },
+                    "workspace".to_string(),
+                )
             }
         };
 
-        let link = link.unwrap_or_else(|| {
-            split_package_name(&name)
-                .map(|(_, short)| short.to_string())
-                .unwrap_or_else(|_| name.replace('/', "_"))
-        });
+        /* a seed's context is its own environment, else the project's —
+        the subtree's placement can't wait for archive extraction */
+        let seeded_here = context.is_none();
+        let context = match context {
+            Some(context) => context,
+            None => seed_context(environment, prefer_environment, &name)?,
+        };
+        if seeded_here {
+            /* recorded even when the gate below dedups, so unmatched-
+            override diagnostics can still find this root's tree */
+            seed_contexts.insert(alias_path[0].clone(), context);
+            if let Some((existing, first_req)) = resolved.get(&(name.clone(), context)) {
+                if req.matches(&existing.version) {
+                    continue; // this tree already walked the package; children drop
+                }
+                return Err(Error::DependencyConflict {
+                    name,
+                    context,
+                    first: first_req.clone(),
+                    second: req_text,
+                });
+            }
+        }
+
+        /* a registry edge shadowed onto a member still states a version
+        requirement; honor it like the dedup gate would have. workspace
+        specifiers' own req is "*", so only converted edges can trip this */
+        if matches!(source, DownloadSource::Workspace { .. }) && !req.matches(&version) {
+            return Err(Error::DependencyConflict {
+                name,
+                context,
+                first: "*".to_string(),
+                second: req_text,
+            });
+        }
+
+        // the walk is real: commit its breadcrumbs and queue the edges
+        walked_at
+            .entry((name.clone(), context))
+            .or_insert(alias_path.clone());
+        overrides_matched.extend(pending_matched);
+        discovered.extend(pending_discovered);
+        for (child_name, child_request, child_path) in children {
+            queue.push_back(QueueEntry {
+                name: child_name,
+                request: child_request,
+                link: None,
+                alias_path: child_path,
+                context: Some(context),
+            });
+        }
+
         resolved.insert(
-            name,
+            (name.clone(), context),
             (
                 ResolvedInstall {
+                    name,
+                    version,
+                    environment,
+                    context,
+                    source,
+                    index_url,
                     link,
                     redirects,
-                    ..install
                 },
                 req_text,
             ),
@@ -271,7 +378,12 @@ fn resolve_once(
         let parent = &path[..path.len() - 1];
         let elsewhere = discovered
             .get(parent)
-            .and_then(|parent_name| walked_at.get(parent_name))
+            .and_then(|parent_name| {
+                /* the tree this path belongs to is its root alias's; a walk
+                of the same package in another context is a different tree */
+                let context = seed_contexts.get(path.first()?)?;
+                walked_at.get(&(parent_name.clone(), *context))
+            })
             .filter(|walked| walked.as_slice() != parent);
         warnings.push(match elsewhere {
             Some(walked) => format!(
@@ -314,6 +426,20 @@ fn overridden_edge(
         dependency_name(dependency).to_lowercase(),
         request_for(dependency, manifest)?,
     ))
+}
+
+/** a seed's context: its own resolved environment, else the project's
+`[target]` one. placement is decided at resolve time (children queue with
+it), so unlike a package's own environment it can never wait for the
+archive to be extracted and inspected. */
+fn seed_context(
+    environment: Option<Environment>,
+    prefer: Option<Environment>,
+    name: &str,
+) -> Result<Environment, Error> {
+    environment
+        .or(prefer)
+        .ok_or_else(|| Error::UnknownPackageEnvironment(name.to_string()))
 }
 
 fn dependency_name(dependency: &Dependency) -> &str {
@@ -416,7 +542,8 @@ mod tests {
         assert_eq!(core.name, "acme/core");
         assert_eq!(core.version, semver::Version::new(1, 2, 0));
         assert_eq!(core.environment, Some(Environment::Shared));
-        assert_eq!(core.link, "core");
+        assert_eq!(core.context, Environment::Shared);
+        assert_eq!(core.link.as_deref(), Some("core"));
         assert!(matches!(
             &core.source,
             DownloadSource::Workspace { path } if path == "../core"
@@ -442,6 +569,288 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seed_contexts_fall_back_to_the_target_environment() {
+        // own environment first, [target] second, then a hard error
+        assert_eq!(
+            seed_context(Some(Environment::Server), Some(Environment::Shared), "a/b").unwrap(),
+            Environment::Server
+        );
+        assert_eq!(
+            seed_context(None, Some(Environment::Lune), "a/b").unwrap(),
+            Environment::Lune
+        );
+        assert!(matches!(
+            seed_context(None, None, "a/b"),
+            Err(Error::UnknownPackageEnvironment(name)) if name == "a/b"
+        ));
+    }
+
+    /** the self-contained-roots contract, against a real local git index:
+    a server seed drags its whole subtree into the server context (its
+    shared deps included), the same package under two roots resolves once
+    per root, and cross-context version divergence is legal where a
+    same-context one conflicts. */
+    #[test]
+    fn contexts_follow_the_dependency_root() {
+        /// removes the fixture dirs even when an assertion panics.
+        struct Cleanup(Vec<std::path::PathBuf>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for dir in &self.0 {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }
+
+        let origin = std::env::temp_dir().join("lpm-test-contexts-origin");
+        let _ = fs::remove_dir_all(&origin);
+        fs::create_dir_all(origin.join("acme")).unwrap();
+        let url = origin.to_string_lossy().replace('\\', "/");
+        let cache = crate::registry::index::cache_dir(&url).unwrap();
+        let _ = fs::remove_dir_all(&cache);
+        let _cleanup = Cleanup(vec![origin.clone(), cache.clone()]);
+
+        let entry = |name: &str, version: &str, realm: &str, dependencies: &str| {
+            format!(
+                "{{\"package\":{{\"name\":\"{name}\",\"version\":\"{version}\",\"realm\":\"{realm}\",\"registry\":\"\"}},\"dependencies\":{{{dependencies}}}}}\n"
+            )
+        };
+        fs::write(
+            origin.join("config.json"),
+            r#"{"api":"https://example.com"}"#,
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/svc"),
+            entry(
+                "acme/svc",
+                "1.0.0",
+                "server",
+                r#""lib":"acme/lib@^1.0.0","pin":"acme/pin@^1.0.0""#,
+            ) + &entry("acme/svc", "2.0.0", "server", ""),
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/lib"),
+            entry("acme/lib", "1.0.0", "shared", ""),
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/pin"),
+            entry("acme/pin", "1.0.0", "shared", "") + &entry("acme/pin", "2.0.0", "shared", ""),
+        )
+        .unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec!["commit", "-m", "fixture"],
+        ] {
+            let mut full = vec![
+                "-C",
+                origin.to_str().unwrap(),
+                "-c",
+                "user.name=lpm-test",
+                "-c",
+                "user.email=lpm-test@localhost",
+            ];
+            full.extend(args);
+            crate::sys::git::run(&full).unwrap();
+        }
+
+        let resolve_with = |dependencies: &str| {
+            let manifest: Manifest = toml::from_str(&format!(
+                "[package]\nname = \"acme/consumer\"\nversion = \"0.1.0\"\n\n\
+                 [indices]\ndefault = \"{url}\"\n\n[dependencies]\n{dependencies}"
+            ))
+            .unwrap();
+            resolve(&manifest, &origin, Refresh::Never, &mut Vec::new())
+        };
+
+        /* svc (server) pulls lib and pin into the server context; lib and
+        pin are ALSO direct shared deps — so both exist twice, once per
+        root, and pin's versions may even diverge across them */
+        let installs = resolve_with(
+            "svc = { name = \"acme/svc\", version = \"^1\" }\n\
+             lib = { name = \"acme/lib\", version = \"^1\" }\n\
+             pin = { name = \"acme/pin\", version = \"^2\" }\n",
+        )
+        .unwrap();
+        let summary: Vec<String> = installs
+            .iter()
+            .map(|install| {
+                format!(
+                    "{}@{} {}/{}",
+                    install.name,
+                    install.version,
+                    install.context,
+                    install.link.as_deref().unwrap_or("-")
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                "acme/lib@1.0.0 shared/lib",
+                "acme/lib@1.0.0 server/-",
+                "acme/pin@2.0.0 shared/pin",
+                "acme/pin@1.0.0 server/-",
+                "acme/svc@1.0.0 server/svc",
+            ]
+        );
+        // every install keeps its own environment for nested-folder naming
+        let server_lib = installs
+            .iter()
+            .find(|install| install.name == "acme/lib" && install.context == Environment::Server)
+            .unwrap();
+        assert_eq!(server_lib.environment, Some(Environment::Shared));
+
+        // within one context, disagreeing requirements still conflict
+        let conflict = resolve_with(
+            "svc = { name = \"acme/svc\", version = \"^1\" }\n\
+             direct = { name = \"acme/svc\", version = \"^2\" }\n",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            conflict,
+            Error::DependencyConflict {
+                context: Environment::Server,
+                ..
+            }
+        ));
+
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /** a workspace member owns its name in every context: a server-tree
+    registry edge naming it binds to the local member (at the member's
+    version), never to the published copy — unless its requirement can't
+    accept the member, which is a conflict, not a silent split. */
+    #[test]
+    fn workspace_members_shadow_registry_copies_in_every_context() {
+        /// removes the fixture dirs even when an assertion panics.
+        struct Cleanup(Vec<std::path::PathBuf>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for dir in &self.0 {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }
+
+        let origin = std::env::temp_dir().join("lpm-test-shadow-origin");
+        let project = std::env::temp_dir().join("lpm-test-shadow-project");
+        let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(origin.join("acme")).unwrap();
+        let url = origin.to_string_lossy().replace('\\', "/");
+        let cache = crate::registry::index::cache_dir(&url).unwrap();
+        let _ = fs::remove_dir_all(&cache);
+        let _cleanup = Cleanup(vec![origin.clone(), project.clone(), cache.clone()]);
+
+        let entry = |name: &str, version: &str, realm: &str, dependencies: &str| {
+            format!(
+                "{{\"package\":{{\"name\":\"{name}\",\"version\":\"{version}\",\"realm\":\"{realm}\",\"registry\":\"\"}},\"dependencies\":{{{dependencies}}}}}\n"
+            )
+        };
+        fs::write(
+            origin.join("config.json"),
+            r#"{"api":"https://example.com"}"#,
+        )
+        .unwrap();
+        // the published copy of the member's name, at an older version
+        fs::write(
+            origin.join("acme/core"),
+            entry("acme/core", "1.0.0", "shared", ""),
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/svc"),
+            entry(
+                "acme/svc",
+                "1.0.0",
+                "server",
+                r#""core":"acme/core@^1.0.0""#,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/strict"),
+            entry(
+                "acme/strict",
+                "1.0.0",
+                "server",
+                r#""core":"acme/core@^9.0.0""#,
+            ),
+        )
+        .unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec!["commit", "-m", "fixture"],
+        ] {
+            let mut full = vec![
+                "-C",
+                origin.to_str().unwrap(),
+                "-c",
+                "user.name=lpm-test",
+                "-c",
+                "user.email=lpm-test@localhost",
+            ];
+            full.extend(args);
+            crate::sys::git::run(&full).unwrap();
+        }
+
+        write(
+            &project.join("packages/core"),
+            "lpm.toml",
+            "[package]\nname = \"acme/core\"\nversion = \"1.2.0\"\n\n\
+             [target]\nenvironment = \"shared\"\n",
+        );
+        let resolve_with = |server_dep: &str| {
+            write(
+                &project,
+                "lpm.toml",
+                &format!(
+                    "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
+                     [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
+                     [indices]\ndefault = \"{url}\"\n\n\
+                     [dependencies]\ncore = {{ workspace = \"acme/core\" }}\n\
+                     {server_dep} = {{ name = \"acme/{server_dep}\", version = \"^1\" }}\n"
+                ),
+            );
+            let manifest = Manifest::load_from(&project.join("lpm.toml")).unwrap();
+            resolve(&manifest, &project, Refresh::Never, &mut Vec::new())
+        };
+
+        /* svc's server-tree edge to acme/core binds to the member: same
+        version as the shared copy (1.2.0, not the registry's 1.0.0),
+        workspace source, no top-level link */
+        let installs = resolve_with("svc").unwrap();
+        let cores: Vec<_> = installs
+            .iter()
+            .filter(|install| install.name == "acme/core")
+            .collect();
+        assert_eq!(cores.len(), 2);
+        for core in &cores {
+            assert_eq!(core.version, semver::Version::new(1, 2, 0));
+            assert!(matches!(core.source, DownloadSource::Workspace { .. }));
+        }
+        assert_eq!(cores[0].context, Environment::Shared);
+        assert_eq!(cores[0].link.as_deref(), Some("core"));
+        assert_eq!(cores[1].context, Environment::Server);
+        assert_eq!(cores[1].link, None);
+
+        // an edge whose requirement the member can't satisfy is a conflict
+        assert!(matches!(
+            resolve_with("strict").unwrap_err(),
+            Error::DependencyConflict {
+                context: Environment::Server,
+                ..
+            }
+        ));
     }
 
     /** [overrides] end to end, against a real local git index: a specifier
@@ -524,11 +933,19 @@ mod tests {
         let summary = |installs: &[ResolvedInstall]| -> Vec<String> {
             installs
                 .iter()
-                .map(|install| format!("{}@{} as {}", install.name, install.version, install.link))
+                .map(|install| {
+                    format!(
+                        "{}@{} as {}",
+                        install.name,
+                        install.version,
+                        // transitives carry no link; "-" marks them
+                        install.link.as_deref().unwrap_or("-")
+                    )
+                })
                 .collect()
         };
 
-        // no overrides: foo brings its declared bar
+        // no overrides: foo brings its declared bar, linkless (transitive)
         let plain = resolve_with(
             "[dependencies]\nfoo = { name = \"acme/foo\", version = \"^1\" }\n",
             &mut Vec::new(),
@@ -536,7 +953,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             summary(&plain),
-            ["acme/bar@1.0.0 as bar", "acme/foo@1.0.0 as foo"]
+            ["acme/bar@1.0.0 as -", "acme/foo@1.0.0 as foo"]
         );
 
         /* a specifier override swaps the edge for a different package, and
@@ -549,7 +966,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             summary(&swapped),
-            ["acme/foo@1.0.0 as foo", "acme/qux@1.0.0 as qux"]
+            ["acme/foo@1.0.0 as foo", "acme/qux@1.0.0 as -"]
         );
         let foo = swapped
             .iter()
@@ -587,7 +1004,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             summary(&deep),
-            ["acme/bar@1.0.0 as bar", "acme/foo@1.0.0 as aaa"]
+            ["acme/bar@1.0.0 as -", "acme/foo@1.0.0 as aaa"]
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("walked via 'aaa'"), "{warnings:?}");

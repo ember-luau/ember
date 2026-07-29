@@ -4,6 +4,7 @@ in our layout, so that has to become a "./Foo" style path. anything we can't
 map safely just stays as it was. */
 
 use crate::error::Error;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,11 +17,32 @@ how the mapping works:
   "@self/" is children. an init file IS its folder, so its whole frame sits
   one level above a plain file's
 - climbing exactly one level past the module root means a wally dependency
-  alias (wally drops those next to the package). our link files sit in the
-  out dir instead, two levels above the package folder, hence the extra ups
+  alias; those wait for `rewrite_escape_requires` — this pass can't know
+  which environment folder each alias's nested link lands in
 - anything weirder (children of a plain file module, climbing further, non
   literal segments) gets skipped */
 pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usize, Error> {
+    rewrite_requires(package_dir, entry, None)
+}
+
+/** the second half, run from the nested-link phase once every dependency's
+environment is known: maps chains that climb exactly one level past the
+module root (wally's alias zone) onto the package's OWN nested links,
+`packages/<env>/<alias>`. `aliases` is alias -> environment folder name;
+aliases absent from it stay untouched, like any other unmappable chain. */
+pub fn rewrite_escape_requires(
+    package_dir: &Path,
+    entry: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<usize, Error> {
+    rewrite_requires(package_dir, entry, Some(aliases))
+}
+
+fn rewrite_requires(
+    package_dir: &Path,
+    entry: &str,
+    aliases: Option<&BTreeMap<String, String>>,
+) -> Result<usize, Error> {
     // where the mounted tree starts; files outside it have no instance position
     let (module_root, single_file) = if entry.is_empty() {
         (PathBuf::new(), None)
@@ -77,6 +99,7 @@ pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usiz
             is_init,
             depth_in_module: dir_in_module,
             depth_in_package: dir_in_package,
+            aliases,
         };
         if let Some((updated, count)) = rewrite_source(&source, &context) {
             fs::write(&file, updated)?;
@@ -86,12 +109,14 @@ pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usiz
     Ok(rewritten)
 }
 
-struct FileContext {
+struct FileContext<'a> {
     is_init: bool,
     /// how many dirs the file's folder sits below the module root.
     depth_in_module: usize,
-    /// same but below the package folder; alias paths need this many ups + 2.
+    /// same but below the package folder; escape targets climb this far up.
     depth_in_package: usize,
+    /// alias -> environment folder for escape requires; None leaves them alone.
+    aliases: Option<&'a BTreeMap<String, String>>,
 }
 
 /// every .luau/.lua file under `root`, recursively.
@@ -300,11 +325,27 @@ fn parse_chain(
             }
         }
     } else if ups == context.depth_in_module + 1 && names.len() == 1 {
-        /* one level above the module root is wally's alias zone; our link
-        files are in the out dir, package depth + 2 ups away */
-        let mut parts = vec![".."; context.depth_in_package + 2 - init_shift];
-        parts.push(names[0].as_str());
-        parts.join("/")
+        /* one level above the module root is wally's alias zone: the
+        package's own nested link for that alias, packages/<env>/<alias>.
+        the env folder is only known once dependencies are resolved, so
+        pass one (aliases = None) leaves these chains for
+        `rewrite_escape_requires` to come back for */
+        let environment = context.aliases?.get(&names[0])?;
+        if context.depth_in_package + 1 == init_shift {
+            // a root init: the packages folder is among its own children
+            format!("@self/packages/{environment}/{}", names[0])
+        } else {
+            let string_ups = context.depth_in_package - init_shift;
+            let mut parts = vec![".."; string_ups];
+            parts.push("packages");
+            parts.push(environment);
+            parts.push(names[0].as_str());
+            if string_ups == 0 {
+                format!("./{}", parts.join("/"))
+            } else {
+                parts.join("/")
+            }
+        }
     } else {
         return None; // climbing past the alias zone, nowhere to map that
     };
@@ -432,12 +473,13 @@ fn skip_short_string(bytes: &[u8], position: usize) -> usize {
 mod tests {
     use super::*;
 
-    fn dir_module(depth_in_module: usize, is_init: bool) -> FileContext {
+    fn dir_module(depth_in_module: usize, is_init: bool) -> FileContext<'static> {
         FileContext {
             is_init,
             depth_in_module,
             // package with module root "src": file dir depth is one more
             depth_in_package: depth_in_module + 1,
+            aliases: None,
         }
     }
 
@@ -490,24 +532,59 @@ mod tests {
 
     #[test]
     fn escaping_the_module_root_lands_on_dependency_links() {
-        /* src/init.luau doing require(script.Parent.Dep): wally would find the
-        alias next to the package, we keep links in the out dir. the init's
-        frame is the pkg dir (out/.lpm/pkg), so 2 ups reach out/. */
+        /* src/init.luau doing require(script.Parent.Signal): wally would
+        find the alias next to the package; ours is the package's OWN
+        nested link, packages/<env>/Signal. only the nested-link phase
+        knows <env>, so the first pass must leave the chain alone... */
         let context = dir_module(0, true);
-        let (out, count) =
-            rewrite_source("local Dep = require(script.Parent.Signal)\n", &context).unwrap();
+        let source = "local Dep = require(script.Parent.Signal)\n";
+        assert!(rewrite_source(source, &context).is_none());
+
+        // ...and the second pass, armed with the alias map, retargets it
+        let aliases: BTreeMap<String, String> =
+            [("Signal".to_string(), "shared".to_string())].into();
+        let mut context = dir_module(0, true);
+        context.aliases = Some(&aliases);
+        let (out, count) = rewrite_source(source, &context).unwrap();
         assert_eq!(count, 1);
-        assert_eq!(out, "local Dep = require(\"../../Signal\")\n");
+        assert_eq!(out, "local Dep = require(\"./packages/shared/Signal\")\n");
 
         // same reach from a plain file next to that init needs the extra hop
-        let context = dir_module(0, false);
+        let mut context = dir_module(0, false);
+        context.aliases = Some(&aliases);
         let (out, count) = rewrite_source(
             "local Dep = require(script.Parent.Parent.Signal)\n",
             &context,
         )
         .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(out, "local Dep = require(\"../../../Signal\")\n");
+        assert_eq!(out, "local Dep = require(\"../packages/shared/Signal\")\n");
+
+        // a root init's packages folder is among its own children: @self
+        let root_init = FileContext {
+            is_init: true,
+            depth_in_module: 0,
+            depth_in_package: 0,
+            aliases: Some(&aliases),
+        };
+        let (out, count) = rewrite_source(source, &root_init).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            out,
+            "local Dep = require(\"@self/packages/shared/Signal\")\n"
+        );
+
+        // an alias the map doesn't know stays exactly as it was
+        let mut context = dir_module(0, true);
+        context.aliases = Some(&aliases);
+        let (out, count) = rewrite_source(
+            "require(script.Parent.Signal)\nrequire(script.Parent.Mystery)\n",
+            &context,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(out.contains("require(\"./packages/shared/Signal\")"));
+        assert!(out.contains("require(script.Parent.Mystery)"));
     }
 
     #[test]
