@@ -1,0 +1,26 @@
+# G3 fixture manifest -- copied to lpm.toml in a temp workdir by
+# scripts/install-fixture.ps1. Named .fixture because .gitignore drops every
+# lpm.toml/lpm.lock in the tree, and this pair has to be committed: the whole
+# point of the gate is that the resolution is pinned and cannot drift.
+#
+# Same five wally packages scripts/bench.ps1 uses, so the two gates exercise the
+# same tree. They cover what an install actually does: nested dependencies
+# (Comm -> Promise/Signal/T), a shared environment, and entry points that get
+# parsed for exported types.
+
+[package]
+name = "fixture/install"
+version = "0.1.0"
+
+[target]
+environment = "shared"
+
+[indices]
+wally = "https://github.com/UpliftGames/wally-index"
+
+[dependencies]
+Promise = { name = "evaera/promise", version = "^4.0.0", index = "wally" }
+Trove = { name = "sleitnick/trove", version = "^1.8.0", index = "wally" }
+Signal = { name = "sleitnick/signal", version = "^2.0.3", index = "wally" }
+T = { name = "osyrisrblx/t", version = "^3.1.1", index = "wally" }
+Comm = { name = "sleitnick/comm", version = "^1.0.1", index = "wally" }

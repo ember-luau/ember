@@ -73,7 +73,8 @@ jobs:
           files: dist/${{ matrix.asset }}
           # No generated notes: this step runs once per matrix platform, and
           # each run would append another "What's Changed" section to the same
-          # release. Notes are written by hand.
+          # release. Notes are written by hand -- announce.yml waits for them
+          # and posts them to Discord once they land.
           # Semver pre-release tags (v0.1.0-alpha.1, v1.0.0-rc.2, ...) get GitHub's
           # pre-release badge and are skipped by the releases/latest API that
           # `lpm self update` polls.

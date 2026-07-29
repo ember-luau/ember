@@ -5,3 +5,7 @@ packages/
 
 *.md
 !README.md
+!CONTRIBUTING.md
+
+# capture dirs written by scripts/golden-cli.ps1 and scripts/install-fixture.ps1
+.golden/

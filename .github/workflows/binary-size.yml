@@ -1,0 +1,90 @@
+name: Binary size
+
+# G6. Profile and dependency changes are global -- they land on all four
+# targets release.yml ships -- but the only local measurement anyone can take is
+# Windows, and scripts/bench.ps1 is Windows-and-Rokit-bound on top of that. So a
+# change that shrinks Windows and bloats macOS-aarch64 would otherwise pass every
+# gate and reach users through `lpm self update`.
+#
+# Runs on demand, and automatically on any PR that touches what decides code
+# size: the manifest, the lockfile, or cargo config.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  size:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Deliberately the same four rows as release.yml. If that matrix gains a
+        # target, this one has to gain it too, or the new platform ships
+        # unmeasured.
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: lpm-windows-x86_64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: lpm-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: lpm-macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: lpm-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The release profile is the one that decides inlining, and inlining is
+      # what the parser's stack budget is spent on -- but ci.yml only ever runs
+      # the dev profile, so without this the release-profile stack test is a
+      # thing someone ran locally once. Skipped for the cross-compiled leg,
+      # which cannot execute its own output on an arm runner.
+      - name: Test (release profile)
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --release --locked --target ${{ matrix.target }}
+
+      - name: Measure
+        shell: bash
+        run: |
+          if [[ "${{ matrix.asset }}" == *.exe ]]; then
+            binary="target/${{ matrix.target }}/release/lpm.exe"
+          else
+            binary="target/${{ matrix.target }}/release/lpm"
+          fi
+          # bytes, not a human-readable rounding: the whole point is comparing
+          # two numbers that may differ by well under a megabyte
+          bytes=$(wc -c < "$binary" | tr -d ' ')
+          echo "${{ matrix.asset }}: $bytes bytes"
+          # Each matrix leg writes its own step summary, so the table has to be
+          # self-contained per job -- a bare row without a header renders as
+          # literal text, not a table.
+          {
+            echo "### ${{ matrix.asset }}"
+            echo
+            echo "| target | bytes |"
+            echo "| --- | --- |"
+            printf '| `%s` | %s |\n' "${{ matrix.target }}" "$bytes"
+            echo
+            echo "_Informational: this job reports a number, it does not fail on"
+            echo "growth. Compare against the same job on the base branch._"
+          } >> "$GITHUB_STEP_SUMMARY"

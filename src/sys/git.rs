@@ -48,6 +48,34 @@ pub fn capture_diff(args: &[&str]) -> Result<String, GitError> {
     }
 }
 
+/** Prefixes git-level config that pins a command to the bytes on disk.
+
+git for windows installs `core.autocrlf=true` by default (so do the
+windows CI runners), and every patch-flow command reads or writes a
+working tree: `add` and `diff` would clean CRLF out of the recorded patch,
+`apply` would smudge CRLF back into the extracted package — so a patch
+captured on one machine wouldn't match context on another, and the
+patched copy that travels into the store would have line endings the
+publisher never wrote. `core.eol` covers the same conversion arriving
+through a package's own .gitattributes, and `core.safecrlf` keeps git
+from objecting to files it isn't converting.
+
+deliberately not folded into `run`: the index cache clones and pulls
+real repos, and flipping conversion under a checkout someone already has
+would make every file read as locally modified. */
+pub fn verbatim<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut full: Vec<&'a str> = vec![
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        "-c",
+        "core.safecrlf=false",
+    ];
+    full.extend_from_slice(args);
+    full
+}
+
 /// whether git can be spawned at all; cached, install asks once per patched package.
 pub fn available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

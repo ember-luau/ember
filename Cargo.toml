@@ -2,7 +2,7 @@
 # `lpm` is taken on crates.io (by a LaTeX package manager), so the crate ships
 # as luaupm while the binary stays `lpm`: cargo install luaupm, then run lpm.
 name = "luaupm"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
@@ -54,8 +54,44 @@ windows-sys = { version = "0.61.2", features = [
 winreg = "0.56.0"
 
 # Release builds are what users download or `cargo install`, so trade compile
-# time for a smaller, faster binary.
+# time for a smaller, faster binary. Measured on x86_64-pc-windows-msvc with
+# rustc 1.96.1, each step against the one above it:
+#
+#   lto = "thin", opt-level = 3    7,561,728 bytes
+#   lto = "fat"                    7,201,792   -4.8%
+#   + opt-level = "s"              5,486,592  -27.4% total
+#
+# No measurable install-time cost -- stated as a null result, not as a bound.
+# Over 15 runs of scripts/bench.ps1 the startup, no-op, and locked-install
+# medians all landed at or below the opt-level = 3 numbers, but pesde and wally
+# (unchanged control binaries in the same interleaved run) drifted ~10% between
+# runs, so that measurement cannot resolve a regression smaller than ~10%. What
+# it rules out is a large one. Plausible reason there is nothing to find: lpm's
+# install path waits on syscalls, the network, and archive extraction.
+#
+# Semantics are held by scripts/golden-cli.ps1 (94 captures, both colour
+# renderings) and scripts/install-fixture.ps1 (379 files by SHA-256 plus the
+# install's stdout), both identical across the change.
+#
+# The one place inlining and correctness genuinely meet is the Luau parser's
+# stack budget. Measured by bisection at MAX_NESTING_DEPTH, the parse needs more
+# than 8 MiB and at most 10 of its 64 MiB -- and it needs the same under
+# lto = "thin", opt-level = 3, so this change did not move it. That ~6x headroom
+# is guarded by parser_stack_stays_within_a_sixth_of_its_budget.
+#
+# Both of those tests are cfg(not(debug_assertions)), i.e. release-only, and CI
+# has a release-profile job so they still run. An unoptimized build needs ~48
+# MiB for the same parse -- five times the release figure, and only ~1.3x under
+# the budget -- so running them in the dev profile produced aborted test
+# binaries rather than signal. Users run release builds; a debug lpm is the one
+# with thin margin (see src/project/package.rs).
+#
+# Not added deliberately: /OPT:REF,ICF, which rustc already passes for MSVC
+# release links -- an explicit -C link-arg=/OPT:REF,ICF produces a byte-identical
+# binary. strip is worth only ~2 KiB here, since MSVC debug info lives in a
+# separate .pdb, but it is real on the Linux and macOS targets, so it stays.
 [profile.release]
-lto = "thin"
+lto = "fat"
+opt-level = "s"
 codegen-units = 1
 strip = true

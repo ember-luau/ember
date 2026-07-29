@@ -643,6 +643,93 @@ mod tests {
         assert_eq!(bracket_depth("plain"), 0);
     }
 
+    /// the deepest source the guard lets through: it refuses `>` the ceiling, so this is it.
+    #[cfg(not(debug_assertions))]
+    fn worst_case_source() -> String {
+        format!(
+            "export type Deep = {}number{}\nreturn {{}}\n",
+            "{ a: ".repeat(MAX_NESTING_DEPTH),
+            " }".repeat(MAX_NESTING_DEPTH)
+        )
+    }
+
+    /** how much of the parse thread's 64 MiB the worst case actually needs.
+
+    measured by bisection on this fixture, and the two profiles are nothing
+    alike:
+
+      release (lto = "fat", opt-level = "s")   aborts at 8 MiB, passes at 10
+      release (lto = "thin", opt-level = 3)    aborts at 8 MiB, passes at 10
+      dev (unoptimized)                        aborts at 32 MiB, passes at 48
+
+    so the profile change did not move the per-frame cost, and the shipped
+    binary has roughly 6x headroom — not the ~135 KiB-per-level a naive
+    PARSE_STACK_BYTES / MAX_NESTING_DEPTH division suggests. An unoptimized
+    build wants closer to five times that, leaving only ~1.3x, which is why
+    both of the max-depth tests are release-only: run under `cargo test`
+    they sit near enough to the edge that a slightly different toolchain
+    tips them over, and stack exhaustion does not fail politely.
+
+    that is also the whole reason this one runs on a deliberately SMALL stack
+    rather than the production 64 MiB. At 64 a regression would have to
+    quadruple per-frame cost before anything noticed, and the first sign would
+    be a user's install aborting; at 16 the same regression trips here first,
+    with ~1.6x of slack so ordinary codegen churn is not noise.
+
+    when it does trip, the symptom is the whole test binary dying with
+    STATUS_STACK_OVERFLOW and no per-test attribution, because that is what
+    stack exhaustion does (see MAX_NESTING_DEPTH). re-run the bisection above
+    before touching either constant. */
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn parser_stack_stays_within_a_sixth_of_its_budget() {
+        let deep = worst_case_source();
+        let outcome = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || extract_types(&deep))
+            .expect("probe thread")
+            .join();
+        assert_eq!(
+            outcome.expect("parser overflowed a 16 MiB stack"),
+            Some(vec!["export type Deep = module.Deep".to_string()])
+        );
+    }
+
+    /** the guard's own ceiling, parsed for real.
+
+    `absurdly_nested_sources_are_refused_not_crashed` covers depth 2000 (refused
+    before the parser runs) and depth 100 (parses comfortably), which leaves the
+    case that actually costs the most stack — one notch under MAX_NESTING_DEPTH,
+    so it clears the guard and then recurses all the way down — untested.
+
+    that gap is worth closing because the margin is a budget with a compiler on
+    the other side of it: PARSE_STACK_BYTES against however many bytes per
+    recursion level full_moon compiles down to, and inlining decisions move the
+    second number. lto, opt-level, and a toolchain bump all change inlining, and
+    the failure mode is a stack overflow, which aborts the process and cannot be
+    caught (see MAX_NESTING_DEPTH's comment). run this under `--release` as well
+    as dev: a dev-profile pass proves nothing about a release inlining change. */
+    /* release-only for the same reason as the canary above: an unoptimized
+    build needs ~48 MiB of the 64 to parse this, and a margin that thin turns
+    an unrelated toolchain bump into an aborted test binary. the guard logic
+    itself stays covered in every profile by
+    `absurdly_nested_sources_are_refused_not_crashed`, which works at depths
+    (2000 refused, 100 parsed) where dev has room to spare. */
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn nesting_at_the_ceiling_still_parses() {
+        let deep = worst_case_source();
+        /* pinned, not bounded: `<= MAX_NESTING_DEPTH` would also hold for a
+        fixture nested five levels deep, and the whole point is to sit exactly
+        where the guard stops refusing (it refuses `>`, so the ceiling itself
+        gets through and is the most expensive input lpm will ever parse) */
+        assert_eq!(bracket_depth(&deep), MAX_NESTING_DEPTH);
+        assert_eq!(
+            exported_types(&deep).unwrap(),
+            ["export type Deep = module.Deep"]
+        );
+    }
+
     #[test]
     fn extracts_exported_types_for_reexport() {
         let source = r#"

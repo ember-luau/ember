@@ -254,7 +254,7 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
     `git apply` at install consumes with no path juggling */
     let in_copy = dir.to_string_lossy().into_owned();
     let git_run = |action: &'static str, args: &[&str]| {
-        git::run(args).map_err(|stderr| Error::PatchGitFailed { action, stderr })
+        git::run(&git::verbatim(args)).map_err(|stderr| Error::PatchGitFailed { action, stderr })
     };
     git_run("init", &["-C", &in_copy, "init", "--quiet"])?;
     git_run("add", &["-C", &in_copy, "add", "-A"])?;
@@ -304,12 +304,14 @@ fn commit(spec: &str) -> Result<(), Error> {
 
     /* intent-to-add makes files the user created show up in the diff;
     without it `git diff` only sees tracked paths */
-    git::run(&["-C", &in_copy, "add", "-N", "."]).map_err(|stderr| Error::PatchGitFailed {
-        action: "add",
-        stderr,
+    git::run(&git::verbatim(&["-C", &in_copy, "add", "-N", "."])).map_err(|stderr| {
+        Error::PatchGitFailed {
+            action: "add",
+            stderr,
+        }
     })?;
     // --binary so image/model assets survive the round trip
-    let diff = match git::capture_diff(&["-C", &in_copy, "diff", "--binary"]) {
+    let diff = match git::capture_diff(&git::verbatim(&["-C", &in_copy, "diff", "--binary"])) {
         Ok(diff) => diff,
         Err(git::GitError::Missing) => return Err(Error::GitMissing),
         Err(git::GitError::Failed(stderr)) => {
@@ -532,9 +534,13 @@ mod tests {
 
         let work = base.join("work");
         let in_work = work.to_string_lossy().into_owned();
-        git::run(&["-C", &in_work, "init", "--quiet"]).unwrap();
-        git::run(&["-C", &in_work, "add", "-A"]).unwrap();
-        git::run(&[
+        /* every step through `verbatim`, exactly as start/commit/apply run
+        it: a machine with core.autocrlf=true (git for windows' default)
+        would otherwise clean the recorded diff and smudge CRLF back on
+        apply, and the round trip would stop being byte-exact */
+        git::run(&git::verbatim(&["-C", &in_work, "init", "--quiet"])).unwrap();
+        git::run(&git::verbatim(&["-C", &in_work, "add", "-A"])).unwrap();
+        git::run(&git::verbatim(&[
             "-C",
             &in_work,
             "-c",
@@ -548,14 +554,15 @@ mod tests {
             "--no-verify",
             "-m",
             "published state",
-        ])
+        ]))
         .unwrap();
 
         // the edit: change a file, add a new one
         write(&work, "src/init.luau", "return { value = 2 } -- patched\n");
         write(&work, "src/extra.luau", "return {}\n");
-        git::run(&["-C", &in_work, "add", "-N", "."]).unwrap();
-        let diff = git::capture_diff(&["-C", &in_work, "diff", "--binary"]).unwrap();
+        git::run(&git::verbatim(&["-C", &in_work, "add", "-N", "."])).unwrap();
+        let diff =
+            git::capture_diff(&git::verbatim(&["-C", &in_work, "diff", "--binary"])).unwrap();
         assert!(diff.contains("-- patched"), "{diff}");
         assert!(diff.contains("extra.luau"), "{diff}");
 
@@ -563,12 +570,12 @@ mod tests {
         let patch_file = base.join("the.patch");
         fs::write(&patch_file, &diff).unwrap();
         let fresh = base.join("fresh");
-        git::run(&[
+        git::run(&git::verbatim(&[
             "-C",
             &fresh.to_string_lossy(),
             "apply",
             &patch_file.to_string_lossy(),
-        ])
+        ]))
         .unwrap();
         assert_eq!(
             fs::read_to_string(fresh.join("src/init.luau")).unwrap(),
