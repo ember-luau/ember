@@ -18,9 +18,18 @@ pub struct Lockfile {
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
+    /// the package's own environment: it names the nested-link folder
+    /// dependents require it through.
     pub environment: Environment,
-    /// link file name in the environment folder.
-    pub link: String,
+    /** which environment root the package installs under: the root of the
+    dependency tree that pulled it in. absent when it equals `environment`
+    (and in pre-v2 lockfiles, which knew no such distinction) — read it
+    through [`LockedPackage::context`]. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Environment>,
+    /// top-level link file name; absent for transitives, which get none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
     pub index: String,
     /** this package's [overrides]-rewritten edges: declared alias -> the
     replacement's package name. additive — locks without it parse fine —
@@ -31,10 +40,19 @@ pub struct LockedPackage {
     pub source: DownloadSource,
 }
 
+impl LockedPackage {
+    /// the environment root this package installs under.
+    pub fn context(&self) -> Environment {
+        self.context.unwrap_or(self.environment)
+    }
+}
+
 impl Lockfile {
     pub fn new(packages: Vec<LockedPackage>) -> Self {
         Lockfile {
-            version: 1,
+            /* v2: `link` went optional (absent on transitives) and `context`
+            arrived. older lpm can't parse v2 locks; v1 locks load fine. */
+            version: 2,
             packages,
         }
     }
@@ -66,7 +84,9 @@ mod tests {
                 name: "evaera/promise".to_string(),
                 version: "4.0.0".to_string(),
                 environment: Environment::Shared,
-                link: "Promise".to_string(),
+                // a shared package pulled in under a server root
+                context: Some(Environment::Server),
+                link: Some("Promise".to_string()),
                 index: "https://github.com/UpliftGames/wally-index".to_string(),
                 redirects: [("Signal".to_string(), "acme/signal-fork".to_string())].into(),
                 source: DownloadSource::Zip {
@@ -78,7 +98,9 @@ mod tests {
                 name: "pesde/hello".to_string(),
                 version: "1.0.2".to_string(),
                 environment: Environment::Luau,
-                link: "hello".to_string(),
+                // a transitive in its own environment: no link, no context
+                context: None,
+                link: None,
                 index: "https://github.com/pesde-pkg/index".to_string(),
                 redirects: Default::default(),
                 source: DownloadSource::TarGz {
@@ -89,7 +111,7 @@ mod tests {
 
         let text = toml::to_string(&lockfile).unwrap();
         let parsed: Lockfile = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, 2);
         assert_eq!(parsed.packages.len(), 2);
         assert_eq!(parsed.packages[0].name, "evaera/promise");
         // redirects round-trip when present and stay absent otherwise
@@ -106,5 +128,34 @@ mod tests {
             &parsed.packages[1].source,
             DownloadSource::TarGz { url } if url.contains("pesde%2Fhello")
         ));
+
+        // context and link round-trip, absent fields staying absent
+        assert_eq!(parsed.packages[0].context(), Environment::Server);
+        assert_eq!(parsed.packages[0].link.as_deref(), Some("Promise"));
+        assert_eq!(parsed.packages[1].context(), Environment::Luau);
+        assert_eq!(parsed.packages[1].link, None);
+        assert_eq!(text.matches("context").count(), 1);
+        assert_eq!(text.matches("link").count(), 1);
+    }
+
+    #[test]
+    fn v1_lockfiles_still_load() {
+        /* the pre-context format: version 1, `link` on every entry, no
+        `context` anywhere. context() falls back to the environment. */
+        let parsed: Lockfile = toml::from_str(
+            "version = 1\n\n\
+             [[package]]\n\
+             name = \"acme/thing\"\n\
+             version = \"1.0.0\"\n\
+             environment = \"shared\"\n\
+             link = \"thing\"\n\
+             index = \"https://example.com/index\"\n\
+             type = \"zip\"\n\
+             url = \"https://example.com/thing/1.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.packages[0].link.as_deref(), Some("thing"));
+        assert_eq!(parsed.packages[0].context(), Environment::Shared);
     }
 }

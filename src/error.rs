@@ -1,3 +1,4 @@
+use crate::project::manifest::Environment;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -121,14 +122,28 @@ pub enum Error {
     #[error("Unsupported environment '{0}'")]
     UnsupportedEnvironment(String),
 
-    #[error("Could not determine the environment of {0}")]
+    #[error(
+        "Could not determine the environment of {0}; set `environment` under [target] in lpm.toml"
+    )]
     UnknownPackageEnvironment(String),
 
-    #[error("Dependency conflict: {name} is required as both '{first}' and '{second}'")]
+    #[error(
+        "Dependency conflict in the {context} tree: {name} is required as both '{first}' and '{second}'"
+    )]
     DependencyConflict {
         name: String,
+        context: Environment,
         first: String,
         second: String,
+    },
+
+    #[error(
+        "[config] points {first}-packages-out and {second}-packages-out at the same folder ({path}); environment roots must stay distinct"
+    )]
+    PackagesOutCollision {
+        first: Environment,
+        second: Environment,
+        path: String,
     },
 
     #[error("Failed to fetch index {url}: {reason}")]
@@ -136,6 +151,11 @@ pub enum Error {
 
     #[error("lpm.lock is missing; run `lpm install` without --locked to create it")]
     LockfileMissing,
+
+    #[error(
+        "lpm.lock is version {0}, from before self-contained environment roots; run `lpm install` once without --locked to regenerate it"
+    )]
+    LockfileOutdated(u32),
 
     #[error("Invalid lpm.toml: {0}")]
     ManifestInvalid(String),
