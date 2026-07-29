@@ -31,16 +31,21 @@ struct ErrorBody {
 /** Uploads a packed `.tar.gz` to `POST /v1/publish` as the given user.
 Statuses the API answers with: 401 bad token, 400 malformed tarball or
 lpm.toml, 403 scope owned by someone else (first publish claims a scope),
-409 version already exists, 413 over the size cap. */
-pub fn publish(token: &str, archive: &[u8]) -> Result<(), Error> {
+409 version already exists, 413 over the size cap. `oidc_token` is the
+Actions provenance token when there is one; it rides along in its own
+header, auth stays the GitHub token. */
+pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
     let url = format!("{API_URL}/v1/publish");
     // bulk: a package archive on a slow uplink shouldn't die at the minute mark
-    let response = http::bulk_agent()
+    let mut request = http::bulk_agent()
         .post(&url)
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"))
-        .set("Content-Type", "application/gzip")
-        .send_bytes(archive);
+        .set("Content-Type", "application/gzip");
+    if let Some(oidc_token) = oidc_token {
+        request = request.set(crate::net::provenance::HEADER, oidc_token);
+    }
+    let response = request.send_bytes(archive);
 
     match response {
         Ok(_) => Ok(()),

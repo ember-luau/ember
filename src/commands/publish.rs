@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::net::{auth, registry};
+use crate::net::{auth, provenance, registry};
 use crate::project::manifest::{
     DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Environment, Manifest, is_github_username,
     split_package_name, workspace_version_req,
@@ -21,8 +21,19 @@ pub struct PublishArgs {
 pub fn run(args: PublishArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
+    /* provenance: in a GitHub Actions job with id-token permissions this
+    fetches an OIDC token the registry can verify the build from. anywhere
+    else (or on any failure) it's just None and nothing changes. fetched
+    once so a workspace publish doesn't re-request per member */
+    let oidc_token = if args.dry_run {
+        None
+    } else {
+        provenance::actions_token()
+    };
+    let oidc_token = oidc_token.as_deref();
+
     if manifest.workspace_members().is_empty() {
-        return publish_project(manifest, args.dry_run);
+        return publish_project(manifest, args.dry_run, oidc_token);
     }
 
     /* a workspace root publishes the whole workspace, pesde's order: root
@@ -32,7 +43,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.package.name.clone();
-    if let Err(error) = publish_project(manifest, args.dry_run) {
+    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -43,7 +54,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
         }
         let name = member.manifest.package.name.clone();
         let result = workspace::in_dir(&member.dir, || {
-            publish_project(Manifest::load()?, args.dry_run)
+            publish_project(Manifest::load()?, args.dry_run, oidc_token)
         });
         if let Err(error) = result {
             ui::print_error(&format!("{name}: {error}"));
@@ -61,7 +72,11 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
 /** publishes the project in the current directory. private packages and
 main-less workspace roots say so and skip instead of failing; that's how
 a container root stays unpublished while its members go out. */
-fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
+fn publish_project(
+    mut manifest: Manifest,
+    dry_run: bool,
+    oidc_token: Option<&str>,
+) -> Result<(), Error> {
     if manifest.package.private {
         println!(
             "Skipping {}: package is private, refusing to publish",
@@ -152,14 +167,14 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
         None => auth::login(&oauth_client_id()?)?,
     };
 
-    match upload(&credentials.token, &archive) {
+    match upload(&credentials.token, oidc_token, &archive) {
         /* 401 means the stored token was revoked or expired, not that this
         publish is doomed: forget it, log in fresh, retry once */
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
             let credentials = auth::login(&oauth_client_id()?)?;
-            upload(&credentials.token, &archive)?;
+            upload(&credentials.token, oidc_token, &archive)?;
         }
         other => other?,
     }
@@ -240,8 +255,10 @@ fn validate_description(description: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn upload(token: &str, archive: &[u8]) -> Result<(), Error> {
-    ui::with_spinner("Uploading package", || registry::publish(token, archive))
+fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
+    ui::with_spinner("Uploading package", || {
+        registry::publish(token, oidc_token, archive)
+    })
 }
 
 /** OAuth app client id for the device flow. lives in the lpm index's

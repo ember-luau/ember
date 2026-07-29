@@ -6,4 +6,5 @@ layered on them, and lpm's own registry API.
 pub mod auth;
 pub mod github;
 pub mod http;
+pub mod provenance;
 pub mod registry;
