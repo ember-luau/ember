@@ -54,8 +54,29 @@ windows-sys = { version = "0.61.2", features = [
 winreg = "0.56.0"
 
 # Release builds are what users download or `cargo install`, so trade compile
-# time for a smaller, faster binary.
+# time for a smaller, faster binary. Measured on x86_64-pc-windows-msvc with
+# rustc 1.96.1, each step against the one above it:
+#
+#   lto = "thin", opt-level = 3    7,561,728 bytes
+#   lto = "fat"                    7,201,792   -4.8%
+#   + opt-level = "s"              5,486,592  -27.4% total
+#
+# opt-level = "s" costs nothing measurable here. Over 15 runs of
+# scripts/bench.ps1 the startup, no-op, and locked-install medians all landed at
+# or below the opt-level = 3 numbers: lpm's install path waits on syscalls, the
+# network, and archive extraction, not on vectorized loops. Both gates that
+# would catch a semantic change (scripts/golden-cli.ps1, scripts/install-fixture.ps1)
+# are byte-identical across the change, and the parser stack-margin test passes
+# under --release, which is the one place where inlining and correctness meet
+# (see MAX_NESTING_DEPTH in src/project/package.rs).
+#
+# Not added deliberately: /OPT:REF,ICF, which rustc already passes for MSVC
+# release links -- an explicit -C link-arg=/OPT:REF,ICF produces a byte-identical
+# binary. strip is worth only ~2 KiB here, since MSVC debug info lives in a
+# separate .pdb, but it is real on the Linux and macOS targets, so it stays.
 [profile.release]
-lto = "thin"
+lto = "fat"
+opt-level = "s"
 codegen-units = 1
 strip = true
+
