@@ -53,6 +53,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The release profile is the one that decides inlining, and inlining is
+      # what the parser's stack budget is spent on -- but ci.yml only ever runs
+      # the dev profile, so without this the release-profile stack test is a
+      # thing someone ran locally once. Skipped for the cross-compiled leg,
+      # which cannot execute its own output on an arm runner.
+      - name: Test (release profile)
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --release --locked --target ${{ matrix.target }}
+
       - name: Measure
         shell: bash
         run: |
@@ -65,4 +75,16 @@ jobs:
           # two numbers that may differ by well under a megabyte
           bytes=$(wc -c < "$binary" | tr -d ' ')
           echo "${{ matrix.asset }}: $bytes bytes"
-          printf '| `%s` | %s |\n' "${{ matrix.asset }}" "$bytes" >> "$GITHUB_STEP_SUMMARY"
+          # Each matrix leg writes its own step summary, so the table has to be
+          # self-contained per job -- a bare row without a header renders as
+          # literal text, not a table.
+          {
+            echo "### ${{ matrix.asset }}"
+            echo
+            echo "| target | bytes |"
+            echo "| --- | --- |"
+            printf '| `%s` | %s |\n' "${{ matrix.target }}" "$bytes"
+            echo
+            echo "_Informational: this job reports a number, it does not fail on"
+            echo "growth. Compare against the same job on the base branch._"
+          } >> "$GITHUB_STEP_SUMMARY"

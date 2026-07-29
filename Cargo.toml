@@ -61,14 +61,25 @@ winreg = "0.56.0"
 #   lto = "fat"                    7,201,792   -4.8%
 #   + opt-level = "s"              5,486,592  -27.4% total
 #
-# opt-level = "s" costs nothing measurable here. Over 15 runs of
-# scripts/bench.ps1 the startup, no-op, and locked-install medians all landed at
-# or below the opt-level = 3 numbers: lpm's install path waits on syscalls, the
-# network, and archive extraction, not on vectorized loops. Both gates that
-# would catch a semantic change (scripts/golden-cli.ps1, scripts/install-fixture.ps1)
-# are byte-identical across the change, and the parser stack-margin test passes
-# under --release, which is the one place where inlining and correctness meet
-# (see MAX_NESTING_DEPTH in src/project/package.rs).
+# No measurable install-time cost -- stated as a null result, not as a bound.
+# Over 15 runs of scripts/bench.ps1 the startup, no-op, and locked-install
+# medians all landed at or below the opt-level = 3 numbers, but pesde and wally
+# (unchanged control binaries in the same interleaved run) drifted ~10% between
+# runs, so that measurement cannot resolve a regression smaller than ~10%. What
+# it rules out is a large one. Plausible reason there is nothing to find: lpm's
+# install path waits on syscalls, the network, and archive extraction.
+#
+# Semantics are held by scripts/golden-cli.ps1 (94 captures, both colour
+# renderings) and scripts/install-fixture.ps1 (379 files by SHA-256 plus the
+# install's stdout), both identical across the change.
+#
+# The one place inlining and correctness genuinely meet is the Luau parser's
+# stack budget. Measured by bisection at MAX_NESTING_DEPTH, the parse needs
+# more than 8 MiB and at most 10 of its 64 MiB -- and it needs the same under
+# lto = "thin", opt-level = 3, so this change did not move it. The ~6x headroom
+# is guarded by parser_stack_stays_within_a_sixth_of_its_budget, which runs the
+# worst case on a deliberately small stack so a regression trips a test instead
+# of a user's install (see src/project/package.rs).
 #
 # Not added deliberately: /OPT:REF,ICF, which rustc already passes for MSVC
 # release links -- an explicit -C link-arg=/OPT:REF,ICF produces a byte-identical

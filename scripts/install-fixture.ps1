@@ -1,15 +1,32 @@
-# G3: proves an install produces the same tree, byte for byte, before and after
-# a build-configuration change.
+# G3: proves an install produces the same tree and says the same things, before
+# and after a build-configuration change.
 #
-# Hermetic by construction. The fixture's lockfile is committed and the install
-# runs --locked, so a package published upstream between the before and after
-# runs cannot move the result -- which it otherwise would, since the fixture
-# depends on caret ranges and the index cache has a 5-minute TTL.
+# Reproducible by construction: the fixture's lockfile is committed and the
+# install runs --locked, so a package published upstream between two runs cannot
+# move the result -- which it otherwise would, since the fixture depends on
+# caret ranges and the index cache has a 5-minute TTL.
 #
-# What is compared: every output file's path and SHA-256, the lockfile, and
-# stderr as a SORTED multiset. Sorted because install warnings are emitted from
-# worker threads (see bar_warn in src/commands/install.rs) and their order is
-# genuinely nondeterministic; their content is not.
+# What is compared:
+#   * every output file's path and SHA-256
+#   * stdout, normalised (see below) -- the success lines, which are most of
+#     what a user actually reads
+#   * stderr, sorted -- install warnings come off worker threads and their
+#     ORDER is genuinely nondeterministic while their content is not
+#
+# Honest limits, so a PASS is not read as more than it is:
+#   * --locked is what makes this reproducible, and it also means the RESOLVER
+#     never runs. Version selection, transitive discovery, conflict handling and
+#     lockfile writing are not covered here; they are covered by unit tests.
+#     lpm.lock is copied IN as an input, so its hash in tree.txt proves nothing.
+#   * NOT hermetic with respect to the host. Every `lpm install` merges the
+#     machine's ~/.lpm/tools.toml into its job list (install.rs, tool_jobs +
+#     global_tools) and lpm's home has no override -- it is always
+#     dirs::home_dir()/.lpm. On a machine with global tools pinned, this run
+#     downloads them and prints extra lines. Those lines are filtered below.
+#     A run on a machine with no global tools is hermetic by accident, not by
+#     construction.
+#   * the lockfile entries carry no content hash, so "same URL" is not "same
+#     bytes"; a re-published archive shows up here as a spurious FAIL.
 #
 # Usage:
 #   .\scripts\install-fixture.ps1 -Out .golden\install-before
@@ -23,6 +40,9 @@ param(
     [string]$Out = (Join-Path $PSScriptRoot "..\.golden\install-current"),
     [string]$Baseline = "",
     [switch]$Relock,
+    # DESTRUCTIVE: `lpm cache clean` wipes the real ~/.lpm archive and index
+    # caches for every project on this machine, not a sandboxed copy. lpm has no
+    # home-directory override, so there is no way to do this in isolation.
     [switch]$ColdCache
 )
 
@@ -36,6 +56,14 @@ $Exe = (Resolve-Path $Exe).Path
 $fixture = Join-Path $PSScriptRoot "fixtures\install"
 $manifest = Join-Path $fixture "lpm.toml.fixture"
 $lock = Join-Path $fixture "lpm.lock.fixture"
+$utf8 = New-Object Text.UTF8Encoding $false
+
+if ($Baseline -ne "") {
+    if ([IO.Path]::GetFullPath($Out) -eq [IO.Path]::GetFullPath($Baseline)) {
+        Write-Error "-Out and -Baseline are the same directory; that would erase the baseline"
+        exit 1
+    }
+}
 
 $work = Join-Path $env:TEMP "lpm-fixture-install"
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
@@ -59,10 +87,15 @@ if (-not (Test-Path $lock)) {
 }
 Copy-Item $lock (Join-Path $work "lpm.lock")
 
-# The archive cache is a deliberate variable: warm is the common path, cold
-# proves the download+extract path produces the same bytes.
 if ($ColdCache) {
+    Write-Warning "-ColdCache wipes the REAL ~/.lpm archive and index caches (all projects on this machine)"
     & $Exe cache clean *> $null
+    # a swallowed failure here would leave the cache warm and still report a
+    # cold-cache PASS, which is the sort of quiet lie this harness exists to avoid
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "cache clean failed ($LASTEXITCODE); refusing to report a cold-cache result"
+        exit 1
+    }
 }
 
 Remove-Item $Out -Recurse -Force -ErrorAction SilentlyContinue
@@ -75,50 +108,67 @@ $process = Start-Process -FilePath $Exe -ArgumentList @("install", "--locked") `
     -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 
 if ($process.ExitCode -ne 0) {
-    Write-Output (Get-Content $stderrFile -Raw)
+    Write-Output ([IO.File]::ReadAllText($stderrFile, $utf8))
     Write-Error "fixture install failed with exit $($process.ExitCode)"
     exit 1
 }
 
-# path + hash of every produced file, sorted, with the temp root stripped
+# Path + hash of every produced file, sorted, with the temp root stripped.
+# -Force so hidden entries count: "the same tree" should not mean "the same
+# tree minus anything carrying the hidden attribute".
 $entries = @()
-foreach ($file in Get-ChildItem $work -Recurse -File | Sort-Object FullName) {
+foreach ($file in Get-ChildItem $work -Recurse -File -Force | Sort-Object FullName) {
     if ($file.Name -like "_std*.txt") { continue }
     $relative = $file.FullName.Substring($work.Length).TrimStart("\").Replace("\", "/")
     $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
     $entries += "$hash  $relative"
 }
-[IO.File]::WriteAllLines((Join-Path $Out "tree.txt"), $entries)
+[IO.File]::WriteAllLines((Join-Path $Out "tree.txt"), $entries, $utf8)
 
-# Warnings sorted: content is the contract, arrival order is not.
-#
-# Two things are scrubbed first. Home-relative paths, because they name the
-# machine. And the global-tool lines: the fixture declares no [tools], so
-# anything about a tool or a PATH shadow comes from the host's own
-# ~/.lpm/tools.toml leaking into every install on that box. That is host state,
-# not a property of the build under test, and leaving it in makes the gate fail
-# on a different machine for a reason that has nothing to do with the change.
-$warnings = @(
-    Get-Content $stderrFile -ErrorAction SilentlyContinue |
+# stdout: the ✓ lines, the counts, the summary. Two normalisations, both
+# necessary and neither of them hiding content:
+#   * the elapsed-time line is different on every run by definition
+#   * per-package ✓ lines are printed as jobs complete, so their order is a
+#     function of thread scheduling; sorting compares the multiset
+$stdout = @(
+    [IO.File]::ReadAllText($stdoutFile, $utf8) -split "`r?`n" |
     ForEach-Object { $_ -replace [regex]::Escape($env:USERPROFILE), "<HOME>" } |
-    Where-Object { $_ -notmatch "on PATH before lpm's shims" } |
+    # not anchored: ui::print_elapsed wraps the line in a dim-grey escape
+    # sequence, so `^Done in` never matches the actual bytes
+    Where-Object { $_ -notmatch 'Done in ' } |
+    Where-Object { $_.Trim() -ne "" } |
     Sort-Object
 )
-[IO.File]::WriteAllLines((Join-Path $Out "stderr-sorted.txt"), $warnings)
+[IO.File]::WriteAllLines((Join-Path $Out "stdout-sorted.txt"), $stdout, $utf8)
 
-Write-Output "Captured $($entries.Count) files and $($warnings.Count) stderr lines to $Out"
+# stderr, same treatment. The global-tool PATH warning is dropped: the fixture
+# declares no [tools], so it comes from the host's own ~/.lpm/tools.toml.
+$warnings = @(
+    [IO.File]::ReadAllText($stderrFile, $utf8) -split "`r?`n" |
+    ForEach-Object { $_ -replace [regex]::Escape($env:USERPROFILE), "<HOME>" } |
+    Where-Object { $_ -notmatch "on PATH before lpm's shims" } |
+    Where-Object { $_.Trim() -ne "" } |
+    Sort-Object
+)
+[IO.File]::WriteAllLines((Join-Path $Out "stderr-sorted.txt"), $warnings, $utf8)
+
+Write-Output "Captured $($entries.Count) files, $($stdout.Count) stdout lines, $($warnings.Count) stderr lines to $Out"
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($Baseline -eq "") { exit 0 }
 
 $differences = @()
-foreach ($name in @("tree.txt", "stderr-sorted.txt")) {
+foreach ($name in @("tree.txt", "stdout-sorted.txt", "stderr-sorted.txt")) {
     $old = Join-Path $Baseline $name
     $new = Join-Path $Out $name
     if (-not (Test-Path $old)) { $differences += "no baseline $name"; continue }
-    # @() so an empty capture (no warnings at all) is an empty array, not $null,
-    # which Compare-Object refuses
-    $diff = Compare-Object @(Get-Content $old) @(Get-Content $new)
+    # -CaseSensitive: the default comparison would accept packages/Promise.luau
+    # turning into packages/promise.luau
+    # ReadAllLines with an explicit UTF-8 decoder: Get-Content in PS 5.1 uses the
+    # ANSI codepage, and these files are full of ✓ and → written as UTF-8
+    $diff = Compare-Object `
+        @([IO.File]::ReadAllLines($old, $utf8)) `
+        @([IO.File]::ReadAllLines($new, $utf8)) -CaseSensitive
     if ($diff) {
         $differences += "CHANGED: $name"
         $diff | Select-Object -First 10 | ForEach-Object {
@@ -128,7 +178,7 @@ foreach ($name in @("tree.txt", "stderr-sorted.txt")) {
 }
 
 if ($differences.Count -eq 0) {
-    Write-Output "G3 PASS: install tree and warnings identical to $Baseline"
+    Write-Output "G3 PASS: tree, stdout and warnings identical to $Baseline"
     exit 0
 }
 Write-Output "G3 FAIL:"
