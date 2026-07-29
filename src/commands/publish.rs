@@ -111,10 +111,7 @@ fn publish_project(mut manifest: Manifest, dry_run: bool) -> Result<(), Error> {
     /* workspace deps become registry ones in the archive's manifest;
     the on-disk lpm.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
-    /* [overrides] never travel: only the installing project's table is
-    consulted, and an alias-form value refers to aliases only this
-    manifest has — shipping it would just mislead readers */
-    manifest.overrides.clear();
+    strip_local_tables(&mut manifest);
 
     let root = Path::new(".");
     let files = pack::packed_files(root, &manifest)?;
@@ -225,6 +222,16 @@ fn convert_workspace_dependencies(
     Ok(())
 }
 
+/** tables that never travel, dropped from the archive's manifest.
+[overrides] is only ever consulted on the installing project, and its
+alias-form values refer to aliases only this manifest has; [patches] points
+at files in this repo, which the archive doesn't carry. shipping either
+would just mislead readers of the packed manifest. */
+fn strip_local_tables(manifest: &mut Manifest) {
+    manifest.overrides.clear();
+    manifest.patches.clear();
+}
+
 /// registry caps descriptions at 200 chars; counted as chars, not bytes.
 fn validate_description(description: Option<&str>) -> Result<(), Error> {
     let Some(description) = description else {
@@ -333,6 +340,24 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn publish_strips_overrides_and_patches() {
+        let mut manifest: Manifest = toml::from_str(
+            "[package]\nname = \"acme/x\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"shared\"\n\n\
+             [overrides]\n\"a.b\" = \"acme/fork\"\n\n\
+             [patches]\n\"acme/dep@1.0.0\" = \"patches/acme_dep@1.0.0.patch\"\n",
+        )
+        .unwrap();
+        assert!(!manifest.overrides.is_empty());
+        assert!(!manifest.patches.is_empty());
+
+        strip_local_tables(&mut manifest);
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(!serialized.contains("overrides"), "{serialized}");
+        assert!(!serialized.contains("patches"), "{serialized}");
     }
 
     #[test]

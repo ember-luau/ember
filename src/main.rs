@@ -47,6 +47,10 @@ enum Commands {
     #[command(subcommand)]
     Index(commands::index::IndexCommand),
 
+    /// Edit a dependency's source and keep the edit across installs
+    #[command(arg_required_else_help = true)]
+    Patch(commands::patch::PatchArgs),
+
     /// Install dependencies and tools from lpm.toml
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
@@ -98,6 +102,7 @@ fn main() {
         Commands::Add(args) => commands::add::run(args),
         Commands::Index(command) => commands::index::run(command),
         Commands::Install(args) => commands::install::run(args),
+        Commands::Patch(args) => commands::patch::run(args),
         Commands::Publish(args) => commands::publish::run(args),
         Commands::Cache(command) => commands::cache::run(command),
         Commands::SelfManage(command) => commands::self_cmd::run(command),

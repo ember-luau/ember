@@ -5,7 +5,14 @@ use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
 
 /// Never published; matched by name at any depth.
-const SKIP_NAMES: [&str; 5] = [".git", ".lpm-staging", "lpm.lock", "target", "node_modules"];
+const SKIP_NAMES: [&str; 6] = [
+    ".git",
+    ".lpm-staging",
+    ".lpm-patch",
+    "lpm.lock",
+    "target",
+    "node_modules",
+];
 
 /// Files to publish, relative to `root`, sorted so the archive is
 /// deterministic. Skips packages-out folders and `SKIP_NAMES`; without
@@ -193,6 +200,7 @@ mod tests {
         write(&base, "src/init.luau", "return {}");
         write(&base, ".git/HEAD", "ref: refs/heads/master");
         write(&base, ".lpm-staging/rocket.tar.gz", "");
+        write(&base, ".lpm-patch/acme_dep@1.0.0/src/init.luau", "");
         write(&base, "lpm.lock", "version = 1");
         write(&base, "target/debug/lpm", "");
         write(&base, "node_modules/left-pad/index.js", "");

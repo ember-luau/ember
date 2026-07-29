@@ -191,6 +191,7 @@ pub fn run() -> Result<(), Error> {
         indices: Default::default(),
         dependencies: Default::default(),
         overrides: Default::default(),
+        patches: Default::default(),
         tools: Default::default(),
         scripts: Default::default(),
         studio: Default::default(),
@@ -200,28 +201,43 @@ pub fn run() -> Result<(), Error> {
     crate::ui::print_success("Created lpm.toml");
 
     if let Some(message) = gitignore_lpm(Path::new(".gitignore"))? {
-        crate::ui::print_success(message);
+        crate::ui::print_success(&message);
     }
 
     Ok(())
 }
 
-/** git-ignores the packages folder, creating .gitignore if missing.
-returns a message saying what changed, None if already ignored. */
-fn gitignore_lpm(path: &Path) -> Result<Option<&'static str>, Error> {
-    const ENTRY: &str = "packages/";
+/** git-ignores lpm's generated folders (packages output, patch working
+copies), creating .gitignore if missing. returns a message saying what
+changed, None when everything was already covered. */
+fn gitignore_lpm(path: &Path) -> Result<Option<String>, Error> {
+    const ENTRIES: [&str; 2] = ["packages/", ".lpm-patch/"];
+
+    // any common spelling counts: bare, trailing slash, leading slash
+    let ignored = |contents: &str, entry: &str| {
+        let bare = entry.trim_end_matches('/');
+        contents.lines().map(str::trim).any(|line| {
+            line == bare
+                || line == entry
+                || line.strip_prefix('/') == Some(bare)
+                || line.strip_prefix('/') == Some(entry)
+        })
+    };
 
     if !path.exists() {
-        std::fs::write(path, format!("{ENTRY}\n"))?;
-        return Ok(Some("Created .gitignore with packages/"));
+        std::fs::write(path, format!("{}\n", ENTRIES.join("\n")))?;
+        return Ok(Some(format!(
+            "Created .gitignore with {}",
+            ENTRIES.join(" and ")
+        )));
     }
 
     let contents = std::fs::read_to_string(path)?;
-    let already_ignored = contents
-        .lines()
-        .map(str::trim)
-        .any(|line| matches!(line, "packages" | "packages/" | "/packages" | "/packages/"));
-    if already_ignored {
+    let missing: Vec<&str> = ENTRIES
+        .into_iter()
+        .filter(|entry| !ignored(&contents, entry))
+        .collect();
+    if missing.is_empty() {
         return Ok(None);
     }
 
@@ -229,10 +245,15 @@ fn gitignore_lpm(path: &Path) -> Result<Option<&'static str>, Error> {
     if !updated.is_empty() && !updated.ends_with('\n') {
         updated.push('\n');
     }
-    updated.push_str(ENTRY);
-    updated.push('\n');
+    for entry in &missing {
+        updated.push_str(entry);
+        updated.push('\n');
+    }
     std::fs::write(path, updated)?;
-    Ok(Some("Added packages/ to .gitignore"))
+    Ok(Some(format!(
+        "Added {} to .gitignore",
+        missing.join(" and ")
+    )))
 }
 
 fn validate_name(input: &str) -> Result<(), String> {
@@ -375,28 +396,36 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".gitignore");
 
-        // missing file gets created
+        // missing file gets created with both entries
         assert_eq!(
-            gitignore_lpm(&path).unwrap(),
-            Some("Created .gitignore with packages/")
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "packages/\n");
-
-        // entry already there (any common spelling) is left alone
-        assert_eq!(gitignore_lpm(&path).unwrap(), None);
-        std::fs::write(&path, "/target\npackages\n").unwrap();
-        assert_eq!(gitignore_lpm(&path).unwrap(), None);
-
-        /* file without the entry gets it appended, even with
-        no trailing newline */
-        std::fs::write(&path, "/target").unwrap();
-        assert_eq!(
-            gitignore_lpm(&path).unwrap(),
-            Some("Added packages/ to .gitignore")
+            gitignore_lpm(&path).unwrap().as_deref(),
+            Some("Created .gitignore with packages/ and .lpm-patch/")
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "/target\npackages/\n"
+            "packages/\n.lpm-patch/\n"
+        );
+
+        // both there (any common spelling) leaves the file alone
+        assert_eq!(gitignore_lpm(&path).unwrap(), None);
+        std::fs::write(&path, "/target\npackages\n/.lpm-patch\n").unwrap();
+        assert_eq!(gitignore_lpm(&path).unwrap(), None);
+
+        /* file missing entries gets exactly the missing ones appended,
+        even with no trailing newline */
+        std::fs::write(&path, "/target").unwrap();
+        assert_eq!(
+            gitignore_lpm(&path).unwrap().as_deref(),
+            Some("Added packages/ and .lpm-patch/ to .gitignore")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "/target\npackages/\n.lpm-patch/\n"
+        );
+        std::fs::write(&path, "packages/\n").unwrap();
+        assert_eq!(
+            gitignore_lpm(&path).unwrap().as_deref(),
+            Some("Added .lpm-patch/ to .gitignore")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

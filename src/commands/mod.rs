@@ -4,6 +4,7 @@ pub mod execute;
 pub mod index;
 pub mod init;
 pub mod install;
+pub mod patch;
 pub mod publish;
 pub mod run;
 pub mod self_cmd;

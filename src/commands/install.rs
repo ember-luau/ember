@@ -1,13 +1,14 @@
 use crate::error::Error;
 use crate::net::github::GithubAPI;
-use crate::project::lockfile::{LockedPackage, Lockfile};
-use crate::project::manifest::{Environment, Manifest, Tool};
+use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
+use crate::project::manifest::{self, Environment, Manifest, Tool};
 use crate::project::package;
 use crate::project::requires;
 use crate::project::rojo;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
 use crate::registry::resolver;
+use crate::sys::git;
 use crate::sys::hash::fnv1a_parts;
 use crate::sys::paths;
 use crate::tools;
@@ -55,6 +56,17 @@ struct Job {
     link: Option<String>,
     /// [overrides]-rewritten edges of this package: declared alias -> replacement name.
     redirects: BTreeMap<String, String>,
+    /// the [patches] entry this copy gets, when one names it.
+    patch: Option<JobPatch>,
+}
+
+/** a patch ready to apply: what the lockfile records, plus the file
+resolved to an absolute path up front — workers apply it while
+`workspace::in_dir` may have moved the process cwd. */
+#[derive(Clone)]
+struct JobPatch {
+    record: PatchRecord,
+    file: PathBuf,
 }
 
 /// how many packages download and unpack at once.
@@ -123,7 +135,7 @@ fn install_project(
     landing mid-install has to bust the next fast path */
     let state_inputs = state_inputs(include_global_tools);
 
-    let jobs: Vec<Job> = if args.locked {
+    let mut jobs: Vec<Job> = if args.locked {
         let lock = Lockfile::load()?;
         /* a v1 lock predates contexts: replaying it would scatter a
         dependent and its deps across environment roots, and the nested
@@ -133,19 +145,26 @@ fn install_project(
         if lock.version < 2 {
             return Err(Error::LockfileOutdated(lock.version));
         }
+        /* --locked replays the lock's own patch records without consulting
+        [patches] at all; a recorded file that's gone or edited is drift
+        the lock can't vouch for, so it fails here, before any download */
         lock.packages
             .into_iter()
-            .map(|package| Job {
-                name: package.name,
-                version: package.version,
-                environment: Some(package.environment),
-                context: package.context.unwrap_or(package.environment),
-                source: package.source,
-                index_url: package.index,
-                link: package.link,
-                redirects: package.redirects,
+            .map(|package| {
+                let patch = locked_patch(&package.name, Path::new("."), package.patch)?;
+                Ok(Job {
+                    name: package.name,
+                    version: package.version,
+                    environment: Some(package.environment),
+                    context: package.context.unwrap_or(package.environment),
+                    source: package.source,
+                    index_url: package.index,
+                    link: package.link,
+                    redirects: package.redirects,
+                    patch,
+                })
             })
-            .collect()
+            .collect::<Result<Vec<Job>, Error>>()?
     } else {
         let resolve_started = Instant::now();
         let mode = if args.refresh {
@@ -174,9 +193,19 @@ fn install_project(
                 index_url: package.index_url,
                 link: package.link,
                 redirects: package.redirects,
+                patch: None,
             })
             .collect()
     };
+
+    /* [patches] lands on the resolved graph before anything downloads: a
+    key that no longer matches (version drift, package gone) is an error
+    here, never a silent skip — an unapplied patch could be someone's
+    security fix. --locked skipped this on purpose; its patches came from
+    the lock above */
+    if !args.locked {
+        attach_patches(manifest, Path::new("."), &mut jobs)?;
+    }
 
     /* two [config] keys pointed at one folder would let one context's
     storage silently overwrite the other's; refuse before touching disk */
@@ -328,11 +357,19 @@ local input that can change what an install produces. coarse on purpose —
 a comment edit in lpm.toml busts the fast path (a wasted handful of
 milliseconds), while anything finer risks missing an input (a broken
 install). */
-fn state_hash(manifest_text: &str, lock_text: &str, tools_text: &str) -> String {
+fn state_hash(
+    manifest_text: &str,
+    lock_text: &str,
+    tools_text: &str,
+    patches_text: &str,
+) -> String {
     let hash = fnv1a_parts(&[
         manifest_text.as_bytes(),
         lock_text.as_bytes(),
         tools_text.as_bytes(),
+        /* fnv1a_parts is length-prefixed, so growing a fourth part just
+        moves every hash once (one rebuild) — no version bump needed */
+        patches_text.as_bytes(),
     ]);
     /* v2: bumped with the self-contained-roots layout change, so every
     project's first install under the new binary misses its old stamps and
@@ -350,7 +387,7 @@ member installs don't consume global tools (include_global = false), so
 those hash a fixed marker instead of the file — editing ~/.lpm/tools.toml
 shouldn't wipe and rebuild every member of a workspace. absence is a
 distinct marker too, not an empty string. */
-fn state_inputs(include_global: bool) -> Option<(String, String)> {
+fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
     let manifest_text = fs::read_to_string(crate::project::manifest::MANIFEST_FILE).ok()?;
     let tools_text = if include_global {
         let path = paths::global_tools_file().ok()?;
@@ -362,14 +399,43 @@ fn state_inputs(include_global: bool) -> Option<(String, String)> {
     } else {
         "<not consulted>".to_string()
     };
-    Some((manifest_text, tools_text))
+    let patches_text = patches_state_text(&manifest_text);
+    Some((manifest_text, tools_text, patches_text))
+}
+
+/** the [patches] files' bytes, concatenated in manifest key order, so
+editing a patch file without touching lpm.toml still busts the fast path.
+a missing file is a distinct marker, not an empty string — same discipline
+as the global tools file's `<absent>`. */
+fn patches_state_text(manifest_text: &str) -> String {
+    let Ok(manifest) = toml::from_str::<Manifest>(manifest_text) else {
+        /* an unparseable manifest can't say which patches exist; the fast
+        path fails elsewhere on the same input, this just stays stable */
+        return "<unparseable manifest>".to_string();
+    };
+    let mut text = String::new();
+    for (key, path) in &manifest.patches {
+        text.push_str(key);
+        text.push('\0');
+        match fs::read_to_string(path) {
+            Ok(contents) => text.push_str(&contents),
+            Err(_) => text.push_str("<missing>"),
+        }
+        text.push('\0');
+    }
+    text
 }
 
 /// the full state hash as things stand right now; None if any input is unreadable.
 fn current_state_hash(include_global: bool) -> Option<String> {
-    let (manifest_text, tools_text) = state_inputs(include_global)?;
+    let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
     let lock_text = fs::read_to_string(crate::project::lockfile::LOCKFILE).ok()?;
-    Some(state_hash(&manifest_text, &lock_text, &tools_text))
+    Some(state_hash(
+        &manifest_text,
+        &lock_text,
+        &tools_text,
+        &patches_text,
+    ))
 }
 
 /// how much of an install the unchanged-inputs check lets us skip.
@@ -462,6 +528,159 @@ fn fast_path(
     })
 }
 
+/** resolves [patches] against what this install will actually build and
+hangs each patch on its matching jobs. every key must land exactly: a key
+naming a package that resolved to a different version (or is not in the
+graph at all) fails before any download, and one key must mean one
+archive — a multi-target pesde package resolving to different archives
+under different roots is refused rather than half-patched. */
+fn attach_patches(manifest: &Manifest, project_dir: &Path, jobs: &mut [Job]) -> Result<(), Error> {
+    for (key, path) in &manifest.patches {
+        let (name, version) = manifest::patch_key(key)?;
+        let relative = manifest::patch_path(key, path)?;
+
+        let matching: Vec<usize> = jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| job.name == name)
+            .map(|(slot, _)| slot)
+            .collect();
+        if matching.is_empty() {
+            return Err(Error::PatchDrift {
+                name: name.clone(),
+                version: version.to_string(),
+                reason: format!("{name} is not a dependency of this project"),
+            });
+        }
+
+        let version_text = version.to_string();
+        let hits: Vec<usize> = matching
+            .iter()
+            .copied()
+            .filter(|slot| jobs[*slot].version == version_text)
+            .collect();
+        if hits.is_empty() {
+            return Err(Error::PatchDrift {
+                name: name.clone(),
+                version: version_text,
+                reason: format!("{name} resolved to {}", jobs[matching[0]].version),
+            });
+        }
+        /* contexts resolve independently, so one name CAN land at different
+        versions under different roots; a copy the key doesn't cover would
+        install unpatched, which is the silent half-skip this feature must
+        never do */
+        if hits.len() != matching.len() {
+            let other = matching
+                .iter()
+                .find(|slot| jobs[**slot].version != version_text)
+                .map(|slot| jobs[*slot].version.clone())
+                .unwrap_or_default();
+            return Err(Error::PatchDrift {
+                name: name.clone(),
+                version: version_text,
+                reason: format!(
+                    "{name} also resolved to {other} in another environment tree, which the patch would not cover"
+                ),
+            });
+        }
+
+        // one key means one archive; check before anything downloads
+        let mut urls = BTreeSet::new();
+        for slot in &hits {
+            match &jobs[*slot].source {
+                index::DownloadSource::Zip { url } | index::DownloadSource::TarGz { url } => {
+                    urls.insert(url.clone());
+                }
+                index::DownloadSource::Workspace { .. } => {
+                    return Err(Error::ManifestInvalid(format!(
+                        "[patches] key '{key}' names a workspace member; edit its source directly instead of patching"
+                    )));
+                }
+            }
+        }
+        if urls.len() > 1 {
+            let mut urls = urls.into_iter();
+            return Err(Error::PatchMultiTarget {
+                name,
+                version: version_text,
+                first: urls.next().unwrap_or_default(),
+                second: urls.next().unwrap_or_default(),
+            });
+        }
+
+        let file = std::path::absolute(project_dir.join(&relative))?;
+        let bytes = fs::read(&file).map_err(|_| Error::PatchFileMissing {
+            key: key.clone(),
+            path: path.clone(),
+        })?;
+        let patch = JobPatch {
+            record: PatchRecord::new(path.clone(), &bytes),
+            file,
+        };
+        for slot in hits {
+            jobs[slot].patch = Some(patch.clone());
+        }
+    }
+    Ok(())
+}
+
+/** turns a lock entry's patch record back into an applicable patch,
+verifying the file still holds the exact bytes the lock was built from. */
+fn locked_patch(
+    name: &str,
+    project_dir: &Path,
+    record: Option<PatchRecord>,
+) -> Result<Option<JobPatch>, Error> {
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let invalid = |reason: &'static str| Error::PatchLockInvalid {
+        name: name.to_string(),
+        path: record.path.clone(),
+        reason,
+    };
+    let file = std::path::absolute(project_dir.join(&record.path))?;
+    let bytes = fs::read(&file).map_err(|_| invalid("is missing"))?;
+    if !record.matches(&bytes) {
+        return Err(invalid("has changed since it was locked"));
+    }
+    Ok(Some(JobPatch { record, file }))
+}
+
+/** applies a saved patch onto the freshly extracted tree. the diff carries
+git's own a/ b/ headers (the working copy is its own repo), so `git apply`
+consumes it at default -p1. failure is a hard error naming the package,
+the patch, and git's stderr — never a warning.
+
+the staging dir is git-inited first and the .git dropped after, and that
+is load-bearing: staging lives inside the user's project, which is almost
+always a git repo, and `git apply` under an ENCLOSING repo resolves patch
+paths against that repo's root — silently skipping every path outside the
+subdir, with exit 0. a throwaway repo in staging pins the resolution to
+the tree being patched. */
+fn apply_patch(name: &str, patch: &JobPatch, staging: &Path) -> Result<(), Error> {
+    if !git::available() {
+        return Err(Error::GitMissing);
+    }
+    let in_staging = staging.to_string_lossy().into_owned();
+    git::run(&["-C", &in_staging, "init", "--quiet"]).map_err(|stderr| Error::PatchGitFailed {
+        action: "init",
+        stderr,
+    })?;
+    let applied =
+        git::run(&["-C", &in_staging, "apply", &patch.file.to_string_lossy()]).map_err(|stderr| {
+            Error::PatchApplyFailed {
+                name: name.to_string(),
+                patch: patch.record.path.clone(),
+                stderr,
+            }
+        });
+    // win or lose, the throwaway repo must not travel into the store
+    let _ = fs::remove_dir_all(staging.join(".git"));
+    applied
+}
+
 /** whether a fresh resolution landed exactly where the lockfile already
 stands — the "checked the indices, nothing new" case that skips the
 rebuild. environment is compared only when resolution knows it up front;
@@ -489,6 +708,9 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                     /* redirects shape the nested links on disk; an [overrides]
                     edit that lands on the same versions still has to rebuild */
                     && job.redirects == locked.redirects
+                    /* same for a patch: an edited file changes the record's
+                    hash, so identical versions still rebuild */
+                    && job.patch.as_ref().map(|patch| &patch.record) == locked.patch.as_ref()
                     && job
                         .environment
                         .is_none_or(|environment| environment == locked.environment)
@@ -551,15 +773,15 @@ since this install just wrote it. */
 fn write_state_stamps(
     manifest: &Manifest,
     environments: &BTreeSet<Environment>,
-    inputs: &Option<(String, String)>,
+    inputs: &Option<(String, String, String)>,
 ) {
-    let Some((manifest_text, tools_text)) = inputs else {
+    let Some((manifest_text, tools_text, patches_text)) = inputs else {
         return;
     };
     let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::LOCKFILE) else {
         return;
     };
-    let hash = state_hash(manifest_text, &lock_text, tools_text);
+    let hash = state_hash(manifest_text, &lock_text, tools_text, patches_text);
     for environment in environments {
         let dir = manifest.packages_out(*environment).join(".lpm");
         if fs::create_dir_all(&dir).is_ok() {
@@ -686,6 +908,7 @@ fn install_packages(
                         link: job.link,
                         index: job.index_url,
                         redirects: job.redirects,
+                        patch: job.patch.map(|patch| patch.record),
                         source: job.source,
                     });
                 }
@@ -741,6 +964,14 @@ fn install_one(
     }
     index::download(&job.source, staging, cache)?;
     package::flatten_single_dir(staging)?;
+
+    /* the tree is staged and pristine here; patch it now so environment
+    detection, rojo mirroring, require rewriting, and the nested links all
+    see patched files. two contexts of one package run this twice and both
+    copies get the same patch */
+    if let Some(patch) = &job.patch {
+        apply_patch(&job.name, patch, staging)?;
+    }
 
     /* indices usually know the environment; otherwise ask the files
     (lpm.toml -> pesde.toml -> wally.toml) */
@@ -886,6 +1117,8 @@ fn link_workspace_member(
         link: job.link,
         index: job.index_url,
         redirects: job.redirects,
+        // members are the user's own source; attach_patches refused them
+        patch: None,
         source: job.source,
     })
 }
@@ -1128,19 +1361,320 @@ mod tests {
 
     #[test]
     fn state_hash_tracks_every_input() {
-        let base = state_hash("manifest", "lock", "tools");
+        let base = state_hash("manifest", "lock", "tools", "patches");
         assert!(base.starts_with("lpm-state-v2:"));
-        assert_eq!(base, state_hash("manifest", "lock", "tools"));
+        assert_eq!(base, state_hash("manifest", "lock", "tools", "patches"));
 
         // each input moves the hash, and boundaries are unambiguous
-        assert_ne!(base, state_hash("manifest2", "lock", "tools"));
-        assert_ne!(base, state_hash("manifest", "lock2", "tools"));
-        assert_ne!(base, state_hash("manifest", "lock", "tools2"));
+        assert_ne!(base, state_hash("manifest2", "lock", "tools", "patches"));
+        assert_ne!(base, state_hash("manifest", "lock2", "tools", "patches"));
+        assert_ne!(base, state_hash("manifest", "lock", "tools2", "patches"));
+        assert_ne!(base, state_hash("manifest", "lock", "tools", "patches2"));
         assert_ne!(
-            state_hash("ab", "c", ""),
-            state_hash("a", "bc", ""),
+            state_hash("ab", "c", "", ""),
+            state_hash("a", "bc", "", ""),
             "input boundaries must be part of the hash"
         );
+    }
+
+    #[test]
+    fn patch_state_text_reads_the_files_in_key_order() {
+        let base = std::env::temp_dir().join("lpm-test-patch-state");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("patches")).unwrap();
+        fs::write(base.join("patches/b.patch"), "bbb").unwrap();
+
+        /* paths in the manifest are project-relative; this test runs from
+        the crate dir, so spell them absolute to stay hermetic */
+        let patch = |file: &str| {
+            base.join("patches")
+                .join(file)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        let manifest_text = format!(
+            "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[patches]\n\
+             \"acme/a@1.0.0\" = \"{}\"\n\"acme/b@1.0.0\" = \"{}\"\n",
+            patch("a.patch"),
+            patch("b.patch"),
+        );
+
+        // key order, content included, missing file a distinct marker
+        let text = patches_state_text(&manifest_text);
+        assert!(text.contains("acme/a@1.0.0\0<missing>\0"), "{text:?}");
+        assert!(text.contains("acme/b@1.0.0\0bbb\0"), "{text:?}");
+
+        // editing a patch file (manifest untouched) moves the hash
+        fs::write(base.join("patches/b.patch"), "ccc").unwrap();
+        let edited = patches_state_text(&manifest_text);
+        assert_ne!(text, edited);
+        assert_ne!(
+            state_hash("m", "l", "t", &text),
+            state_hash("m", "l", "t", &edited)
+        );
+
+        // no [patches] means an empty part, not a missing one
+        assert_eq!(
+            patches_state_text("[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n"),
+            ""
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    fn patch_job(name: &str, version: &str, url: &str, context: Environment) -> Job {
+        Job {
+            name: name.to_string(),
+            version: version.to_string(),
+            environment: None,
+            context,
+            source: index::DownloadSource::TarGz {
+                url: url.to_string(),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: None,
+            redirects: BTreeMap::new(),
+            patch: None,
+        }
+    }
+
+    #[test]
+    fn patches_attach_before_anything_downloads_or_not_at_all() {
+        let base = std::env::temp_dir().join("lpm-test-attach-patches");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("patches")).unwrap();
+        fs::write(base.join("patches/traits.patch"), "diff").unwrap();
+
+        let manifest = |key: &str| -> Manifest {
+            toml::from_str(&format!(
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\n\
+                 [patches]\n\"{key}\" = \"patches/traits.patch\"\n"
+            ))
+            .unwrap()
+        };
+
+        /* the happy path: one key, two contexts of the same archive, both
+        copies get the same patch */
+        let mut jobs = vec![
+            patch_job(
+                "chief/traits",
+                "0.2.0",
+                "https://cdn.example/t/0.2.0.tar.gz",
+                Environment::Shared,
+            ),
+            patch_job(
+                "chief/traits",
+                "0.2.0",
+                "https://cdn.example/t/0.2.0.tar.gz",
+                Environment::Server,
+            ),
+        ];
+        attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs).unwrap();
+        assert!(jobs.iter().all(|job| job.patch.is_some()));
+        let records: Vec<_> = jobs
+            .iter()
+            .map(|job| job.patch.as_ref().unwrap().record.clone())
+            .collect();
+        assert_eq!(records[0], records[1]);
+
+        // version drift is an error, not a skip
+        let mut jobs = vec![patch_job(
+            "chief/traits",
+            "0.3.0",
+            "https://cdn.example/t/0.3.0.tar.gz",
+            Environment::Shared,
+        )];
+        let drift = attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs);
+        assert!(
+            matches!(&drift, Err(Error::PatchDrift { reason, .. }) if reason.contains("resolved to 0.3.0")),
+            "{drift:?}"
+        );
+
+        // a package that's not in the graph at all is the other drift flavor
+        let mut jobs = vec![patch_job(
+            "acme/other",
+            "1.0.0",
+            "https://cdn.example/o/1.0.0.tar.gz",
+            Environment::Shared,
+        )];
+        let missing = attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs);
+        assert!(
+            matches!(&missing, Err(Error::PatchDrift { reason, .. }) if reason.contains("not a dependency")),
+            "{missing:?}"
+        );
+
+        /* same name@version resolving to two different archives (a
+        multi-target pesde package under two roots) is refused */
+        let mut jobs = vec![
+            patch_job(
+                "chief/traits",
+                "0.2.0",
+                "https://cdn.example/t/0.2.0/shared.tar.gz",
+                Environment::Shared,
+            ),
+            patch_job(
+                "chief/traits",
+                "0.2.0",
+                "https://cdn.example/t/0.2.0/server.tar.gz",
+                Environment::Server,
+            ),
+        ];
+        assert!(matches!(
+            attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs),
+            Err(Error::PatchMultiTarget { .. })
+        ));
+
+        // a missing patch file fails cleanly too
+        let mut jobs = vec![patch_job(
+            "chief/traits",
+            "0.2.0",
+            "https://cdn.example/t/0.2.0.tar.gz",
+            Environment::Shared,
+        )];
+        let mut gone = manifest("chief/traits@0.2.0");
+        gone.patches.insert(
+            "chief/traits@0.2.0".to_string(),
+            "patches/nope.patch".to_string(),
+        );
+        assert!(matches!(
+            attach_patches(&gone, &base, &mut jobs),
+            Err(Error::PatchFileMissing { .. })
+        ));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn one_name_at_two_versions_across_contexts_is_drift_not_a_half_patch() {
+        let base = std::env::temp_dir().join("lpm-test-partial-patch");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("patches")).unwrap();
+        fs::write(base.join("patches/traits.patch"), "diff").unwrap();
+        let manifest: Manifest = toml::from_str(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\n\
+             [patches]\n\"chief/traits@0.2.0\" = \"patches/traits.patch\"\n",
+        )
+        .unwrap();
+
+        /* contexts resolve independently: shared landed on 0.2.0, server on
+        0.3.0. patching only the 0.2.0 copy would be a silent half-skip */
+        let mut jobs = vec![
+            patch_job(
+                "chief/traits",
+                "0.2.0",
+                "https://cdn.example/t/0.2.0.tar.gz",
+                Environment::Shared,
+            ),
+            patch_job(
+                "chief/traits",
+                "0.3.0",
+                "https://cdn.example/t/0.3.0.tar.gz",
+                Environment::Server,
+            ),
+        ];
+        let partial = attach_patches(&manifest, &base, &mut jobs);
+        assert!(
+            matches!(&partial, Err(Error::PatchDrift { reason, .. })
+                if reason.contains("also resolved to 0.3.0")),
+            "{partial:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** regression: staging lives inside the user's project, which is
+    normally a git repo, and `git apply` under an enclosing repo silently
+    skips paths outside its subdir with exit 0. the apply must isolate
+    itself or patches no-op in every real project. */
+    #[test]
+    fn patches_apply_inside_an_enclosing_git_repo() {
+        if !git::available() {
+            return;
+        }
+        let base = std::env::temp_dir().join("lpm-test-apply-enclosed");
+        let _ = fs::remove_dir_all(&base);
+        let staging = base.join("project/.lpm-staging/pkg");
+        fs::create_dir_all(staging.join("src")).unwrap();
+        // the trap: an enclosing repo above the staging dir
+        git::run(&[
+            "-C",
+            &base.join("project").to_string_lossy(),
+            "init",
+            "--quiet",
+        ])
+        .unwrap();
+        fs::write(staging.join("src/init.luau"), "return 1\n").unwrap();
+
+        let patch_file = base.join("the.patch");
+        fs::write(
+            &patch_file,
+            "diff --git a/src/init.luau b/src/init.luau\n\
+             --- a/src/init.luau\n\
+             +++ b/src/init.luau\n\
+             @@ -1 +1 @@\n\
+             -return 1\n\
+             +return 2 -- patched\n",
+        )
+        .unwrap();
+        let patch = JobPatch {
+            record: PatchRecord::new("patches/x.patch".to_string(), b"diff"),
+            file: patch_file,
+        };
+
+        apply_patch("acme/pkg", &patch, &staging).unwrap();
+        assert_eq!(
+            fs::read_to_string(staging.join("src/init.luau")).unwrap(),
+            "return 2 -- patched\n"
+        );
+        // the throwaway repo never travels into the store
+        assert!(!staging.join(".git").exists());
+
+        // and a patch that doesn't fit is a hard error, not a warning
+        let bad = JobPatch {
+            record: PatchRecord::new("patches/x.patch".to_string(), b"diff"),
+            file: base.join("the.patch"),
+        };
+        fs::write(staging.join("src/init.luau"), "something else\n").unwrap();
+        assert!(matches!(
+            apply_patch("acme/pkg", &bad, &staging),
+            Err(Error::PatchApplyFailed { .. })
+        ));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn locked_patches_verify_the_recorded_bytes() {
+        let base = std::env::temp_dir().join("lpm-test-locked-patch");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("x.patch");
+        fs::write(&file, "diff").unwrap();
+
+        // matching bytes replay fine
+        let record = PatchRecord::new("x.patch".to_string(), b"diff");
+        assert!(
+            locked_patch("acme/x", &base, Some(record.clone()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(locked_patch("acme/x", &base, None).unwrap().is_none());
+
+        // edited since it was locked
+        fs::write(&file, "different").unwrap();
+        assert!(matches!(
+            locked_patch("acme/x", &base, Some(record.clone())),
+            Err(Error::PatchLockInvalid { reason, .. }) if reason.contains("changed")
+        ));
+
+        // gone entirely
+        fs::remove_file(&file).unwrap();
+        assert!(matches!(
+            locked_patch("acme/x", &base, Some(record)),
+            Err(Error::PatchLockInvalid { reason, .. }) if reason.contains("missing")
+        ));
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1180,6 +1714,7 @@ mod tests {
             index_url: "https://example.com/index".to_string(),
             link: Some("thing".to_string()),
             redirects: BTreeMap::new(),
+            patch: None,
         };
         let locked = |context: Option<Environment>| LockedPackage {
             name: "acme/thing".to_string(),
@@ -1189,6 +1724,7 @@ mod tests {
             link: Some("thing".to_string()),
             index: "https://example.com/index".to_string(),
             redirects: BTreeMap::new(),
+            patch: None,
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -1237,6 +1773,27 @@ mod tests {
             &[job("1.0.0", "https://example.com/thing/1.0.0"), server_copy],
             &two_contexts
         ));
+
+        /* an identical resolution with a different (or new, or edited)
+        patch is a mismatch: patch bytes shape what lands on disk */
+        let with_patch = |bytes: &[u8]| {
+            let mut patched = job("1.0.0", "https://example.com/thing/1.0.0");
+            patched.patch = Some(JobPatch {
+                record: PatchRecord::new("patches/thing.patch".to_string(), bytes),
+                file: PathBuf::from("patches/thing.patch"),
+            });
+            patched
+        };
+        assert!(!jobs_match_lock(&[with_patch(b"diff")], &lock));
+        let mut locked_patched = locked(None);
+        locked_patched.patch = Some(PatchRecord::new("patches/thing.patch".to_string(), b"diff"));
+        let patched_lock = Lockfile::new(vec![locked_patched]);
+        assert!(jobs_match_lock(&[with_patch(b"diff")], &patched_lock));
+        assert!(!jobs_match_lock(&[with_patch(b"edited")], &patched_lock));
+        assert!(!jobs_match_lock(
+            &[job("1.0.0", "https://example.com/thing/1.0.0")],
+            &patched_lock
+        ));
     }
 
     #[test]
@@ -1262,6 +1819,7 @@ mod tests {
             index_url: "https://example.com/index".to_string(),
             link: link.map(str::to_string),
             redirects: BTreeMap::new(),
+            patch: None,
         };
         let extracted = |entry: Option<&str>| Extracted {
             environment: Environment::Shared,
@@ -1308,6 +1866,7 @@ mod tests {
             index_url: "https://example.com/index".to_string(),
             link: None,
             redirects: BTreeMap::new(),
+            patch: None,
         };
 
         // one context: no collision possible, whatever [config] says
@@ -1345,7 +1904,11 @@ mod tests {
         /* the lock half of the hash reads from the cwd (the repo root under
         cargo test); the stamps just have to be consistent with whatever it
         hashes to, and absent when there's no lockfile at all */
-        let inputs = Some(("manifest text".to_string(), "<absent>".to_string()));
+        let inputs = Some((
+            "manifest text".to_string(),
+            "<absent>".to_string(),
+            String::new(),
+        ));
         let environments: BTreeSet<Environment> = [Environment::Shared, Environment::Luau]
             .into_iter()
             .collect();
@@ -1356,7 +1919,7 @@ mod tests {
             let _ = fs::remove_dir_all(&base);
             return;
         };
-        let expected = state_hash("manifest text", &lock_text, "<absent>");
+        let expected = state_hash("manifest text", &lock_text, "<absent>", "");
         for environment in ["shared", "luau"] {
             assert_eq!(
                 fs::read_to_string(
