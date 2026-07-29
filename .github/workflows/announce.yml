@@ -45,8 +45,10 @@ jobs:
           fi
 
           # Read the release from the event payload with jq rather than
-          # `${{ github.event.release.body }}`: interpolating release text
-          # into a shell script would run a $(...) or backtick in the notes.
+          # expanding github.event.release.body with expression syntax:
+          # splicing release text into a shell script would run a $(...) or
+          # backtick in the notes. (Actions expands expressions even inside
+          # shell comments, so the syntax can't be written out here either.)
           if [ -z "$(jq -r '.release.body // "" | gsub("\\s"; "")' "$GITHUB_EVENT_PATH")" ]; then
             echo "::notice::Release body is empty (assets still uploading, or the notes aren't written yet); waiting for an edit that has them."
             echo "skip=true" >> "$GITHUB_OUTPUT"
