@@ -644,6 +644,7 @@ mod tests {
     }
 
     /// the deepest source the guard lets through: it refuses `>` the ceiling, so this is it.
+    #[cfg(not(debug_assertions))]
     fn worst_case_source() -> String {
         format!(
             "export type Deep = {}number{}\nreturn {{}}\n",
@@ -654,25 +655,32 @@ mod tests {
 
     /** how much of the parse thread's 64 MiB the worst case actually needs.
 
-    measured by bisection on this fixture: it aborts at 8 MiB and completes at
-    10, both under `lto = "thin", opt-level = 3` and under the `lto = "fat",
-    opt-level = "s"` this crate now ships — i.e. the profile change did not move
-    the per-frame cost. that puts the real headroom at roughly 6x, not the ~135
-    KiB-per-level a naive PARSE_STACK_BYTES / MAX_NESTING_DEPTH division
-    suggests; the parser wants ~20 KiB per nesting level.
+    measured by bisection on this fixture, and the two profiles are nothing
+    alike:
 
-    6x is the number that matters, and it is why this test runs on a
-    deliberately SMALL stack instead of the production one. At 64 MiB a
-    regression would have to quadruple per-frame cost before anything failed,
-    and the first sign of it would be a user's install aborting. At 16 MiB the
-    same regression trips here first, with about 1.6x of slack so ordinary
-    codegen churn does not cause noise.
+      release (lto = "fat", opt-level = "s")   aborts at 8 MiB, passes at 10
+      release (lto = "thin", opt-level = 3)    aborts at 8 MiB, passes at 10
+      dev (unoptimized)                        aborts at 32 MiB, passes at 48
 
-    when this fails it will not fail politely: stack exhaustion aborts the
-    process (see MAX_NESTING_DEPTH), so the symptom is the whole test binary
-    dying with STATUS_STACK_BUFFER_OVERRUN and no per-test attribution. that is
-    the intended signal. if it starts happening, measure with the bisection
-    above before touching either constant. */
+    so the profile change did not move the per-frame cost, and the shipped
+    binary has roughly 6x headroom — not the ~135 KiB-per-level a naive
+    PARSE_STACK_BYTES / MAX_NESTING_DEPTH division suggests. An unoptimized
+    build wants closer to five times that, leaving only ~1.3x, which is why
+    both of the max-depth tests are release-only: run under `cargo test`
+    they sit near enough to the edge that a slightly different toolchain
+    tips them over, and stack exhaustion does not fail politely.
+
+    that is also the whole reason this one runs on a deliberately SMALL stack
+    rather than the production 64 MiB. At 64 a regression would have to
+    quadruple per-frame cost before anything noticed, and the first sign would
+    be a user's install aborting; at 16 the same regression trips here first,
+    with ~1.6x of slack so ordinary codegen churn is not noise.
+
+    when it does trip, the symptom is the whole test binary dying with
+    STATUS_STACK_OVERFLOW and no per-test attribution, because that is what
+    stack exhaustion does (see MAX_NESTING_DEPTH). re-run the bisection above
+    before touching either constant. */
+    #[cfg(not(debug_assertions))]
     #[test]
     fn parser_stack_stays_within_a_sixth_of_its_budget() {
         let deep = worst_case_source();
@@ -701,6 +709,13 @@ mod tests {
     the failure mode is a stack overflow, which aborts the process and cannot be
     caught (see MAX_NESTING_DEPTH's comment). run this under `--release` as well
     as dev: a dev-profile pass proves nothing about a release inlining change. */
+    /* release-only for the same reason as the canary above: an unoptimized
+    build needs ~48 MiB of the 64 to parse this, and a margin that thin turns
+    an unrelated toolchain bump into an aborted test binary. the guard logic
+    itself stays covered in every profile by
+    `absurdly_nested_sources_are_refused_not_crashed`, which works at depths
+    (2000 refused, 100 parsed) where dev has room to spare. */
+    #[cfg(not(debug_assertions))]
     #[test]
     fn nesting_at_the_ceiling_still_parses() {
         let deep = worst_case_source();

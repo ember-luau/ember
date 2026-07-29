@@ -2,7 +2,7 @@
 # `lpm` is taken on crates.io (by a LaTeX package manager), so the crate ships
 # as luaupm while the binary stays `lpm`: cargo install luaupm, then run lpm.
 name = "luaupm"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
@@ -74,12 +74,17 @@ winreg = "0.56.0"
 # install's stdout), both identical across the change.
 #
 # The one place inlining and correctness genuinely meet is the Luau parser's
-# stack budget. Measured by bisection at MAX_NESTING_DEPTH, the parse needs
-# more than 8 MiB and at most 10 of its 64 MiB -- and it needs the same under
-# lto = "thin", opt-level = 3, so this change did not move it. The ~6x headroom
-# is guarded by parser_stack_stays_within_a_sixth_of_its_budget, which runs the
-# worst case on a deliberately small stack so a regression trips a test instead
-# of a user's install (see src/project/package.rs).
+# stack budget. Measured by bisection at MAX_NESTING_DEPTH, the parse needs more
+# than 8 MiB and at most 10 of its 64 MiB -- and it needs the same under
+# lto = "thin", opt-level = 3, so this change did not move it. That ~6x headroom
+# is guarded by parser_stack_stays_within_a_sixth_of_its_budget.
+#
+# Both of those tests are cfg(not(debug_assertions)), i.e. release-only, and CI
+# has a release-profile job so they still run. An unoptimized build needs ~48
+# MiB for the same parse -- five times the release figure, and only ~1.3x under
+# the budget -- so running them in the dev profile produced aborted test
+# binaries rather than signal. Users run release builds; a debug lpm is the one
+# with thin margin (see src/project/package.rs).
 #
 # Not added deliberately: /OPT:REF,ICF, which rustc already passes for MSVC
 # release links -- an explicit -C link-arg=/OPT:REF,ICF produces a byte-identical
@@ -90,4 +95,3 @@ lto = "fat"
 opt-level = "s"
 codegen-units = 1
 strip = true
-

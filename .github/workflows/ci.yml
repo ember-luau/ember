@@ -25,6 +25,26 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The Luau parser's stack budget is spent on frames whose size is a codegen
+  # decision, so the tests that sit at MAX_NESTING_DEPTH only mean something in
+  # the profile users actually run. They are `cfg(not(debug_assertions))` and
+  # therefore invisible to the dev-profile job above -- an unoptimized build
+  # needs ~48 MiB of the parse thread's 64 to reach that depth, close enough to
+  # the edge that running them there just produces aborted test binaries on
+  # whichever runner has slightly fatter frames.
+  #
+  # One OS: this pays fat-LTO link time, and binary-size.yml covers all four
+  # targets whenever the profile or the lockfile changes.
+  test-release:
+    name: Test (release profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --release --locked
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
