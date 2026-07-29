@@ -36,8 +36,36 @@ pub struct LockedPackage {
     and required for `--locked` to relink redirected dependencies. */
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub redirects: std::collections::BTreeMap<String, String>,
+    /** the patch this copy was built with, when [patches] named it.
+    additive within v2 like `redirects`; `--locked` replays it straight
+    from here without consulting the manifest. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<PatchRecord>,
     #[serde(flatten)]
     pub source: DownloadSource,
+}
+
+/** a patch as the lockfile remembers it: the repo-relative file plus an
+FNV-1a of its bytes (hex), so an edited patch reads as a change even when
+every version resolved identically. */
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PatchRecord {
+    pub path: String,
+    pub hash: String,
+}
+
+impl PatchRecord {
+    pub fn new(path: String, bytes: &[u8]) -> Self {
+        PatchRecord {
+            path,
+            hash: format!("{:016x}", crate::sys::hash::fnv1a(bytes)),
+        }
+    }
+
+    /// whether `bytes` are the bytes this record was made from.
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        self.hash == format!("{:016x}", crate::sys::hash::fnv1a(bytes))
+    }
 }
 
 impl LockedPackage {
@@ -89,6 +117,10 @@ mod tests {
                 link: Some("Promise".to_string()),
                 index: "https://github.com/UpliftGames/wally-index".to_string(),
                 redirects: [("Signal".to_string(), "acme/signal-fork".to_string())].into(),
+                patch: Some(PatchRecord::new(
+                    "patches/evaera_promise@4.0.0.patch".to_string(),
+                    b"--- a/init.lua\n+++ b/init.lua\n",
+                )),
                 source: DownloadSource::Zip {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
@@ -103,6 +135,7 @@ mod tests {
                 link: None,
                 index: "https://github.com/pesde-pkg/index".to_string(),
                 redirects: Default::default(),
+                patch: None,
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },
@@ -124,6 +157,15 @@ mod tests {
         );
         assert!(parsed.packages[1].redirects.is_empty());
         assert_eq!(text.matches("redirects").count(), 1);
+
+        /* the patch record round-trips where present, stays absent
+        otherwise, and an edited patch stops matching */
+        let record = parsed.packages[0].patch.as_ref().unwrap();
+        assert_eq!(record.path, "patches/evaera_promise@4.0.0.patch");
+        assert!(record.matches(b"--- a/init.lua\n+++ b/init.lua\n"));
+        assert!(!record.matches(b"something else"));
+        assert!(parsed.packages[1].patch.is_none());
+        assert_eq!(text.matches("[package.patch]").count(), 1);
         assert!(matches!(
             &parsed.packages[1].source,
             DownloadSource::TarGz { url } if url.contains("pesde%2Fhello")

@@ -64,6 +64,83 @@ pub enum Error {
     #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]
     WorkspacePublishFailed(Vec<String>),
 
+    #[error("Invalid [patches] key '{key}': {reason}")]
+    PatchKeyInvalid { key: String, reason: String },
+
+    #[error(
+        "Patch path '{path}' for {key} must be a relative path inside the project (patches travel with the repo)"
+    )]
+    PatchPathInvalid { key: String, path: String },
+
+    #[error(
+        "Patch file {path} for {key} is missing; re-run `lpm patch` and commit it, or remove the [patches] entry"
+    )]
+    PatchFileMissing { key: String, path: String },
+
+    #[error(
+        "Patch for {name}@{version} does not apply: {reason}. Re-run `lpm patch {name}` and commit an updated patch, or remove the [patches] entry"
+    )]
+    PatchDrift {
+        name: String,
+        version: String,
+        reason: String,
+    },
+
+    #[error(
+        "{name}@{version} resolved to more than one target in this install ({first}, {second}); patching multi-target packages isn't supported"
+    )]
+    PatchMultiTarget {
+        name: String,
+        version: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("Patch {patch} failed to apply to {name}: {stderr}")]
+    PatchApplyFailed {
+        name: String,
+        patch: String,
+        stderr: String,
+    },
+
+    #[error(
+        "Patch {path} recorded in lpm.lock for {name} {reason}; run `lpm install` without --locked to re-lock it"
+    )]
+    PatchLockInvalid {
+        name: String,
+        path: String,
+        reason: &'static str,
+    },
+
+    #[error(
+        "A working copy for {key} already exists at {path}; pass --force to start over from the published bytes"
+    )]
+    PatchCopyExists { key: String, path: String },
+
+    #[error("No patch working copy for '{0}' under .lpm-patch/; run `lpm patch {0}` first")]
+    PatchCopyMissing(String),
+
+    #[error("'{spec}' matches more than one {what} ({matches}); add @version to pick one")]
+    PatchAmbiguous {
+        spec: String,
+        what: &'static str,
+        matches: String,
+    },
+
+    #[error(
+        "Patching needs git on PATH (it diffs and applies the patch files); install git and retry"
+    )]
+    GitMissing,
+
+    #[error("Invalid spec '{spec}': {reason}")]
+    PatchSpecInvalid { spec: String, reason: String },
+
+    #[error("Git {action} failed: {stderr}")]
+    PatchGitFailed {
+        action: &'static str,
+        stderr: String,
+    },
+
     #[error("No lpm.toml manifest found in the current directory")]
     ManifestMissing,
 
