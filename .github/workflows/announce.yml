@@ -67,6 +67,12 @@ jobs:
             | {
                 username: "lpm",
                 avatar_url: "https://luaupm.com/lpm-logo.png",
+                # The role ping lives in content, above the embed. Discord only
+                # notifies when the message is first posted, so later PATCHes of
+                # the same message never re-ping. allowed_mentions pins the ping
+                # to exactly this role -- nothing quoted in the notes can ping.
+                content: "<@&1531061263843590296>",
+                allowed_mentions: { roles: ["1531061263843590296"] },
                 embeds: [{
                   title: (if ($release.name // "") == "" then $release.tag_name else $release.name end),
                   url: $release.html_url,
