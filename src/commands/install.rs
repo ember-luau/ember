@@ -668,14 +668,17 @@ fn apply_patch(name: &str, patch: &JobPatch, staging: &Path) -> Result<(), Error
         action: "init",
         stderr,
     })?;
-    let applied =
-        git::run(&["-C", &in_staging, "apply", &patch.file.to_string_lossy()]).map_err(|stderr| {
-            Error::PatchApplyFailed {
-                name: name.to_string(),
-                patch: patch.record.path.clone(),
-                stderr,
-            }
-        });
+    let applied = git::run(&git::verbatim(&[
+        "-C",
+        &in_staging,
+        "apply",
+        &patch.file.to_string_lossy(),
+    ]))
+    .map_err(|stderr| Error::PatchApplyFailed {
+        name: name.to_string(),
+        patch: patch.record.path.clone(),
+        stderr,
+    });
     // win or lose, the throwaway repo must not travel into the store
     let _ = fs::remove_dir_all(staging.join(".git"));
     applied
