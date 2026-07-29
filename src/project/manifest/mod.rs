@@ -31,6 +31,13 @@ pub struct Manifest {
     /// replacements for dependencies of dependencies; see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
+    /** diffs applied to dependencies at install: "scope/name@version" ->
+    a repo-relative .patch file, written by `lpm patch commit`. root
+    manifest only, same as [overrides] (a dependency's own table is never
+    consulted, and publish strips it). keys parse with [`patch_key`],
+    values validate with [`patch_path`]. */
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patches: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, Tool>,
     /// shell commands runnable with `lpm run <name>`.
@@ -341,6 +348,60 @@ pub fn override_paths(key: &str) -> Result<Vec<Vec<String>>, Error> {
             Ok(segments)
         })
         .collect()
+}
+
+/** splits a `[patches]` key: "scope/name@1.2.3" -> (name, exact version).
+split at the first '@', so build metadata (`acme/foo@1.0.0+build.5`) simply
+lives inside the version. exact because a patch is a claim about one
+published archive; a range would make "which bytes" depend on resolution. */
+pub fn patch_key(key: &str) -> Result<(String, semver::Version), Error> {
+    let invalid = |reason: String| Error::PatchKeyInvalid {
+        key: key.to_string(),
+        reason,
+    };
+    let Some((name, version)) = key.split_once('@') else {
+        return Err(invalid("expected 'scope/name@version'".to_string()));
+    };
+    if split_package_name(name).is_err() {
+        return Err(invalid(format!(
+            "'{name}' is not a 'scope/name' package name"
+        )));
+    }
+    let version = semver::Version::parse(version)
+        .map_err(|error| invalid(format!("'{version}' is not an exact version ({error})")))?;
+    Ok((name.to_string(), version))
+}
+
+/** validates a `[patches]` value: a relative path that stays inside the
+project. absolute paths and `..` escapes are refused; a patch is part of
+the repo, or installs stop being reproducible for anyone else. */
+pub fn patch_path(key: &str, path: &str) -> Result<std::path::PathBuf, Error> {
+    use std::path::Component;
+
+    let invalid = || Error::PatchPathInvalid {
+        key: key.to_string(),
+        path: path.to_string(),
+    };
+    let relative = Path::new(path);
+    if path.is_empty() || relative.is_absolute() {
+        return Err(invalid());
+    }
+    let mut depth: i64 = 0;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(invalid()); // climbed out of the project
+                }
+            }
+            // windows drive prefixes and root markers are absolute in spirit
+            Component::Prefix(_) | Component::RootDir => return Err(invalid()),
+        }
+    }
+    Ok(relative.to_path_buf())
 }
 
 /** the registry requirement a workspace dependency publishes as, pesde's rules
@@ -777,6 +838,57 @@ mod tests {
         // a full requirement passes through unchanged.
         assert_eq!(workspace_version_req("^2.1.0", &version).unwrap(), "^2.1.0");
         assert!(workspace_version_req("not a req", &version).is_err());
+    }
+
+    #[test]
+    fn patch_keys_split_at_the_first_at_sign() {
+        let (name, version) = patch_key("chief/traits@0.2.0").unwrap();
+        assert_eq!(name, "chief/traits");
+        assert_eq!(version, semver::Version::new(0, 2, 0));
+        // round trips: formatting the parts gives the key back
+        assert_eq!(format!("{name}@{version}"), "chief/traits@0.2.0");
+
+        /* build metadata lives inside the version, not treated as some
+        suffix of the key */
+        let (name, version) = patch_key("acme/foo@1.0.0+build.5").unwrap();
+        assert_eq!(name, "acme/foo");
+        assert_eq!(version.to_string(), "1.0.0+build.5");
+        assert_eq!(format!("{name}@{version}"), "acme/foo@1.0.0+build.5");
+
+        // prereleases are exact versions too
+        assert!(patch_key("acme/foo@1.0.0-rc.1").is_ok());
+
+        for bad in [
+            "chief/traits",        // no @
+            "chief/traits@",       // empty version
+            "chief/traits@^0.2.0", // a range is not one archive
+            "chief/traits@0.2",    // not a full version
+            "traits@0.2.0",        // not scope/name
+            "Chief/Traits@0.2.0",  // uppercase names are invalid
+            "@0.2.0",
+        ] {
+            assert!(
+                matches!(patch_key(bad), Err(Error::PatchKeyInvalid { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_paths_stay_inside_the_project() {
+        assert!(patch_path("k", "patches/chief_traits@0.2.0.patch").is_ok());
+        assert!(patch_path("k", "./patches/x.patch").is_ok());
+        // dipping down then back up is fine as long as it never escapes
+        assert!(patch_path("k", "patches/../patches/x.patch").is_ok());
+
+        for bad in ["", "/etc/x.patch", "../x.patch", "patches/../../x.patch"] {
+            assert!(
+                matches!(patch_path("k", bad), Err(Error::PatchPathInvalid { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+        #[cfg(windows)]
+        assert!(patch_path("k", "C:\\x.patch").is_err());
     }
 
     #[test]
