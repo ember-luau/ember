@@ -22,9 +22,10 @@ keys and the require in lockstep. both come from `normalize_entry`.
 packages that ship no project file, every lpm-native one, already sync
 that way and are left alone.
 
-only what the project file itself mounts is covered. a package that ships
-one *and* has dependencies of its own still won't have the `packages/`
-folder install writes into it mounted anywhere. */
+that pass only covers what the project file already mounts. the `packages/`
+folder install writes a package's own nested links into doesn't exist yet,
+every package has to be extracted before any of them can be linked, so
+`mount_nested_packages` comes back for it once the links are on disk. */
 
 use crate::project::package::normalize_entry;
 use serde_json::{Map, Value};
@@ -32,6 +33,9 @@ use std::fs;
 use std::path::Path;
 
 pub const PROJECT_FILE: &str = "default.project.json";
+
+/// the folder a package's own nested links live in, the published default.
+pub const PACKAGES_DIR: &str = "packages";
 
 /** rewrites every project file inside an extracted package so its mounted
 tree mirrors the disk. nested ones count too, evaera/promise ships one under
@@ -63,6 +67,125 @@ pub fn mirror_disk_layout(package_dir: &Path, warn: &mut impl FnMut(String)) {
             mirror_disk_layout(&entry.path(), warn);
         }
     }
+}
+
+/** mounts the `packages/` folder holding a package's nested links, for a
+package that ships its own project file.
+
+such a file replaces the folder's disk layout with its tree, and a tree
+written before install existed names no `packages`. Rojo then syncs the
+package without it, so the `./packages/<env>/<alias>` requires the install
+rewrote resolve to nothing in Studio or luau-lsp, even though darklua maps
+them by file path and they work at runtime. packages shipping no project
+file mount from disk and already carry the folder.
+
+run per package after the nested-link pass, the earliest the folder is
+really there, and only for a package that got links, so nothing mounts a
+`$path` Rojo would reject as missing.
+
+the folder goes at the tree root, where the require rewrite spells it, so
+this covers the roots `mirror_disk_layout` re-nested and the ones it left
+mounting a plain relative path. a root it refused, reaching outside the
+package, is refused here too rather than being handed a child that its
+requires don't climb to anyway. best-effort like the rest of this module. */
+pub fn mount_nested_packages(package_dir: &Path, warn: &mut impl FnMut(String)) {
+    /* the caller only gets here having written links, this catches the
+    package that ships a `packages` folder it never linked into */
+    if !package_dir.join(PACKAGES_DIR).is_dir() {
+        return;
+    }
+    let project = package_dir.join(PROJECT_FILE);
+    // no project file means Rojo mounts the disk, this folder included
+    if let Ok(text) = fs::read_to_string(&project)
+        && let Some(rewritten) = with_packages_mounted(&text, package_dir)
+        && let Err(error) = fs::write(&project, rewritten)
+    {
+        warn(format!(
+            "warning: could not update {} ({error}); Rojo will not sync the nested links in {}",
+            project.display(),
+            package_dir.display()
+        ));
+    }
+}
+
+/** the project text with `packages` added to its tree, or None when the
+tree already syncs the folder or isn't one the folder belongs in. `dir` is
+the folder the file sits in, what a relative `$path` is measured from. */
+fn with_packages_mounted(text: &str, dir: &Path) -> Option<String> {
+    let mut project: Map<String, Value> = serde_json::from_str(text).ok()?;
+    let tree = project.get("tree")?.as_object()?;
+
+    // a child of that name is the package's own, and inserting would clobber it
+    if tree.contains_key(PACKAGES_DIR) {
+        return None;
+    }
+    /* a differently cased one collides only where the filesystem folded it
+    into the folder the links were written through, so ask the disk rather
+    than the platform: on a case sensitive one `Packages` is a second folder
+    and mounting ours beside it is exactly right */
+    if tree
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case(PACKAGES_DIR))
+        .any(|key| is_our_links_folder(dir, key))
+    {
+        return None;
+    }
+    /* only a plain folder takes the added child. a place-style project, a
+    DataModel of services say, doesn't mount the package as one instance, so
+    a `packages` folder hung off its root would sit where no require looks */
+    match tree.get("$className").and_then(Value::as_str) {
+        None | Some("Folder") => {}
+        Some(_) => return None,
+    }
+    if let Some(path) = root_path(tree) {
+        let cleaned = path.replace('\\', "/");
+        let cleaned = cleaned.trim_start_matches("./").trim_end_matches('/');
+        /* a root mounting the package directory itself, or anything outside
+        it, is not ours to reinterpret, the same stance `renested` takes.
+        the first already syncs every child it has, this folder among them */
+        if Path::new(cleaned).is_absolute()
+            || cleaned
+                .split('/')
+                .any(|component| matches!(component, "" | "." | ".."))
+        {
+            return None;
+        }
+        /* mounting a directory brings that directory's children with it, so
+        a `packages` of its own would collide with the one being added */
+        let mounted = dir.join(cleaned);
+        if mounted.is_dir() && mounted.join(PACKAGES_DIR).exists() {
+            return None;
+        }
+    }
+
+    let mut tree = tree.clone();
+    tree.insert(
+        PACKAGES_DIR.to_string(),
+        serde_json::json!({ "$path": PACKAGES_DIR }),
+    );
+    project.insert("tree".to_string(), Value::Object(tree));
+
+    let mut rewritten = serde_json::to_string_pretty(&Value::Object(project)).ok()?;
+    rewritten.push('\n');
+    Some(rewritten)
+}
+
+/** true when `name` reaches the same folder on disk as `packages` does, as
+a case-insensitive filesystem makes `Packages` do. both sides are resolved
+rather than compared as text, since only the filesystem knows. */
+fn is_our_links_folder(dir: &Path, name: &str) -> bool {
+    let Ok(ours) = fs::canonicalize(dir.join(PACKAGES_DIR)) else {
+        return false;
+    };
+    fs::canonicalize(dir.join(name)).is_ok_and(|theirs| theirs == ours)
+}
+
+/** a node's `$path`, in either spelling. Rojo also accepts the object form
+`{"optional": "src"}`, which reads as a path like any other here. */
+fn root_path(tree: &Map<String, Value>) -> Option<&str> {
+    let path = tree.get("$path")?;
+    path.as_str()
+        .or_else(|| path.get("optional").and_then(Value::as_str))
 }
 
 /** the rewritten project text, or None when the file already mirrors the
@@ -318,6 +441,177 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a package dir holding `files`, plus a linked dependency when `linked`.
+    fn package_with(name: &str, files: &[(&str, &str)], linked: bool) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("lpm-test-rojo-{name}"));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        for (path, contents) in files {
+            let file = base.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, contents).unwrap();
+        }
+        if linked {
+            let links = base.join("packages/shared");
+            fs::create_dir_all(&links).unwrap();
+            fs::write(links.join("Promise.luau"), "return nil\n").unwrap();
+        }
+        base
+    }
+
+    #[test]
+    fn mounts_the_folder_a_shipped_project_file_never_named() {
+        /* lyra shaped: the tree mirror_disk_layout left mounts only `lib`,
+        so the links the nested pass then wrote synced nowhere */
+        let package = package_with(
+            "mount",
+            &[(
+                PROJECT_FILE,
+                r#"{"name": "lyra_lyra", "tree": {"$className": "Folder", "lib": {"$path": "lib"}}}"#,
+            )],
+            true,
+        );
+
+        let mut warnings = Vec::new();
+        mount_nested_packages(&package, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        let project: Value =
+            serde_json::from_str(&fs::read_to_string(package.join(PROJECT_FILE)).unwrap()).unwrap();
+        assert_eq!(project["tree"]["packages"]["$path"], "packages");
+        // and nothing the file already said moved
+        assert_eq!(project["name"], "lyra_lyra");
+        assert_eq!(project["tree"]["lib"]["$path"], "lib");
+
+        // the shape has to settle, install re-runs over a warm tree
+        let once = fs::read_to_string(package.join(PROJECT_FILE)).unwrap();
+        assert_eq!(with_packages_mounted(&once, &package), None);
+
+        let _ = fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn leaves_alone_a_tree_the_folder_does_not_belong_in() {
+        let dir = std::path::Path::new("/nonexistent");
+        for text in [
+            // already names it, whatever it mounts there, and we'd clobber it
+            r#"{"tree": {"$className": "Folder", "packages": {"$path": "vendor"}}}"#,
+            /* a place-style project mounts no single instance, so a root
+            `packages` child is not where any require looks */
+            r#"{"tree": {"$className": "DataModel", "ServerScriptService": {"$path": "src"}}}"#,
+            /* roots reaching outside the package, refused here exactly as
+            `renested` refuses them, in both `$path` spellings */
+            r#"{"tree": {"$path": "../sibling"}}"#,
+            r#"{"tree": {"$path": "/elsewhere/src"}}"#,
+            r#"{"tree": {"$path": {"optional": ".."}}}"#,
+            // not projects we understand
+            "not json",
+            r#"{"name": "acme_pkg"}"#,
+        ] {
+            assert_eq!(with_packages_mounted(text, dir), None, "for {text}");
+        }
+
+        /* a root mounting the package itself, which already syncs every
+        child it has, this folder among them. refused for naming `.` at all,
+        before any of it is resolved, in each of Rojo's three spellings */
+        for text in [
+            r#"{"name": "acme_pkg", "tree": {"$path": "."}}"#,
+            r#"{"name": "acme_pkg", "tree": {"$path": "./"}}"#,
+            r#"{"name": "acme_pkg", "tree": {"$path": {"optional": "."}}}"#,
+        ] {
+            assert_eq!(with_packages_mounted(text, dir), None, "for {text}");
+        }
+
+        /* what the resolving half is really for: a root mounting a
+        subfolder that carries a `packages` of its own, which the mount
+        would collide with once Rojo brought it up */
+        let vendored = package_with(
+            "mount-vendored",
+            &[("src/packages/keep.luau", "return nil\n")],
+            true,
+        );
+        assert_eq!(
+            with_packages_mounted(r#"{"tree": {"$path": "src"}}"#, &vendored),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&vendored);
+    }
+
+    #[test]
+    fn a_differently_cased_child_collides_only_when_it_is_the_same_folder() {
+        /* macOS and Windows fold `Packages` into the folder the links were
+        written through, so it is already synced. Linux keeps two real
+        folders and ours still has to be mounted. the disk decides */
+        let package = package_with("mount-cased", &[], true);
+        let mounted = with_packages_mounted(
+            r#"{"tree": {"$className": "Folder", "Packages": {"$path": "Packages"}}}"#,
+            &package,
+        );
+
+        if package.join("Packages").is_dir() {
+            assert_eq!(mounted, None, "a folded name is our own folder");
+        } else {
+            let project: Value = serde_json::from_str(&mounted.unwrap()).unwrap();
+            assert_eq!(project["tree"]["packages"]["$path"], "packages");
+            // and the one the package shipped is still there beside it
+            assert_eq!(project["tree"]["Packages"]["$path"], "Packages");
+        }
+
+        let _ = fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn mounts_beside_a_root_path_that_carries_no_packages_child() {
+        /* a root init mounts as the package's own instance and the require
+        rewrite spells `@self/packages/...`, a child of exactly that */
+        let package = package_with(
+            "mount-init",
+            &[
+                (PROJECT_FILE, r#"{"tree": {"$path": "init.luau"}}"#),
+                ("init.luau", "return {}\n"),
+            ],
+            true,
+        );
+        let text = fs::read_to_string(package.join(PROJECT_FILE)).unwrap();
+        let project: Value =
+            serde_json::from_str(&with_packages_mounted(&text, &package).unwrap()).unwrap();
+        assert_eq!(project["tree"]["$path"], "init.luau");
+        assert_eq!(project["tree"]["packages"]["$path"], "packages");
+        let _ = fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn a_package_that_linked_nothing_keeps_its_project_file() {
+        /* the guard that matters: mounting a `packages` path that isn't
+        there would make Rojo reject the whole project */
+        let project = r#"{"name": "acme_pkg", "tree": {"$path": "src"}}"#;
+        let package = package_with("mount-unlinked", &[(PROJECT_FILE, project)], false);
+
+        let mut warnings = Vec::new();
+        mount_nested_packages(&package, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(package.join(PROJECT_FILE)).unwrap(),
+            project
+        );
+        let _ = fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn links_without_a_project_file_need_no_mount() {
+        // these mount from disk already, every lpm-native package
+        let package = package_with("mount-native", &[("init.luau", "return {}\n")], true);
+
+        let mut warnings = Vec::new();
+        mount_nested_packages(&package, &mut |message| warnings.push(message));
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(!package.join(PROJECT_FILE).exists());
+        let _ = fs::remove_dir_all(&package);
     }
 
     #[test]

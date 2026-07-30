@@ -5,7 +5,7 @@ that's all a published package carries. */
 
 use crate::error::Error;
 use crate::project::manifest::Environment;
-use crate::project::rojo::PROJECT_FILE;
+use crate::project::rojo::{PACKAGES_DIR, PROJECT_FILE};
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
 use std::fs;
@@ -238,7 +238,19 @@ fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
             Some(_) => return None,
         }
         // $className and friends describe the node, anything else is a child
-        let mut children = object.iter().filter(|(key, _)| !key.starts_with('$'));
+        let mut children: Vec<_> = object
+            .iter()
+            .filter(|(key, _)| !key.starts_with('$'))
+            .collect();
+        /* `rojo::mount_nested_packages` adds `packages` to this very file
+        between two reads of this function, so discount it and the entry
+        reads the same either side of the mount. not when it's all there is
+        though: a tree that really does mount a folder by that name still
+        names an entry, and the mount refuses such a tree anyway */
+        if children.len() > 1 {
+            children.retain(|(key, _)| key.as_str() != PACKAGES_DIR);
+        }
+        let mut children = children.into_iter();
         let (_, only) = children.next()?;
         if children.next().is_some() {
             // several children, no single folder is "the package"
@@ -625,6 +637,74 @@ mod tests {
         assert_eq!(entry_point(&place), None);
         write_package(&place.join("src"), "init.luau", "return {}");
         assert_eq!(entry_point(&place).as_deref(), Some("src"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn entry_point_survives_the_packages_mount() {
+        /* the nested-link pass mounts `packages` into that same file, and a
+        dependent reads this entry back afterwards to link against it. a
+        package that is both dependency and dependent is read on both sides
+        of its own mount, so the answer has to hold across it */
+        let base = std::env::temp_dir().join("lpm-test-entry-after-mount");
+        let _ = fs::remove_dir_all(&base);
+
+        /* `out` is roblox-ts shaped and `Maid.lua` a single file package:
+        entries the conventional fallbacks can't recover */
+        for (path, entry) in [("lib", "lib"), ("out", "out"), ("Maid.lua", "Maid")] {
+            let package = base.join(path.replace(['/', '.'], "_"));
+            write_package(
+                &package,
+                PROJECT_FILE,
+                &format!(r#"{{"name": "pkg", "tree": {{"$path": "{path}"}}}}"#),
+            );
+            write_package(
+                &package.join("packages/shared"),
+                "Promise.luau",
+                "return nil",
+            );
+            let panicking = &mut |message| panic!("unexpected warning: {message}");
+
+            crate::project::rojo::mirror_disk_layout(&package, panicking);
+            assert_eq!(entry_point(&package).as_deref(), Some(entry), "for {path}");
+            crate::project::rojo::mount_nested_packages(&package, panicking);
+
+            // the mount really happened, so the invariant below is tested
+            let project: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(package.join(PROJECT_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(
+                project["tree"]["packages"]["$path"], "packages",
+                "for {path}"
+            );
+            assert_eq!(
+                entry_point(&package).as_deref(),
+                Some(entry),
+                "after mounting packages into {path}"
+            );
+        }
+
+        /* a package whose source folder really is called `packages`. the
+        mount refuses that tree rather than clobber the child, so the entry
+        has to keep reading through it instead of discounting it as ours */
+        let own = base.join("own_packages");
+        write_package(
+            &own,
+            PROJECT_FILE,
+            r#"{"name": "pkg", "tree": {"$path": "packages"}}"#,
+        );
+        write_package(&own.join("packages"), "init.luau", "return {}");
+        let panicking = &mut |message| panic!("unexpected warning: {message}");
+
+        crate::project::rojo::mirror_disk_layout(&own, panicking);
+        assert_eq!(entry_point(&own).as_deref(), Some("packages"));
+        crate::project::rojo::mount_nested_packages(&own, panicking);
+        assert_eq!(
+            entry_point(&own).as_deref(),
+            Some("packages"),
+            "a tree that mounts a folder of its own by that name"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

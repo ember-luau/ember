@@ -1206,7 +1206,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
 
             let link_dir = package
                 .storage
-                .join("packages")
+                .join(rojo::PACKAGES_DIR)
                 .join(dep.environment.dir_name());
             if let Err(error) = fs::create_dir_all(&link_dir) {
                 warn(format!(
@@ -1258,12 +1258,18 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             }
         }
 
+        /* an alias only lands here once its link file is really written, so
+        an empty map means this package got none: nothing to retarget, and
+        nothing of ours in any `packages/` folder it might ship itself */
+        if escape_aliases.is_empty() {
+            continue;
+        }
+
         /* second half of the instance require rewrite. escape chains
         couldn't map on the workers since dependency environments weren't
         known yet, now the nested links are decided so retarget them at
         packages/<env>/<alias> */
-        if !escape_aliases.is_empty()
-            && let Some(entry) = package::entry_point(&package.storage)
+        if let Some(entry) = package::entry_point(&package.storage)
             && let Err(error) =
                 requires::rewrite_escape_requires(&package.storage, &entry, &escape_aliases)
         {
@@ -1272,6 +1278,11 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 package.name
             ));
         }
+
+        /* the links exist now, so a project file this package ships can
+        finally mount the folder holding them. it wasn't there to mount when
+        extraction rewrote that file, and Rojo syncs the tree, not the disk */
+        rojo::mount_nested_packages(&package.storage, warn);
     }
 }
 
@@ -1966,6 +1977,177 @@ mod tests {
             in_place: false,
             redirects: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn mounts_the_packages_folder_of_a_package_shipping_a_project_file() {
+        let base = std::env::temp_dir().join("lpm-test-nested-links-rojo");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+
+        /* both ship a project file, as wally packages built from Rojo
+        projects do. lyra declares its dependency the way a server realm
+        package does, under [server-dependencies] */
+        let promise = shared.join(".lpm/evaera_promise");
+        write(
+            &promise,
+            "default.project.json",
+            r#"{"name": "promise", "tree": {"$path": "lib"}}"#,
+        );
+        write(&promise, "lib/init.luau", "return {}\n");
+
+        let lyra = shared.join(".lpm/lyra_lyra");
+        write(
+            &lyra,
+            "wally.toml",
+            "[package]\nrealm = \"server\"\n\n\
+             [server-dependencies]\nPromise = \"evaera/promise@4.0.0\"\n",
+        );
+        write(
+            &lyra,
+            "default.project.json",
+            r#"{"name": "lyra", "tree": {"$path": "lib"}}"#,
+        );
+        write(
+            &lyra,
+            "lib/init.luau",
+            "local Promise = require(script.Parent.Promise)\nreturn Promise\n",
+        );
+
+        // extraction mirrors the disk, then the second pass links
+        let mut warnings = Vec::new();
+        for package in [&promise, &lyra] {
+            rojo::mirror_disk_layout(package, &mut |message| warnings.push(message));
+        }
+        let packages = [
+            stored("evaera/promise", promise.clone(), Environment::Shared),
+            stored("lyra/lyra", lyra.clone(), Environment::Shared),
+        ];
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        // the link lands and the instance require is retargeted at it...
+        assert!(lyra.join("packages/shared/Promise.luau").exists());
+        assert_eq!(
+            fs::read_to_string(lyra.join("lib/init.luau")).unwrap(),
+            "local Promise = require(\"./packages/shared/Promise\")\nreturn Promise\n"
+        );
+
+        let project = |dir: &Path| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(dir.join("default.project.json")).unwrap())
+                .unwrap()
+        };
+        /* ...and the tree finally mounts the folder that require reaches
+        for, alongside what mirror_disk_layout re-nested */
+        let lyra_project = project(&lyra);
+        assert_eq!(lyra_project["tree"]["packages"]["$path"], "packages");
+        assert_eq!(lyra_project["tree"]["lib"]["$path"], "lib");
+
+        // the dependency linked nothing, so no missing path enters its tree
+        assert!(project(&promise)["tree"]["packages"].is_null());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_packages_folder_we_did_not_write_is_left_unmounted() {
+        /* the folder being there isn't the gate, having linked into it is.
+        a package that published a `packages` folder of its own keeps the
+        tree it published, we don't graft its contents into the sync */
+        let base = std::env::temp_dir().join("lpm-test-nested-links-vendored");
+        let _ = fs::remove_dir_all(&base);
+        let vendored = base.join("packages/shared/.lpm/acme_vendored");
+
+        // no manifest, so nothing is declared and nothing links
+        let project = r#"{"name": "acme_vendored", "tree": {"$className": "Folder",
+            "src": {"$path": "src"}}}"#;
+        write(&vendored, "default.project.json", project);
+        write(&vendored, "src/init.luau", "return {}\n");
+        write(&vendored, "packages/vendor.luau", "return nil\n");
+
+        let mut warnings = Vec::new();
+        link_nested_dependencies(
+            &[stored(
+                "acme/vendored",
+                vendored.clone(),
+                Environment::Shared,
+            )],
+            &mut |message| warnings.push(message),
+        );
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(vendored.join("default.project.json")).unwrap(),
+            project
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_mounted_package_still_names_its_entry_to_later_dependents() {
+        /* the mount adds a second child to the tree, and `entry_point`
+        refuses a tree whose root names more than one thing. a dependency
+        that linked first is read back by its own dependent later in this
+        same loop, so the mount must not change what it answers.
+
+        the slice is ordered the way the resolver's BTreeMap hands it over,
+        alphabetically, which is what puts the dependency first here */
+        let base = std::env::temp_dir().join("lpm-test-nested-links-mounted-dep");
+        let _ = fs::remove_dir_all(&base);
+        let shared = base.join("packages/shared");
+
+        let promise = shared.join(".lpm/evaera_promise");
+        write(&promise, "lib/init.luau", "return {}\n");
+
+        /* roblox-ts shaped: `out` is an entry none of the conventional
+        fallbacks can recover, so a broken tree read shows up as a miss */
+        let tslib = shared.join(".lpm/a_tslib");
+        write(
+            &tslib,
+            "wally.toml",
+            "[dependencies]\nPromise = \"evaera/promise@4.0.0\"\n",
+        );
+        write(
+            &tslib,
+            "default.project.json",
+            r#"{"name": "tslib", "tree": {"$path": "out"}}"#,
+        );
+        write(&tslib, "out/init.lua", "return {}\n");
+
+        let app = shared.join(".lpm/z_app");
+        write(
+            &app,
+            "wally.toml",
+            "[dependencies]\nTsLib = \"a/tslib@1.0.0\"\n",
+        );
+        write(&app, "src/init.luau", "return {}\n");
+
+        let mut warnings = Vec::new();
+        for package in [&promise, &tslib, &app] {
+            rojo::mirror_disk_layout(package, &mut |message| warnings.push(message));
+        }
+        let packages = [
+            stored("a/tslib", tslib.clone(), Environment::Shared),
+            stored("evaera/promise", promise, Environment::Shared),
+            stored("z/app", app.clone(), Environment::Shared),
+        ];
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        // tslib linked first, so it was mounted before app read it back
+        let project: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(tslib.join("default.project.json")).unwrap())
+                .unwrap();
+        assert_eq!(project["tree"]["packages"]["$path"], "packages");
+
+        // and app still linked against tslib's real entry, not a fallback
+        assert_eq!(
+            fs::read_to_string(app.join("packages/shared/TsLib.luau")).unwrap(),
+            "return require(\"../../../a_tslib/out\")\n"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
