@@ -2,7 +2,7 @@
 # `lpm` is taken on crates.io (by a LaTeX package manager), so the crate ships
 # as luaupm while the binary stays `lpm`: cargo install luaupm, then run lpm.
 name = "luaupm"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
