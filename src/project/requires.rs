@@ -4,6 +4,7 @@ in our layout, so that has to become a "./Foo" style path. anything we can't
 map safely just stays as it was. */
 
 use crate::error::Error;
+use crate::project::rojo::PACKAGES_DIR;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -333,11 +334,11 @@ fn parse_chain(
         let environment = context.aliases?.get(&names[0])?;
         if context.depth_in_package + 1 == init_shift {
             // a root init, the packages folder is among its own children
-            format!("@self/packages/{environment}/{}", names[0])
+            format!("@self/{PACKAGES_DIR}/{environment}/{}", names[0])
         } else {
             let string_ups = context.depth_in_package - init_shift;
             let mut parts = vec![".."; string_ups];
-            parts.push("packages");
+            parts.push(PACKAGES_DIR);
             parts.push(environment);
             parts.push(names[0].as_str());
             if string_ups == 0 {
