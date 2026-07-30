@@ -1,8 +1,8 @@
-/*! `lpm execute` (alias `x`): download a GitHub-released executable if
-needed and hand the terminal to it, npx-style. `lpx` is this command under
-its own name — `self install` drops a copy of lpm called lpx beside the
+/*! `lpm execute`, alias `x`. downloads a GitHub-released executable if
+needed and hands the terminal to it, npx-style. `lpx` is this command under
+its own name. `self install` drops a copy of lpm called lpx beside the
 tool shims, and main routes that argv[0] here. nothing is ever written to
-a manifest; repeat runs inside the TTL come from ~/.lpm/tools with zero
+a manifest. repeat runs inside the TTL come from ~/.lpm/tools with zero
 network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
@@ -19,7 +19,7 @@ What <SPEC> can be, first match winning:
   a [tools] alias   stylua                 runs the exact version pinned by
                                            the surrounding project or the
                                            global tools file
-  a shorthand       create-chief-project,  the curated names lpm knows —
+  a shorthand       create-chief-project,  the curated names lpm knows,
                     rojo, stylua, ...      the same list `lpm tool add`
                                            accepts
   a repository      JohnnyMorganz/StyLua   any GitHub repo with releases
@@ -28,13 +28,13 @@ Add @version for an exact release: stylua@2.0.2.
 Unpinned names without @version run the latest release. That answer is
 cached and re-checked at the index TTL cadence (LPM_INDEX_TTL_SECS,
 default 300s); --refresh asks GitHub now, and does nothing for pinned or
-@version specs — those are already exact. Binaries live under
+@version specs, those are already exact. Binaries live under
 ~/.lpm/tools and are reused; no manifest is touched.
 
 Everything after <SPEC> is passed to the executable, hyphens included;
 lpm's own flags go before it. The exit code is the executable's.
 
-lpx runs code fetched from GitHub by name — the same trust decision as
+lpx runs code fetched from GitHub by name, the same trust decision as
 installing a dependency.
 
 Examples:
@@ -60,8 +60,8 @@ pub struct ExecuteArgs {
 }
 
 /** Resolves the spec, makes sure the executable is stored, and hands the
-terminal over. the returned code is the executable's own (unix never
-returns: the process is replaced outright). */
+terminal over. the returned code is the executable's own. on unix this
+never returns, the process is replaced outright. */
 pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
     let mut command = args.command.into_iter();
     let raw = command.next().expect("SPEC is a required argument");
@@ -70,7 +70,7 @@ pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
         .ok_or_else(|| Error::ExecuteSpecInvalid(raw.to_string_lossy().into_owned()))
         .and_then(parse_spec)?;
 
-    // aliases are bare names; owner/repo is always the explicit form
+    // aliases are bare names, owner/repo is always the explicit form
     let pinned = if spec.name.contains('/') {
         None
     } else {
@@ -93,7 +93,7 @@ pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
     process::exec(executable)
 }
 
-/// a parsed <SPEC>: what to run and, when given, which exact version.
+/// a parsed <SPEC>, what to run and, when given, which exact version.
 struct Spec {
     name: String,
     /// no leading 'v', like `Tool::version`
@@ -106,7 +106,7 @@ fn parse_spec(raw: &str) -> Result<Spec, Error> {
     let trimmed = raw.trim();
     let (name, version) = match trimmed.split_once('@') {
         Some((name, version)) => {
-            /* strip one 'v' prefix, and only off a number: "v2.0.2" means
+            /* strip one 'v' prefix, and only off a number. "v2.0.2" means
             2.0.2, but a tag like "voyager-1" must survive intact */
             let version = match version.strip_prefix('v') {
                 Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
@@ -134,9 +134,9 @@ fn parse_spec(raw: &str) -> Result<Spec, Error> {
     })
 }
 
-/** the precedence ladder: a pinned alias, then a shorthand, then the
+/** the precedence ladder, a pinned alias, then a shorthand, then the
 explicit owner/repo form. returns the repository and the version now
-settled — None meaning "latest". */
+settled, None meaning "latest". */
 fn pick(spec: &Spec, pinned: Option<&Tool>) -> Result<(String, Option<String>), Error> {
     if let Some(tool) = pinned {
         /* an explicit @version disagreeing with the pin is a conflict to
@@ -177,11 +177,11 @@ mod tests {
         assert_eq!(parsed.name, "stylua");
         assert_eq!(parsed.version, None);
 
-        // versions may carry a leading 'v'; it never reaches storage paths
+        // versions may carry a leading 'v', it never reaches storage paths
         let parsed = spec("stylua@v2.0.2");
         assert_eq!(parsed.version.as_deref(), Some("2.0.2"));
 
-        // ...but only off a number: named tags keep their 'v'
+        // ...but only off a number, named tags keep their 'v'
         let parsed = spec("acme/probe@voyager-1");
         assert_eq!(parsed.version.as_deref(), Some("voyager-1"));
 
@@ -218,7 +218,7 @@ mod tests {
             version: "2.0.0".to_string(),
         };
 
-        // no version: the pin decides both repo and version
+        // no version, the pin decides both repo and version
         let (repository, version) = pick(&spec("stylua"), Some(&pin)).unwrap();
         assert_eq!(repository, "JohnnyMorganz/StyLua");
         assert_eq!(version.as_deref(), Some("2.0.0"));

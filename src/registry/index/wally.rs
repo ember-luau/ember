@@ -16,7 +16,7 @@ pub struct Config {
 }
 
 /** One JSON line of a wally index package file. Dev-dependencies aren't
-modeled; lpm never installs them. */
+modeled, lpm never installs them. */
 #[derive(Deserialize)]
 struct Entry {
     package: EntryPackage,
@@ -54,7 +54,7 @@ pub fn resolve(
         });
     }
 
-    /* One JSON object per line, one line per published version; unparsable
+    /* One JSON object per line, one line per published version. Unparsable
     lines are skipped so one odd entry can't sink the whole resolve. */
     let best = std::fs::read_to_string(&path)?
         .lines()
@@ -72,7 +72,7 @@ pub fn resolve(
         });
     };
 
-    /* Both realms' deps resolve in this same wally index; each dep's own
+    /* Both realms' deps resolve in this same wally index. Each dep's own
     realm decides its install environment. */
     let dependencies = entry
         .dependencies
@@ -98,7 +98,7 @@ pub fn resolve(
 fn parse_dependency(alias: &str, spec: &str) -> Option<TransitiveDependency> {
     let (name, req) = spec.split_once('@')?;
     Some(TransitiveDependency {
-        /* lowercased like every other name entering the install set: two
+        /* lowercased like every other name entering the install set, two
         case-variants of one package must never become two parallel jobs
         racing on the same storage folder */
         name: name.to_lowercase(),

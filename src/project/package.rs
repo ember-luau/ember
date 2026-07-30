@@ -1,6 +1,6 @@
-/*! an extracted package on disk: entry point, target environment, and the link
-file pointing at it. the reading half of install (no downloads here). has to
-understand foreign manifests (pesde.toml, wally.toml, Rojo project files) since
+/*! an extracted package on disk, entry point, target environment, and the link
+file pointing at it. the reading half of install, no downloads here. has to
+understand foreign manifests, pesde.toml, wally.toml, Rojo project files, since
 that's all a published package carries. */
 
 use crate::error::Error;
@@ -11,7 +11,7 @@ use full_moon::visitors::Visitor;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/** body of a generated link file: requires the stored package and restates its
+/** body of a generated link file. requires the stored package and restates its
 exported types, e.g.
 
 ```luau
@@ -22,7 +22,7 @@ return module
 
 no exported types = the compact `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
-    // empty entry = the package root itself is the module (root init file)
+    // empty entry = the package root itself is the module, a root init file
     let path = if entry.is_empty() {
         format!("./.lpm/{folder}")
     } else {
@@ -31,8 +31,8 @@ pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
     link_contents_at(&path, types)
 }
 
-/** like [`link_contents`] but for an arbitrary require path: workspace members
-link straight to their source (`../../packages/core/src`) instead of an
+/** like [`link_contents`] but for an arbitrary require path. workspace members
+link straight to their source, like `../../packages/core/src`, instead of an
 extracted copy under `.lpm/`. */
 pub fn link_contents_at(path: &str, types: &[String]) -> String {
     let path = format!("\"{path}\"");
@@ -49,7 +49,7 @@ pub fn link_contents_at(path: &str, types: &[String]) -> String {
     contents
 }
 
-/// the file an extensionless entry resolves to, Luau string-require style: `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
+/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     let candidates = if entry.is_empty() {
         vec!["init.luau".to_string(), "init.lua".to_string()]
@@ -67,21 +67,21 @@ pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// full_moon recurses per nesting level, so deep sources need serious stack; parsing gets its own thread with this much.
+/// full_moon recurses per nesting level, so deep sources need serious stack. parsing gets its own thread with this much.
 const PARSE_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /** sources nested deeper than this are refused without parsing. a stack overflow
-can't be caught (it aborts the whole process), so the ceiling must be enforced
-before full_moon ever runs. real Luau tops out around depth ~50; this is 10x that. */
+can't be caught, it aborts the whole process, so the ceiling must be enforced
+before full_moon ever runs. real Luau tops out around depth ~50, this is 10x that. */
 const MAX_NESTING_DEPTH: usize = 500;
 
 /** `export type` re-export lines for a link file. Luau type exports are lexical,
 they don't flow through `return require(...)`, so the link file must restate each
-one as `export type X<T> = module.X<T>`, same scheme as pesde's linker: the
+one as `export type X<T> = module.X<T>`, same scheme as pesde's linker. the
 declaration side keeps generic defaults, the use side drops them. exported type
-functions re-export the same way with their parameters as generics (parameterless
-ones have no type-declaration equivalent, skipped). None = source couldn't be
-parsed (invalid, absurdly nested, or a parser panic); caller decides how loudly
+functions re-export the same way with their parameters as generics, parameterless
+ones have no type-declaration equivalent and get skipped. None = source couldn't
+be parsed, invalid, absurdly nested, or a parser panic. caller decides how loudly
 to say so. */
 pub fn exported_types(source: &str) -> Option<Vec<String>> {
     if bracket_depth(source) > MAX_NESTING_DEPTH {
@@ -98,7 +98,7 @@ pub fn exported_types(source: &str) -> Option<Vec<String>> {
 }
 
 /** deepest `(){}[]` nesting in `source`. cheap over-approximation of the parser's
-recursion depth: brackets inside strings/comments count too, which only ever
+recursion depth. brackets inside strings/comments count too, which only ever
 refuses more, never less. */
 fn bracket_depth(source: &str) -> usize {
     let mut depth = 0usize;
@@ -163,7 +163,7 @@ fn extract_types(source: &str) -> Option<Vec<String>> {
     Some(visitor.types)
 }
 
-/// AST nodes print with surrounding trivia (whitespace, comments); trim so re-exports stay on one line.
+/// AST nodes print with surrounding trivia, whitespace and comments. trim so re-exports stay on one line.
 fn trimmed(node: impl std::fmt::Display) -> String {
     node.to_string().trim().to_string()
 }
@@ -183,10 +183,10 @@ fn reexport(name: &str, declared: &[String], used: &[String]) -> String {
     )
 }
 
-/** finds a package's entry point relative to its root, extensionless (Luau string
-requires reject extensions). checked in order: lpm.toml `[target].main`, pesde.toml
-`[target].lib`, a Rojo default.project.json tree `$path`, then conventional init
-file locations. */
+/** finds a package's entry point relative to its root, extensionless since Luau
+string requires reject extensions. checked in order, lpm.toml `[target].main`,
+pesde.toml `[target].lib`, a Rojo default.project.json tree `$path`, then
+conventional init file locations. */
 pub fn entry_point(dir: &Path) -> Option<String> {
     if let Some(main) = toml_string(dir, "lpm.toml", &["target", "main"]) {
         return Some(normalize_entry(&main));
@@ -220,10 +220,10 @@ pub fn entry_point(dir: &Path) -> Option<String> {
 /** the folder a Rojo tree mounts as the package. usually the root's own
 `$path`, but `rojo::mirror_disk_layout` re-nests that under folders named
 for the require path, so a single chain of them is followed down to the
-`$path` it ends at — the entry reads the same before and after the rewrite.
+`$path` it ends at. the entry reads the same before and after the rewrite.
 
-only plain folders are followed: a package shipping a place-style project
-(a DataModel of services, say) names no single entry, and guessing one from
+only plain folders are followed. a package shipping a place-style project,
+a DataModel of services say, names no single entry, and guessing one from
 whatever it mounts first would be worse than falling through to the
 conventional locations. */
 fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
@@ -237,20 +237,20 @@ fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
             None | Some("Folder") => {}
             Some(_) => return None,
         }
-        // $className and friends describe the node; anything else is a child
+        // $className and friends describe the node, anything else is a child
         let mut children = object.iter().filter(|(key, _)| !key.starts_with('$'));
         let (_, only) = children.next()?;
         if children.next().is_some() {
-            // several children: no single folder is "the package"
+            // several children, no single folder is "the package"
             return None;
         }
         node = only;
     }
 }
 
-/** reads an extracted package's own manifest for its environment: lpm.toml
-`[target].environment`, then pesde.toml's (translated), then wally.toml
-`[package].realm` (translated). */
+/** reads an extracted package's own manifest for its environment. lpm.toml
+`[target].environment` first, then pesde.toml's, then wally.toml
+`[package].realm`, the last two translated. */
 pub fn environment(dir: &Path) -> Option<Environment> {
     if let Some(name) = toml_string(dir, "lpm.toml", &["target", "environment"]) {
         return Environment::from_lpm(&name).ok();
@@ -265,14 +265,14 @@ pub fn environment(dir: &Path) -> Option<Environment> {
 }
 
 /** an extracted package's declared runtime dependencies, as (alias,
-lowercased package name) pairs — what install's nested-link pass consumes.
+lowercased package name) pairs, what install's nested-link pass consumes.
 the first manifest with a matching table wins, same priority order as the
-other readers here: lpm.toml (each entry's `name` key), pesde.toml (`name`,
-or `wally` for wally-sourced entries), wally.toml
-(`alias = "scope/name@req"`). wally splits runtime deps by realm, so its
-[server-dependencies] count too — the resolver installs them (wally.rs
-chains both tables) and a server-realm package like lyra declares ALL its
-deps there; reading only [dependencies] starved those packages of nested
+other readers here. lpm.toml reads each entry's `name` key, pesde.toml
+`name` or `wally` for wally-sourced entries, wally.toml
+`alias = "scope/name@req"`. wally splits runtime deps by realm, so its
+[server-dependencies] count too. the resolver installs them, wally.rs
+chains both tables, and a server-realm package like lyra declares ALL its
+deps there. reading only [dependencies] starved those packages of nested
 links and left their escape requires unrewritten. dev/peer tables stay
 out. missing or unparseable manifests read as no dependencies, same stance
 as `toml_string`. */
@@ -320,7 +320,7 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
         return found
             .into_iter()
             .flat_map(|table| table.iter())
-            // entries this flavor can't name (e.g. workspace specifiers) are skipped
+            // entries this flavor can't name, like workspace specifiers, are skipped
             .filter_map(|(alias, entry)| {
                 Some((alias.clone(), dependency_name(entry)?.trim().to_lowercase()))
             })
@@ -329,7 +329,7 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
     Vec::new()
 }
 
-/// archives sometimes wrap everything in one top-level folder (GitHub release tarballs do); unwrap so package files sit at the root.
+/// archives sometimes wrap everything in one top-level folder, GitHub release tarballs do. unwrap so package files sit at the root.
 pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
     let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     let [only] = entries.as_slice() else {
@@ -357,7 +357,7 @@ fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     value.as_str().map(str::to_string)
 }
 
-/// normalizes an entry path for a string require: forward slashes, no leading "./", no .luau/.lua extension (a bare folder resolves its init file).
+/// normalizes an entry path for a string require. forward slashes, no leading "./", no .luau/.lua extension, a bare folder resolves its init file.
 pub(crate) fn normalize_entry(path: &str) -> String {
     let path = path.replace('\\', "/");
     let path = path.trim_start_matches("./").trim_matches('/');
@@ -421,8 +421,8 @@ mod tests {
         let base = std::env::temp_dir().join("lpm-test-declared-deps");
         let _ = fs::remove_dir_all(&base);
 
-        // lpm.toml: `name` keys, lowercased; entries without one (workspace
-        // specifiers) are skipped.
+        // lpm.toml reads `name` keys, lowercased. entries without one, like
+        // workspace specifiers, are skipped.
         let lpm = base.join("lpm");
         write_package(
             &lpm,
@@ -435,9 +435,9 @@ mod tests {
             [("core".to_string(), "chief/core".to_string())]
         );
 
-        /* pesde.toml: `name`, or `wally` for wally-sourced entries — which
-        pesde serializes with a "wally#" prefix the install set doesn't
-        carry */
+        /* pesde.toml reads `name`, or `wally` for wally-sourced entries,
+        which pesde serializes with a "wally#" prefix the install set
+        doesn't carry */
         let pesde = base.join("pesde");
         write_package(
             &pesde,
@@ -455,7 +455,7 @@ mod tests {
             ]
         );
 
-        // wally.toml: `alias = "scope/name@req"`, req stripped.
+        // wally.toml reads `alias = "scope/name@req"`, req stripped.
         let wally = base.join("wally");
         write_package(
             &wally,
@@ -468,9 +468,9 @@ mod tests {
             [("Promise".to_string(), "evaera/promise".to_string())]
         );
 
-        /* wally splits runtime deps by realm: a server package (lyra) puts
-        ALL its deps under [server-dependencies]; both tables count, dev
-        still doesn't */
+        /* wally splits runtime deps by realm, a server package like lyra
+        puts ALL its deps under [server-dependencies]. both tables count,
+        dev still doesn't */
         let server = base.join("wally-server");
         write_package(
             &server,
@@ -559,7 +559,7 @@ mod tests {
         write_package(&b, "pesde.toml", "[target]\nlib = \"lib.luau\"");
         assert_eq!(entry_point(&b).as_deref(), Some("lib"));
 
-        // Rojo tree path (a folder; its init file resolves at require time).
+        // Rojo tree path, a folder whose init file resolves at require time.
         let c = base.join("c");
         write_package(
             &c,
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn entry_point_survives_the_rojo_rewrite() {
         /* install mirrors a shipped project file onto the disk layout after
-        reading the entry; later passes (nested links) read it again, so
+        reading the entry. later passes, nested links, read it again, so
         both shapes have to answer the same */
         let base = std::env::temp_dir().join("lpm-test-entry-after-rewrite");
         let _ = fs::remove_dir_all(&base);
@@ -652,9 +652,9 @@ mod tests {
 
     #[test]
     fn absurdly_nested_sources_are_refused_not_crashed() {
-        /* full_moon recurses per nesting level; past the guard's ceiling the source
-        is refused before the parser can eat the stack. (this once aborted the whole
-        install with a stack overflow.) */
+        /* full_moon recurses per nesting level. past the guard's ceiling the source
+        is refused before the parser can eat the stack. this once aborted the whole
+        install with a stack overflow. */
         let depth = 2000;
         let deep = format!(
             "export type Deep = {}number{}\nreturn {{}}\n",
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(bracket_depth("plain"), 0);
     }
 
-    /// the deepest source the guard lets through: it refuses `>` the ceiling, so this is it.
+    /// the deepest source the guard lets through. it refuses `>` the ceiling, so this is it.
     #[cfg(not(debug_assertions))]
     fn worst_case_source() -> String {
         format!(
@@ -692,29 +692,29 @@ mod tests {
     /** how much of the parse thread's 64 MiB the worst case actually needs.
 
     measured by bisection on this fixture, and the two profiles are nothing
-    alike:
+    alike.
 
       release (lto = "fat", opt-level = "s")   aborts at 8 MiB, passes at 10
       release (lto = "thin", opt-level = 3)    aborts at 8 MiB, passes at 10
       dev (unoptimized)                        aborts at 32 MiB, passes at 48
 
     so the profile change did not move the per-frame cost, and the shipped
-    binary has roughly 6x headroom — not the ~135 KiB-per-level a naive
+    binary has roughly 6x headroom, not the ~135 KiB-per-level a naive
     PARSE_STACK_BYTES / MAX_NESTING_DEPTH division suggests. An unoptimized
     build wants closer to five times that, leaving only ~1.3x, which is why
-    both of the max-depth tests are release-only: run under `cargo test`
+    both of the max-depth tests are release-only. run under `cargo test`
     they sit near enough to the edge that a slightly different toolchain
     tips them over, and stack exhaustion does not fail politely.
 
     that is also the whole reason this one runs on a deliberately SMALL stack
     rather than the production 64 MiB. At 64 a regression would have to
     quadruple per-frame cost before anything noticed, and the first sign would
-    be a user's install aborting; at 16 the same regression trips here first,
+    be a user's install aborting. at 16 the same regression trips here first,
     with ~1.6x of slack so ordinary codegen churn is not noise.
 
     when it does trip, the symptom is the whole test binary dying with
     STATUS_STACK_OVERFLOW and no per-test attribution, because that is what
-    stack exhaustion does (see MAX_NESTING_DEPTH). re-run the bisection above
+    stack exhaustion does, see MAX_NESTING_DEPTH. re-run the bisection above
     before touching either constant. */
     #[cfg(not(debug_assertions))]
     #[test]
@@ -733,32 +733,32 @@ mod tests {
 
     /** the guard's own ceiling, parsed for real.
 
-    `absurdly_nested_sources_are_refused_not_crashed` covers depth 2000 (refused
-    before the parser runs) and depth 100 (parses comfortably), which leaves the
-    case that actually costs the most stack — one notch under MAX_NESTING_DEPTH,
-    so it clears the guard and then recurses all the way down — untested.
+    `absurdly_nested_sources_are_refused_not_crashed` covers depth 2000, refused
+    before the parser runs, and depth 100, which parses comfortably. that leaves
+    the case that actually costs the most stack untested, one notch under
+    MAX_NESTING_DEPTH, so it clears the guard and then recurses all the way down.
 
     that gap is worth closing because the margin is a budget with a compiler on
-    the other side of it: PARSE_STACK_BYTES against however many bytes per
+    the other side of it, PARSE_STACK_BYTES against however many bytes per
     recursion level full_moon compiles down to, and inlining decisions move the
     second number. lto, opt-level, and a toolchain bump all change inlining, and
     the failure mode is a stack overflow, which aborts the process and cannot be
-    caught (see MAX_NESTING_DEPTH's comment). run this under `--release` as well
-    as dev: a dev-profile pass proves nothing about a release inlining change. */
-    /* release-only for the same reason as the canary above: an unoptimized
+    caught, see MAX_NESTING_DEPTH's comment. run this under `--release` as well
+    as dev. a dev-profile pass proves nothing about a release inlining change. */
+    /* release-only for the same reason as the canary above. an unoptimized
     build needs ~48 MiB of the 64 to parse this, and a margin that thin turns
     an unrelated toolchain bump into an aborted test binary. the guard logic
     itself stays covered in every profile by
     `absurdly_nested_sources_are_refused_not_crashed`, which works at depths
-    (2000 refused, 100 parsed) where dev has room to spare. */
+    where dev has room to spare, 2000 refused, 100 parsed. */
     #[cfg(not(debug_assertions))]
     #[test]
     fn nesting_at_the_ceiling_still_parses() {
         let deep = worst_case_source();
-        /* pinned, not bounded: `<= MAX_NESTING_DEPTH` would also hold for a
+        /* pinned, not bounded. `<= MAX_NESTING_DEPTH` would also hold for a
         fixture nested five levels deep, and the whole point is to sit exactly
-        where the guard stops refusing (it refuses `>`, so the ceiling itself
-        gets through and is the most expensive input lpm will ever parse) */
+        where the guard stops refusing. it refuses `>`, so the ceiling itself
+        gets through and is the most expensive input lpm will ever parse */
         assert_eq!(bracket_depth(&deep), MAX_NESTING_DEPTH);
         assert_eq!(
             exported_types(&deep).unwrap(),

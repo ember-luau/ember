@@ -13,7 +13,7 @@ pub const DEFAULT_INDEX_NAME: &str = "default";
 
 /** lpm's own package index, the fallback for dependencies naming no index when
 the project defines no `default` one. pesde-format entries whose `download` URLs
-point at the registry CDN; written only by the lpm API at publish time, read by
+point at the registry CDN. written only by the lpm API at publish time, read by
 the CLI like any other git index. */
 pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 
@@ -28,13 +28,13 @@ pub struct Manifest {
     pub indices: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
-    /// replacements for dependencies of dependencies; see [`Override`].
+    /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
-    /** diffs applied to dependencies at install: "scope/name@version" ->
+    /** diffs applied to dependencies at install, "scope/name@version" ->
     a repo-relative .patch file, written by `lpm patch commit`. root
-    manifest only, same as [overrides] (a dependency's own table is never
-    consulted, and publish strips it). keys parse with [`patch_key`],
+    manifest only, same as [overrides]. a dependency's own table is never
+    consulted, and publish strips it. keys parse with [`patch_key`],
     values validate with [`patch_path`]. */
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patches: BTreeMap<String, String>,
@@ -48,7 +48,7 @@ pub struct Manifest {
     pub studio: Option<Studio>,
 }
 
-/// per-environment install locations; each defaults to "packages/<env>".
+/// per-environment install locations, each defaults to "packages/<env>".
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
     #[serde(
@@ -84,7 +84,7 @@ pub struct Package {
     pub name: String,
     pub version: String,
     /** never published. workspace roots that only exist to hold members set this
-    so publish skips them (chief's root manifest is the archetype). */
+    so publish skips them. chief's root manifest is the archetype. */
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,9 +104,9 @@ pub struct Target {
     a workspace root has no code of its own to require. */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
-    /// member globs (relative to this manifest): `workspace = ["packages/*"]`
-    /// (`!` negates, literal "." includes the root). having members makes this
-    /// a workspace root; publish/install there run for every member. pesde's
+    /// member globs relative to this manifest, like `workspace = ["packages/*"]`.
+    /// `!` negates, literal "." includes the root. having members makes this
+    /// a workspace root, publish/install there run for every member. pesde's
     /// spelling `workspace_members` is accepted as an alias. read through
     /// [`Manifest::workspace_members`].
     #[serde(
@@ -116,18 +116,18 @@ pub struct Target {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub workspace: Vec<String>,
-    /// what goes into the published archive: plain file/dir paths (a dir
-    /// covers everything under it) or globs like `src/*`. empty = "everything
-    /// sensible", the default walk minus VCS/output dirs.
+    /// what goes into the published archive, plain file/dir paths or globs
+    /// like `src/*`. a dir covers everything under it. empty means everything
+    /// sensible, the default walk minus VCS/output dirs.
     #[serde(default, alias = "include", skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<String>,
-    /** subtracted from whatever `includes` (or the default walk) selected; same
+    /** subtracted from whatever `includes` or the default walk selected, same
     path-or-glob entries. lpm.toml always ships. */
     #[serde(default, alias = "exclude", skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<String>,
 }
 
-/// where a package's Luau code runs. output folders under packages/ use the serialized (lowercase) form.
+/// where a package's Luau code runs. output folders under packages/ use the serialized lowercase form.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -183,7 +183,7 @@ impl Environment {
         }
     }
 
-    /// parses lpm's own environment names ("shared", "lune", ...).
+    /// parses lpm's own environment names like "shared" and "lune".
     pub fn from_lpm(environment: &str) -> Result<Self, Error> {
         match environment {
             "shared" => Ok(Environment::Shared),
@@ -202,7 +202,7 @@ impl fmt::Display for Environment {
     }
 }
 
-/// the [studio] table: either a published place (both IDs) or a local place file.
+/// the [studio] table, either a published place with both IDs or a local place file.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Studio {
     /// universe (experience) ID the place belongs to.
@@ -216,13 +216,13 @@ pub struct Studio {
     pub file: Option<String>,
     /** anything else written under [studio]. the table gets hand-edited a lot and
     a typo'd key would otherwise read as "unconfigured", so `target()` reports
-    these. only there, though: `deny_unknown_fields` would let a [studio] typo
+    these. only there, though. `deny_unknown_fields` would let a [studio] typo
     fail unrelated commands. */
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
 }
 
-/// a validated [studio] table: the one thing `lpm studio open` should open.
+/// a validated [studio] table, the one thing `lpm studio open` should open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StudioTarget {
     /// published place, opened through the roblox-studio: protocol.
@@ -277,17 +277,17 @@ pub enum Dependency {
     Registry {
         /// "scope/name" identifier.
         name: String,
-        /// semver requirement; "^" alone means "latest".
+        /// semver requirement. "^" alone means "latest".
         version: String,
-        /// key into [indices]; None means the default luaupm index.
+        /// key into [indices]. None means the default luaupm index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
-    development; `version` is a version TYPE (`^`, `~`, `=`, `*`) or a full
-    requirement, applied to the member's current version only at publish time
-    (see [`workspace_version_req`]). */
+    development. `version` is a version TYPE like `^`, `~`, `=`, `*`, or a full
+    requirement, applied to the member's current version only at publish time,
+    see [`workspace_version_req`]. */
     Workspace {
         workspace: String,
         #[serde(default = "default_workspace_version")]
@@ -299,24 +299,24 @@ fn default_workspace_version() -> String {
     "^".to_string()
 }
 
-/** an [overrides] value: what an alias path should resolve to instead of
-what the dependency's own manifest asked for. keys name an edge — in
+/** an [overrides] value, what an alias path should resolve to instead of
+what the dependency's own manifest asked for. keys name an edge. in
 `"Foo.Bar"`, `Foo` is an alias under this manifest's [dependencies] and
-`Bar` is the alias Foo's own manifest declares (aliases are case-sensitive
-and spelled exactly as each parent wrote them; package names are not what
-paths are made of). values are either the alias of one of this manifest's
-own [dependencies] entries (`"Foo.Bar" = "Bar"`: use mine) or a full
-specifier.
+`Bar` is the alias Foo's own manifest declares. aliases are case-sensitive
+and spelled exactly as each parent wrote them, package names are not what
+paths are made of. values are either the alias of one of this manifest's
+own [dependencies] entries, `"Foo.Bar" = "Bar"` meaning use mine, or a
+full specifier.
 
-semantics under lpm's flat install model, plainly: an override redirects
+semantics under lpm's flat install model, plainly. an override redirects
 that one edge. other dependents that ask for the original package by
 name keep it, and both packages then coexist in the set, each linked
 where it was asked for. only the root manifest's [overrides] is
-consulted — a workspace member's own table applies when the member
+consulted, a workspace member's own table applies when the member
 itself installs, and a published package's is inert. a package's edges
-are walked once, on its first discovery (root aliases seed in
-alphabetical order), so a three-segment path must spell that first
-route; segments below an overridden edge address the *replacement's*
+are walked once, on its first discovery, root aliases seeding in
+alphabetical order, so a three-segment path must spell that first
+route. segments below an overridden edge address the *replacement's*
 dependencies. */
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -327,13 +327,13 @@ pub enum Override {
     Specifier(Dependency),
 }
 
-/** expands an [overrides] key into alias paths: dot-separated chains from
-a direct dependency down, with one key able to cover several paths
-separated by commas (`"foo.bar, baz.bar" = ...`). a path needs at least
-two segments — a single alias would name one of your own [dependencies],
-which you can just edit. aliases that themselves contain dots or
-whitespace can't be addressed; pick the specifier form under a different
-alias if that ever bites. */
+/** expands an [overrides] key into alias paths, dot-separated chains from
+a direct dependency down. one key can cover several paths separated by
+commas, `"foo.bar, baz.bar" = ...`. a path needs at least two segments,
+a single alias would name one of your own [dependencies], which you can
+just edit. aliases that themselves contain dots or whitespace can't be
+addressed. pick the specifier form under a different alias if that ever
+bites. */
 pub fn override_paths(key: &str) -> Result<Vec<Vec<String>>, Error> {
     key.split(',')
         .map(|path| {
@@ -350,10 +350,10 @@ pub fn override_paths(key: &str) -> Result<Vec<Vec<String>>, Error> {
         .collect()
 }
 
-/** splits a `[patches]` key: "scope/name@1.2.3" -> (name, exact version).
-split at the first '@', so build metadata (`acme/foo@1.0.0+build.5`) simply
+/** splits a `[patches]` key, "scope/name@1.2.3" -> (name, exact version).
+split at the first '@', so build metadata like `acme/foo@1.0.0+build.5` simply
 lives inside the version. exact because a patch is a claim about one
-published archive; a range would make "which bytes" depend on resolution. */
+published archive. a range would make "which bytes" depend on resolution. */
 pub fn patch_key(key: &str) -> Result<(String, semver::Version), Error> {
     let invalid = |reason: String| Error::PatchKeyInvalid {
         key: key.to_string(),
@@ -372,8 +372,8 @@ pub fn patch_key(key: &str) -> Result<(String, semver::Version), Error> {
     Ok((name.to_string(), version))
 }
 
-/** validates a `[patches]` value: a relative path that stays inside the
-project. absolute paths and `..` escapes are refused; a patch is part of
+/** validates a `[patches]` value, a relative path that stays inside the
+project. absolute paths and `..` escapes are refused. a patch is part of
 the repo, or installs stop being reproducible for anyone else. */
 pub fn patch_path(key: &str, path: &str) -> Result<std::path::PathBuf, Error> {
     use std::path::Component;
@@ -405,8 +405,8 @@ pub fn patch_path(key: &str, path: &str) -> Result<std::path::PathBuf, Error> {
 }
 
 /** the registry requirement a workspace dependency publishes as, pesde's rules
-exactly: `^`/`~`/`=` prefix the member's current version (`^` + `1.2.3` ->
-`^1.2.3`), `*` stays "any", anything else must already be a full semver
+exactly. `^`/`~`/`=` prefix the member's current version, `^` + `1.2.3` ->
+`^1.2.3`. `*` stays "any". anything else must already be a full semver
 requirement and passes through unchanged. */
 pub fn workspace_version_req(
     version: &str,
@@ -425,7 +425,7 @@ pub fn workspace_version_req(
     })
 }
 
-/// a GitHub-released binary tool, written in lpm.toml as the single string "owner/repo@version" under [tools] (key = alias).
+/// a GitHub-released binary tool, written in lpm.toml as the single string "owner/repo@version" under [tools], the key being the alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
     /// "owner/repo" GitHub repository.
@@ -451,10 +451,10 @@ impl Tool {
         })
     }
 
-    /** splits an "owner/repo" GitHub repository name. unlike index package names
-    (see `split_package_name`), GitHub owners/repos may contain uppercase and dots
-    ("JohnnyMorganz/StyLua"), so mostly the shape is validated: exactly one '/',
-    both halves non-empty. backslashes and dot-only components are rejected —
+    /** splits an "owner/repo" GitHub repository name. unlike index package names,
+    see `split_package_name`, GitHub owners/repos may contain uppercase and dots
+    like "JohnnyMorganz/StyLua", so mostly the shape is validated, exactly one '/',
+    both halves non-empty. backslashes and dot-only components are rejected.
     GitHub never allows them, and either could steer the storage path out of
     ~/.lpm/tools on windows. */
     pub fn split_repository(repository: &str) -> Result<(&str, &str), Error> {
@@ -547,7 +547,7 @@ impl Manifest {
         }
     }
 
-    /// the command a `[scripts]` entry runs. read side only, used by `lpm run`; edits go through `edit::ManifestDoc`.
+    /// the command a `[scripts]` entry runs. read side only, used by `lpm run`. edits go through `edit::ManifestDoc`.
     pub fn script(&self, name: &str) -> Result<&str, Error> {
         self.scripts
             .get(name)
@@ -556,10 +556,10 @@ impl Manifest {
     }
 }
 
-/** shape of a GitHub username: 1-39 chars, alphanumeric or dashes, no leading/
-trailing/consecutive dash. `[package] authors` must pass this: the registry
-appends authors to the scope's owner list on publish (co-ownership) and 400s
-anything that isn't a username. shape only; account existence is never checked,
+/** shape of a GitHub username, 1-39 chars, alphanumeric or dashes, no leading/
+trailing/consecutive dash. `[package] authors` must pass this since the registry
+appends authors to the scope's owner list on publish for co-ownership and 400s
+anything that isn't a username. shape only, account existence is never checked,
 so typos still bite. */
 pub fn is_github_username(name: &str) -> bool {
     !name.is_empty()
@@ -668,7 +668,7 @@ mod tests {
         )
         .unwrap();
 
-        // no `default` key: bare deps fall back to lpm's own index.
+        // no `default` key, bare deps fall back to lpm's own index.
         assert_eq!(manifest.index_url(None).unwrap(), DEFAULT_INDEX_URL);
         assert_eq!(
             manifest.index_url(Some("wally")).unwrap(),
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn parses_workspace_manifests_and_dependencies() {
-        /* the chief repo's shape: private root listing member globs, members
+        /* the chief repo's shape, private root listing member globs, members
         depending on each other with workspace specifiers. */
         let root: Manifest = toml::from_str(
             r#"
@@ -769,7 +769,7 @@ mod tests {
         )
         .unwrap();
         assert!(root.package.private);
-        // a root needs a [target] but no `main`; members carry the code.
+        // a root needs a [target] but no `main`. members carry the code.
         assert!(root.target.as_ref().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
 
@@ -845,7 +845,7 @@ mod tests {
         let (name, version) = patch_key("chief/traits@0.2.0").unwrap();
         assert_eq!(name, "chief/traits");
         assert_eq!(version, semver::Version::new(0, 2, 0));
-        // round trips: formatting the parts gives the key back
+        // round trips, formatting the parts gives the key back
         assert_eq!(format!("{name}@{version}"), "chief/traits@0.2.0");
 
         /* build metadata lives inside the version, not treated as some
@@ -1147,8 +1147,8 @@ mod tests {
 
     #[test]
     fn studio_flags_unknown_keys_without_failing_the_manifest() {
-        /* a typo'd key must not break `Manifest::load` (that would take
-        install/add/run down with it), but `target()` names it. */
+        /* a typo'd key must not break `Manifest::load`, that would take
+        install/add/run down with it, but `target()` names it. */
         let manifest: Manifest = toml::from_str(
             r#"
             [package]
@@ -1188,7 +1188,7 @@ mod tests {
             override_paths("foo.bar").unwrap(),
             [vec!["foo".to_string(), "bar".to_string()]]
         );
-        // one key can cover several paths; whitespace around commas is noise
+        // one key can cover several paths, whitespace around commas is noise
         assert_eq!(
             override_paths("foo.bar, baz.qux.bar").unwrap(),
             [

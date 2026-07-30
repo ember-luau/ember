@@ -1,4 +1,4 @@
-//! the files a project owns: manifest, lockfile, reading installed packages back, workspaces.
+//! the files a project owns. manifest, lockfile, reading installed packages back, workspaces.
 
 pub mod hooks;
 pub mod lockfile;

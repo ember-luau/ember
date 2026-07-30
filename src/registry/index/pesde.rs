@@ -17,8 +17,8 @@ pub struct Config {
     config.toml that predates it still parses. */
     #[serde(default)]
     pub api: Option<String>,
-    /** GitHub OAuth app (device flow) publishes authenticate against. Real
-    pesde indices spell this `github_oauth_client_id`. */
+    /** GitHub OAuth app publishes authenticate against, via the device
+    flow. Real pesde indices spell this `github_oauth_client_id`. */
     #[serde(default, alias = "github_oauth_client_id")]
     pub github_oauth_id: Option<String>,
 }
@@ -31,8 +31,8 @@ pub fn load_config(root: &Path) -> Result<Config, Error> {
 
 struct Candidate {
     version: semver::Version,
-    /** Raw target string ("luau", "roblox", ...) from the entry key or the
-    entry's own target table; fills {PACKAGE_TARGET} in download URLs. */
+    /** Raw target string like "luau" or "roblox", from the entry key or the
+    entry's own target table. Fills {PACKAGE_TARGET} in download URLs. */
     target: Option<String>,
     environment: Option<Environment>,
     entry: Value,
@@ -56,8 +56,8 @@ pub fn resolve(
     }
 
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    /* Newer pesde files nest entries under an "entries" table (with sibling
-    metadata like `meta`); older ones put them at the top level. Keys are
+    /* Newer pesde files nest entries under an "entries" table with sibling
+    metadata like `meta`, older ones put them at the top level. Keys are
     "<version> <target>", the target part optional in lpm indices. */
     let entries = match file.get("entries") {
         Some(Value::Table(entries)) => entries,
@@ -74,14 +74,14 @@ pub fn resolve(
             None => (key.as_str(), None),
         };
         let Ok(version) = semver::Version::parse(version_part) else {
-            continue; // not a version entry (e.g. a metadata table)
+            continue; // not a version entry, like a metadata table
         };
         if !req.matches(&version) {
             continue;
         }
 
-        /* The entry's own target is authoritative: a table with an
-        `environment` (pesde), or a bare string (lpm API entries). The
+        /* The entry's own target is authoritative, a table with an
+        `environment` for pesde or a bare string for lpm API entries. The
         key's target part covers entries that don't carry one. */
         let target = entry
             .get("target")
@@ -110,7 +110,7 @@ pub fn resolve(
     };
 
     /* Among the best version's targets, prefer the one matching the
-    project's environment; otherwise take the first. */
+    project's environment, otherwise take the first. */
     let mut same_version: Vec<Candidate> = candidates
         .into_iter()
         .filter(|c| c.version == best_version)
@@ -135,7 +135,7 @@ pub fn resolve(
     })
 }
 
-/// Accepts both lpm environment names and pesde's ("roblox" -> shared, ...).
+/// Accepts both lpm environment names and pesde's, "roblox" -> shared and so on.
 fn parse_environment(environment: &str) -> Result<Environment, Error> {
     Environment::from_lpm(environment).or_else(|_| Environment::from_pesde(environment))
 }
@@ -146,8 +146,8 @@ fn download_source(
     name: &str,
     candidate: &Candidate,
 ) -> Result<DownloadSource, Error> {
-    /* lpm-index entries bake in their download URL (that's what lets
-    installs work without a registry server being up); pesde entries
+    /* lpm-index entries bake in their download URL, which lets
+    installs work without a registry server being up. pesde entries
     build theirs from the registry template. */
     if let Some(url) = candidate.entry.get("download").and_then(Value::as_str) {
         return Ok(DownloadSource::TarGz {
@@ -227,8 +227,8 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
             .to_string();
         let index = spec.get("index").and_then(Value::as_str);
 
-        /* Published entries name a dependency's index by URL; "default" (or
-        nothing) means the index the entry itself came from. */
+        /* Published entries name a dependency's index by URL. "default" or
+        nothing means the index the entry itself came from. */
         let dep_index_url = match index {
             Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
                 Some(url.to_string())
@@ -246,7 +246,7 @@ fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDe
         };
 
         parsed.push(TransitiveDependency {
-            // Old wally entries may carry uppercase names; normalize.
+            // Old wally entries may carry uppercase names, normalize.
             name: name.to_lowercase(),
             version_req,
             index_url: dep_index_url,
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn entry_download_url_wins_over_the_template() {
-        /* lpm's own index: entries carry their download URL, so no `api` is
+        /* lpm's own index. entries carry their download URL, so no `api` is
         needed, and one being set wouldn't override the entry. */
         let config = Config {
             api: Some("https://registry.example.com".to_string()),
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn resolves_lpm_index_entries_with_baked_downloads() {
-        /* The shape the lpm API writes: no root `api`, per-entry `download`,
+        /* The shape the lpm API writes. no root `api`, per-entry `download`,
         target as a table with just `environment`. */
         let index = TempIndex::new("lpm-format", r#"github_oauth_id = "Ov23abc""#);
         index.write_package(
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(resolved.environment, Some(Environment::Shared));
         assert_eq!(resolved.dependencies.len(), 1);
         assert_eq!(resolved.dependencies[0].name, "chief/bin");
-        // No index named on the dependency: resolve it in the same index.
+        // No index named on the dependency, resolve it in the same index.
         assert_eq!(resolved.dependencies[0].index_url, None);
         let DownloadSource::TarGz { url } = resolved.source else {
             panic!("expected tarball source");
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn resolves_top_level_entries_from_disk() {
-        /* Entry keys carry the target after the version; older files put
+        /* Entry keys carry the target after the version. older files put
         entries at the top level instead of under [entries]. */
         let index = TempIndex::new("top-level", r#"api = "https://registry.example.com""#);
         index.write_package(

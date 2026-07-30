@@ -10,13 +10,13 @@ use inquire::validator::Validation;
 pub struct AddArgs {
     /// Package to add, as scope/name
     package: String,
-    /// Version requirement (default "^", the latest)
+    /// Version requirement, defaults to "^" meaning latest
     #[arg(long)]
     version: Option<String>,
-    /// Index key from [indices]; skips the prompt
+    /// Index key from [indices], skips the prompt
     #[arg(long)]
     index: Option<String>,
-    /// Key written to [dependencies] (default: package short name)
+    /// Key written to [dependencies], defaults to the package short name
     #[arg(long)]
     alias: Option<String>,
     /// Re-fetch the index even if it was refreshed recently
@@ -50,8 +50,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let index = Index::open(&index_url, mode)?;
     let package = match index.resolve(&name, &req, prefer) {
         Ok(package) => package,
-        /* the TTL may have kept us on a stale index that simply hasn't
-        seen this package or version yet; one forced refresh, one retry */
+        /* the TTL may have kept us on a stale index that just hasn't
+        seen this package or version yet, so one forced refresh, one retry */
         Err(_) if index.ttl_skipped() => {
             Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer)?
         }
@@ -78,8 +78,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/** asks which index to search. empty input means the default index
-(the `default` key under [indices] if set, else lpm's); anything else
+/** asks which index to search. empty input means the default index,
+the `default` key under [indices] if set, else lpm's. anything else
 has to be a key under [indices]. */
 fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
     inquire::set_global_render_config(crate::ui::render_config());

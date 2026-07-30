@@ -4,7 +4,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
 
-/// Never published; matched by name at any depth.
+/// Never published, matched by name at any depth.
 const SKIP_NAMES: [&str; 6] = [
     ".git",
     ".lpm-staging",
@@ -15,10 +15,10 @@ const SKIP_NAMES: [&str; 6] = [
 ];
 
 /// Files to publish, relative to `root`, sorted so the archive is
-/// deterministic. Skips packages-out folders and `SKIP_NAMES`; without
+/// deterministic. Skips packages-out folders and `SKIP_NAMES`. Without
 /// `includes` under [target] that walk is the whole selection. Include/exclude
-/// entries are relative paths (a directory covers its subtree) or globs like
-/// `src/*`; `excludes` subtracts from the selection, and lpm.toml always
+/// entries are relative paths, a directory covering its subtree, or globs like
+/// `src/*`. `excludes` subtracts from the selection, and lpm.toml always
 /// ships.
 pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
     let out_dirs: Vec<PathBuf> = Environment::ALL
@@ -50,9 +50,9 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     Ok(files)
 }
 
-/** One includes/excludes list, compiled: entries with glob metacharacters
-match as globs, plain entries as path prefixes (a bare directory name covers
-its subtree). */
+/** One includes/excludes list, compiled. Entries with glob metacharacters
+match as globs, plain entries as path prefixes, so a bare directory name
+covers its subtree. */
 struct PathFilter {
     paths: Vec<PathBuf>,
     globs: globset::GlobSet,
@@ -64,8 +64,8 @@ impl PathFilter {
         let mut globs = globset::GlobSetBuilder::new();
         for entry in entries {
             if entry.contains(['*', '?', '[', '{']) {
-                // literal_separator: a `src/` + `*` glob means src's files
-                // only, not the subtree; use a double star (or just `src`).
+                // literal_separator, so a `src/` + `*` glob means src's files
+                // only, not the subtree. use a double star or just `src`.
                 let glob = globset::GlobBuilder::new(entry)
                     .literal_separator(true)
                     .build()
@@ -96,9 +96,9 @@ impl PathFilter {
 
 /** Packs the selected files into a gzipped tar. Entry paths are
 forward-slash relative, no leading "./". The lpm.toml entry is serialized
-from `manifest`, not copied from disk: publish rewrites workspace deps into
-registry ones in memory, and the archive is where that rewrite has to land
-(the on-disk file stays untouched), same as pesde. */
+from `manifest`, not copied from disk. Publish rewrites workspace deps into
+registry ones in memory and the archive is where that rewrite has to land,
+the on-disk file stays untouched, same as pesde. */
 pub fn pack(root: &Path, manifest: &Manifest) -> Result<Vec<u8>, Error> {
     let files = packed_files(root, manifest)?;
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
@@ -313,8 +313,8 @@ mod tests {
         }
 
         assert_eq!(unpacked.len(), 3);
-        /* The archive's manifest comes from memory (that's where publish's
-        workspace-dep rewrite lives), not from disk. */
+        /* The archive's manifest comes from memory, where publish's
+        workspace-dep rewrite lives, not from disk. */
         assert_eq!(unpacked["lpm.toml"], toml::to_string(&manifest).unwrap());
         assert_eq!(unpacked["src/init.luau"], "return 1\n");
         assert_eq!(unpacked["docs/guide.md"], "# rocket\n");

@@ -1,6 +1,6 @@
-/*! workspaces, pesde-style: root lpm.toml lists member dirs as globs under
+/*! workspaces, pesde-style. root lpm.toml lists member dirs as globs under
 [target] workspace, members depend on each other via { workspace = "scope/name" },
-and publish/install at the root run for every member. no nested workspaces:
+and publish/install at the root run for every member. no nested workspaces,
 a member's own globs are never iterated from the outer root, same as pesde. */
 
 use crate::error::Error;
@@ -19,12 +19,12 @@ pub struct Workspace {
     /// absolute path of the root, the dir whose manifest lists the member globs.
     pub root: PathBuf,
     /** members in path order. the root itself is only included when the globs
-    contain a literal "." (pesde's self-reference). */
+    contain a literal ".", pesde's self-reference. */
     pub members: Vec<Member>,
 }
 
 impl Workspace {
-    /** opens the workspace rooted at `root`; its manifest must define member globs.
+    /** opens the workspace rooted at `root`. its manifest must define member globs.
     a matched dir without lpm.toml is an error, same as pesde. */
     pub fn open(root: &Path) -> Result<Self, Error> {
         let root = absolute(root)?;
@@ -51,9 +51,9 @@ impl Workspace {
     }
 }
 
-/** the workspace `project_dir` belongs to: walk up, take the first ancestor manifest
-whose member globs match it (pesde's `find_roots`). ancestors that don't claim it
-are skipped; None when nothing does. */
+/** the workspace `project_dir` belongs to. walk up, take the first ancestor manifest
+whose member globs match it, pesde's `find_roots`. ancestors that don't claim it
+are skipped, None when nothing does. */
 pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
     let project_dir = absolute(project_dir)?;
     let mut current = project_dir.parent();
@@ -74,8 +74,8 @@ pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
     Ok(None)
 }
 
-/** dirs under `root` matching the member globs, sorted. pesde's glob extensions:
-`!` prefix subtracts matches, a literal "." makes the root itself a member. */
+/** dirs under `root` matching the member globs, sorted. pesde's glob extensions
+apply, `!` prefix subtracts matches, a literal "." makes the root itself a member. */
 fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
     let invalid = |glob: &str, error: globset::Error| Error::WorkspaceGlobInvalid {
         glob: glob.to_string(),
@@ -94,7 +94,7 @@ fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
             Some(negated) => (&mut negative, negated),
             None => (&mut positive, entry.as_str()),
         };
-        // literal_separator: `*` stays within one path segment, so `packages/`
+        // literal_separator, so `*` stays within one path segment and `packages/`
         // + `*` won't swallow packages/core/src. `**` crosses, wax-style.
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
@@ -159,7 +159,7 @@ pub fn relative_path(from: &Path, to: &Path) -> String {
     }
 }
 
-/// `std::path::absolute` with our error type. never canonicalize: symlink targets would break the lexical path math above.
+/// `std::path::absolute` with our error type. never canonicalize, symlink targets would break the lexical path math above.
 fn absolute(path: &Path) -> Result<PathBuf, Error> {
     Ok(std::path::absolute(path)?)
 }
@@ -188,7 +188,7 @@ mod tests {
         format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n")
     }
 
-    /// chief-shaped tree: private root with packages/* members.
+    /// chief-shaped tree, private root with packages/* members.
     fn write_workspace(base: &Path) {
         let root = format!(
             "{}private = true\n\n[target]\nenvironment = \"shared\"\n\

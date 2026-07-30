@@ -1,6 +1,6 @@
 /*! the Rojo project files a vendored package ships.
 
-a `default.project.json` inside an installed package is a *nested project*:
+a `default.project.json` inside an installed package is a *nested project*.
 Rojo mounts that folder using the file's own `name` and tree instead of the
 folder's disk layout. both diverge from what our link files require. take
 evaera/promise, whose project file is
@@ -10,19 +10,19 @@ evaera/promise, whose project file is
 ```
 
 extracted to `packages/shared/.lpm/evaera_promise/`, that mounts as a single
-ModuleScript named `promise` — while the generated wrapper requires
+ModuleScript named `promise` while the generated wrapper requires
 `./.lpm/evaera_promise/lib`. the folder is renamed and the `lib` level is
-gone, so luau-lsp and Studio can't resolve the require (or any type
-re-exported through it), even though darklua maps the require by file path
+gone, so luau-lsp and Studio can't resolve the require, or any type
+re-exported through it, even though darklua maps the require by file path
 at runtime and works fine.
 
 so after extraction each project file is renamed to its folder and its mount
 re-nested under the same names the require path spells, keeping the tree
-keys and the require in lockstep (both come from `normalize_entry`).
-packages that ship no project file — every lpm-native one — already sync
+keys and the require in lockstep. both come from `normalize_entry`.
+packages that ship no project file, every lpm-native one, already sync
 that way and are left alone.
 
-only what the project file itself mounts is covered: a package that ships
+only what the project file itself mounts is covered. a package that ships
 one *and* has dependencies of its own still won't have the `packages/`
 folder install writes into it mounted anywhere. */
 
@@ -34,11 +34,11 @@ use std::path::Path;
 pub const PROJECT_FILE: &str = "default.project.json";
 
 /** rewrites every project file inside an extracted package so its mounted
-tree mirrors the disk. nested ones count too (evaera/promise ships one under
-modules/testez): any of them can rename a subtree the package requires into
-itself.
+tree mirrors the disk. nested ones count too, evaera/promise ships one under
+modules/testez, and any of them can rename a subtree the package requires
+into itself.
 
-best-effort by design — a vendored file we can't read or don't understand is
+best-effort by design. a vendored file we can't read or don't understand is
 left as it came, exactly like the manifest readers in this module, rather
 than failing an install that has already downloaded everything. */
 pub fn mirror_disk_layout(package_dir: &Path, warn: &mut impl FnMut(String)) {
@@ -66,8 +66,8 @@ pub fn mirror_disk_layout(package_dir: &Path, warn: &mut impl FnMut(String)) {
 }
 
 /** the rewritten project text, or None when the file already mirrors the
-disk (or isn't a project we understand). `dir` is the folder the file sits
-in: its name is what Rojo must call the instance. */
+disk or isn't a project we understand. `dir` is the folder the file sits
+in, its name is what Rojo must call the instance. */
 fn mirrored(text: &str, dir: &Path) -> Option<String> {
     let mut project: Map<String, Value> = serde_json::from_str(text).ok()?;
 
@@ -75,7 +75,7 @@ fn mirrored(text: &str, dir: &Path) -> Option<String> {
     let folder = dir.file_name()?.to_str()?;
     let renamed = project.get("name").and_then(Value::as_str) != Some(folder);
 
-    // treeless files aren't projects Rojo (or we) can mount
+    // treeless files aren't mountable projects, for Rojo or for us
     let tree = project.get("tree")?.as_object()?;
     let remounted = tree
         .get("$path")
@@ -95,16 +95,16 @@ fn mirrored(text: &str, dir: &Path) -> Option<String> {
     Some(rewritten)
 }
 
-/** the tree a root `$path` becomes once re-nested: folders named after the
+/** the tree a root `$path` becomes once re-nested, folders named after the
 require path, with the original mount at the bottom.
 
 `lib` -> `{"$className": "Folder", "lib": {"$path": "lib"}}`, and
-`src/init.luau` -> `{"$className": "Folder", "src": {"$path": "src/init.luau"}}`
-— the keys are what `normalize_entry` (and so the link file) says, which is
+`src/init.luau` -> `{"$className": "Folder", "src": {"$path": "src/init.luau"}}`.
+the keys are what `normalize_entry`, and so the link file, says, which is
 why an init file mounts as the folder around it rather than a level deeper.
 
 None when the mount already mirrors the disk, or when re-nesting it would
-mean inventing instance names: paths reaching outside the package are left
+mean inventing instance names. paths reaching outside the package are left
 for Rojo to complain about instead of being quietly rewritten. */
 fn renested(tree: &Map<String, Value>, path: &str) -> Option<Value> {
     let cleaned = path.replace('\\', "/");
@@ -117,7 +117,7 @@ fn renested(tree: &Map<String, Value>, path: &str) -> Option<Value> {
         return None;
     }
 
-    /* an entry of "" is the package root's own init file: it already mounts
+    /* an entry of "" is the package root's own init file, it already mounts
     as the folder's instance, so the name fix is the whole job */
     let entry = normalize_entry(cleaned);
     if entry.is_empty() {
@@ -125,13 +125,13 @@ fn renested(tree: &Map<String, Value>, path: &str) -> Option<Value> {
     }
     let components: Vec<&str> = entry.split('/').collect();
 
-    // a child already using that name would be overwritten; leave it alone
+    // a child already using that name would be overwritten, leave it alone
     let (first, rest) = components.split_first()?;
     if tree.contains_key(*first) {
         return None;
     }
 
-    /* the mount, plus whatever described it: $properties and friends belong
+    /* the mount, plus whatever described it. $properties and friends belong
     to the instance being mounted, not to the folders now above it */
     let mut mount = Map::new();
     mount.insert("$path".to_string(), Value::String(path.to_string()));
@@ -198,8 +198,8 @@ mod tests {
     #[test]
     fn mounts_a_file_path_where_the_require_expects_it() {
         /* the tree keys come from the same normalize_entry the link file
-        uses: an init file *is* the folder around it, and a plain module is
-        named after its stem — one folder level deeper would break the
+        uses. an init file *is* the folder around it, and a plain module is
+        named after its stem. one folder level deeper would break the
         require just like the bug being fixed */
         let init = rewrite(
             r#"{"name": "x", "tree": {"$path": "src/init.luau"}}"#,
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn renames_without_touching_a_structured_tree() {
         /* a tree that names its own children already mirrors whatever it
-        mounts; only the instance name can be wrong */
+        mounts. only the instance name can be wrong */
         let project = rewrite(
             r#"{"name": "wrong", "tree": {"$className": "Folder", "src": {"$path": "src"}}}"#,
             "acme_pkg",
@@ -250,7 +250,7 @@ mod tests {
             r#"{"name": "acme_pkg", "tree": {"$className": "Folder", "src": {"$path": "src"}}}"#,
             r#"{"name": "acme_pkg", "tree": {"$path": "."}}"#,
             r#"{"name": "acme_pkg", "tree": {"$path": "init.luau"}}"#,
-            // reaches outside the package: not ours to reinterpret
+            // reaches outside the package, not ours to reinterpret
             r#"{"name": "acme_pkg", "tree": {"$path": "/elsewhere/src"}}"#,
             r#"{"name": "acme_pkg", "tree": {"$path": "../sibling"}}"#,
             r#"{"name": "acme_pkg", "tree": {"$path": "src//lib"}}"#,

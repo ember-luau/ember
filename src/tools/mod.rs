@@ -1,5 +1,5 @@
 /*! GitHub-released binaries a project pins by version. this module stores
-and installs them; `archive` picks and unpacks the right release asset,
+and installs them. `archive` picks and unpacks the right release asset,
 `shim` maps an alias to one of the stored binaries. */
 
 pub mod archive;
@@ -15,7 +15,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// tools addable (and `lpm execute`-runnable) by bare name; anything else
+/// tools addable and `lpm execute`-runnable by bare name. anything else
 /// must be "owner/repo".
 const SHORTHANDS: &[(&str, &str)] = &[
     ("create-chief-project", "ryancundiff/create-chief-project"),
@@ -26,13 +26,13 @@ const SHORTHANDS: &[(&str, &str)] = &[
     ("stylua", "johnnymorganz/stylua"),
 ];
 
-/// shorthand to full repo name; unknown names pass through as "owner/repo".
+/// shorthand to full repo name, unknown names pass through as "owner/repo".
 pub fn expand_shorthand(name: &str) -> String {
     shorthand_repository(name).map_or_else(|| name.to_string(), str::to_string)
 }
 
 /** the repo behind a shorthand, for matching manifest entries by value,
-not alias key. case-insensitive, like alias resolution — windows command
+not alias key. case-insensitive, like alias resolution. windows command
 lookup doesn't care and neither should "StyLua". */
 pub fn shorthand_repository(name: &str) -> Option<&'static str> {
     SHORTHANDS
@@ -41,7 +41,7 @@ pub fn shorthand_repository(name: &str) -> Option<&'static str> {
         .map(|(_, full)| *full)
 }
 
-/** alias names lpm's own binaries occupy in ~/.lpm/bin; a tool shim under
+/** alias names lpm's own binaries occupy in ~/.lpm/bin. a tool shim under
 one of these would shadow the CLI or the lpx launcher. case-insensitive,
 matching how windows resolves commands. */
 const RESERVED_ALIASES: &[&str] = &["lpm", "lpx"];
@@ -67,9 +67,9 @@ fn stored_executable(repository: &str, version: &str) -> Result<PathBuf, Error> 
     Ok(storage_dir(repository, version)?.join(executable_name(repo_short_name(repository))))
 }
 
-/** whether a pinned tool is fully present: version stored and alias
+/** whether a pinned tool is fully present, version stored and alias
 shimmed. the cheap check install's fast path runs instead of the full tool
-phase — a few stats, no network. */
+phase, a few stats, no network. */
 pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
         return Err(Error::ReservedToolAlias(alias.to_string()));
@@ -78,7 +78,7 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
 }
 
 /** Installs a manifest tool, skipping the network when the version is
-already stored. true = downloaded, false = cache reused; the bin shim
+already stored. true = downloaded, false = cache reused. the bin shim
 gets refreshed either way. */
 pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
@@ -96,7 +96,7 @@ pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool
 
 /** Downloads the platform asset of a fetched release, extracts it, stores
 the executable under `storage_dir`, and writes a bin shim named after
-the alias. true = downloaded, false = version already stored; the shim
+the alias. true = downloaded, false = version already stored. the shim
 gets refreshed either way. */
 pub fn install_release(alias: &str, repository: &str, release: &Release) -> Result<bool, Error> {
     let (_, downloaded) = store_release(repository, release, alias)?;
@@ -104,10 +104,10 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
     Ok(downloaded)
 }
 
-/** the storage half of `install_release`: downloads the platform asset of
-a fetched release, extracts it, and stores the executable — no bin shim,
+/** the storage half of `install_release`. downloads the platform asset of
+a fetched release, extracts it, and stores the executable, no bin shim,
 no manifest, which is what `lpm execute` runs on. returns the stored
-executable and whether a download happened; `name_hint` is an extra
+executable and whether a download happened. `name_hint` is an extra
 candidate name when picking the executable out of a multi-file asset. */
 pub fn store_release(
     repository: &str,
@@ -131,9 +131,9 @@ pub fn store_release(
     let bytes = http::get_bytes(&asset.browser_download_url, &[])?;
 
     /* extract into a staging sibling first so a failed install never
-    leaves a half-written storage dir behind (same dance as install.rs).
-    pid-suffixed: concurrent `lpx` runs of one cold tool are routine, and
-    they must not tear down each other's staging mid-extraction. */
+    leaves a half-written storage dir behind, same dance as install.rs.
+    pid-suffixed because concurrent `lpx` runs of one cold tool are
+    routine and must not tear down each other's staging mid-extraction. */
     let staging = paths::with_suffix(&storage, &format!(".{}.tmp", std::process::id()));
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -154,15 +154,15 @@ pub fn store_release(
         fs::rename(&found, &target)?;
     }
 
-    /* a concurrent run may have stored this version while we downloaded;
-    its copy of the same release is just as good — and possibly already
+    /* a concurrent run may have stored this version while we downloaded.
+    its copy of the same release is just as good, and possibly already
     executing, in which case deleting it would fail on windows anyway */
     if stored.exists() {
         let _ = fs::remove_dir_all(&staging);
         return Ok((stored, true));
     }
 
-    // move staging into place; same filesystem, so it's a rename.
+    // move staging into place, same filesystem, so it's a rename.
     if storage.exists() {
         fs::remove_dir_all(&storage)?;
     }
@@ -175,7 +175,7 @@ pub fn store_release(
 }
 
 /** the stored executable for an exact version of a repo, downloading that
-release when storage is missing — the `lpm execute <spec>@version` path:
+release when storage is missing. the `lpm execute <spec>@version` path,
 no shim, no manifest entry. */
 pub fn ensure_stored(
     repository: &str,
@@ -191,7 +191,7 @@ pub fn ensure_stored(
 }
 
 /** the stored executable for a repo's latest release, asking GitHub at
-most once per TTL: the last answer is stamped under the repo's storage
+most once per TTL. the last answer is stamped under the repo's storage
 dir, and a fresh stamp whose version is still stored means zero network.
 anonymous GitHub API calls are capped at 60/hour, so `lpx stylua` in a
 loop must coast on the stamp. `refresh` forces the question. */
@@ -207,7 +207,7 @@ pub fn ensure_latest(
 
     let release = match github.get_latest_release(repository) {
         Ok(release) => release,
-        /* offline or rate-limited past the TTL: a stale answer whose
+        /* offline or rate-limited past the TTL, a stale answer whose
         binaries are still stored beats dying. the stamp is left as-is,
         so the next run asks again instead of trusting this one. */
         Err(error) => {
@@ -238,7 +238,7 @@ pub fn ensure_latest(
     Ok(stored)
 }
 
-/** where a repo's latest-release answer is remembered: the version string,
+/** where a repo's latest-release answer is remembered. the version string,
 with the file's mtime marking when GitHub was last asked. lives beside the
 version dirs, whose readers all skip non-directories. */
 fn latest_stamp(repository: &str) -> Result<PathBuf, Error> {
@@ -248,8 +248,8 @@ fn latest_stamp(repository: &str) -> Result<PathBuf, Error> {
 }
 
 /** the stamped version if the stamp is younger than the TTL, None
-otherwise. deliberately the index TTL knob (`LPM_INDEX_TTL_SECS`, 0 =
-never fresh): one dial for "how stale may cached answers be". */
+otherwise. deliberately shares the index TTL knob `LPM_INDEX_TTL_SECS`,
+0 = never fresh, one dial for how stale cached answers may be. */
 fn fresh_latest_version(stamp: &Path) -> Option<String> {
     use crate::registry::index;
     if !index::stamp_fresh(stamp, index::index_ttl()) {
@@ -258,14 +258,14 @@ fn fresh_latest_version(stamp: &Path) -> Option<String> {
     stamped_version(stamp)
 }
 
-/// the version a stamp remembers, fresh or stale — the offline fallback.
+/// the version a stamp remembers, fresh or stale, the offline fallback.
 fn stamped_version(stamp: &Path) -> Option<String> {
     let version = fs::read_to_string(stamp).ok()?;
     let version = version.trim();
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// the "repo" half of "owner/repo"; names the stored binary.
+/// the "repo" half of "owner/repo", names the stored binary.
 fn repo_short_name(repository: &str) -> &str {
     repository
         .split_once('/')
@@ -357,10 +357,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let stamp = dir.join(".latest");
 
-        // no stamp: no answer
+        // no stamp, no answer
         assert_eq!(fresh_latest_version(&stamp), None);
 
-        // fresh stamp: the stored version, whitespace trimmed
+        // a fresh stamp gives the stored version, whitespace trimmed
         fs::write(&stamp, "2.0.2\n").unwrap();
         assert_eq!(fresh_latest_version(&stamp).as_deref(), Some("2.0.2"));
 
@@ -368,7 +368,7 @@ mod tests {
         fs::write(&stamp, "\n").unwrap();
         assert_eq!(fresh_latest_version(&stamp), None);
 
-        // aged past the TTL: stale, but still the offline fallback answer
+        // aged past the TTL means stale, but still the offline fallback answer
         fs::write(&stamp, "2.0.2\n").unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
         fs::File::options()

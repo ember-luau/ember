@@ -1,4 +1,4 @@
-/*! Shelling out to git. the index cache clones and pulls with it; `lpm
+/*! Shelling out to git. the index cache clones and pulls with it, `lpm
 init` reads the surrounding repo for prompt defaults. */
 
 use std::process::Command;
@@ -18,18 +18,17 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// how a git invocation went wrong: git isn't installed at all, or it ran and failed.
+/// how a git invocation went wrong, either git isn't installed at all or it ran and failed.
 #[derive(Debug)]
 pub enum GitError {
     Missing,
     Failed(String),
 }
 
-/** stdout of a git command where exit code 1 still counts as success:
-`git diff` answers 1 when there ARE differences, which for patching is the
-interesting case, and neither `run` nor `output` can express it (`run`
-fails on any non-zero, `output` throws the stdout away). anything past 1
-fails with stderr; a spawn failure means git isn't installed, which
+/** stdout of a git command where exit code 1 still counts as success.
+`git diff` answers 1 when there ARE differences, the interesting case for
+patching, and neither `run` nor `output` can express that. anything past 1
+fails with stderr. a spawn failure means git isn't installed, which
 callers want to say plainly. */
 pub fn capture_diff(args: &[&str]) -> Result<String, GitError> {
     let output = Command::new("git").args(args).output().map_err(|error| {
@@ -50,17 +49,17 @@ pub fn capture_diff(args: &[&str]) -> Result<String, GitError> {
 
 /** Prefixes git-level config that pins a command to the bytes on disk.
 
-git for windows installs `core.autocrlf=true` by default (so do the
-windows CI runners), and every patch-flow command reads or writes a
-working tree: `add` and `diff` would clean CRLF out of the recorded patch,
-`apply` would smudge CRLF back into the extracted package — so a patch
+git for windows installs `core.autocrlf=true` by default, so do the
+windows CI runners, and every patch-flow command reads or writes a
+working tree. `add` and `diff` would clean CRLF out of the recorded patch,
+`apply` would smudge CRLF back into the extracted package, so a patch
 captured on one machine wouldn't match context on another, and the
 patched copy that travels into the store would have line endings the
 publisher never wrote. `core.eol` covers the same conversion arriving
 through a package's own .gitattributes, and `core.safecrlf` keeps git
 from objecting to files it isn't converting.
 
-deliberately not folded into `run`: the index cache clones and pulls
+deliberately not folded into `run`. the index cache clones and pulls
 real repos, and flipping conversion under a checkout someone already has
 would make every file read as locally modified. */
 pub fn verbatim<'a>(args: &[&'a str]) -> Vec<&'a str> {
@@ -76,7 +75,7 @@ pub fn verbatim<'a>(args: &[&'a str]) -> Vec<&'a str> {
     full
 }
 
-/// whether git can be spawned at all; cached, install asks once per patched package.
+/// whether git can be spawned at all. cached, install asks once per patched package.
 pub fn available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -87,8 +86,8 @@ pub fn available() -> bool {
     })
 }
 
-/** Trimmed stdout of a git command, or None when there's nothing useful:
-git missing, not a repo, or the value simply unset. */
+/** Trimmed stdout of a git command, or None when there's nothing useful,
+like git missing, not a repo, or the value simply unset. */
 pub fn output(args: &[&str]) -> Option<String> {
     let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {
@@ -99,9 +98,9 @@ pub fn output(args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-/** Normalizes a git remote URL (git@host:..., ssh://git@host/...,
-https://host/....git) into a plain https link. None for protocols we
-can't rewrite. */
+/** Normalizes a git remote URL into a plain https link, handling the
+git@host:..., ssh://git@host/..., and https://host/....git forms. None
+for protocols we can't rewrite. */
 pub fn remote_https_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches(".git");
 
@@ -148,14 +147,14 @@ mod tests {
     #[test]
     fn capture_diff_accepts_exit_zero_and_one() {
         if !available() {
-            return; // no git on this machine; the helpers all degrade the same way
+            return; // no git on this machine, the helpers all degrade the same way
         }
 
         // exit 0 with stdout
         let version = capture_diff(&["--version"]).unwrap();
         assert!(version.contains("git version"));
 
-        /* exit 1 is the differences-exist case: diff two files that differ.
+        /* exit 1 is the differences-exist case, diff two files that differ.
         --no-index needs no repo */
         let dir = std::env::temp_dir().join("lpm-test-capture-diff");
         let _ = std::fs::remove_dir_all(&dir);

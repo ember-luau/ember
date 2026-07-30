@@ -1,6 +1,6 @@
 /*! FNV-1a, inline instead of std's DefaultHasher for anything that touches
-disk: DefaultHasher is documented as unstable across Rust releases, so keys
-built from it silently rotate on toolchain bumps — poison for cache
+disk. DefaultHasher is documented as unstable across Rust releases, so keys
+built from it silently rotate on toolchain bumps, poison for cache
 directories and install stamps that have to survive upgrades. */
 
 const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -17,7 +17,7 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /** one hash over several parts, kept unambiguous by hashing each part's
-length first — so ("ab", "c") never collides with ("a", "bc"). */
+length first, so ("ab", "c") never collides with ("a", "bc"). */
 pub fn fnv1a_parts(parts: &[&[u8]]) -> u64 {
     let mut hash = OFFSET_BASIS;
     for part in parts {

@@ -20,12 +20,12 @@ pub struct DeviceCode {
     pub user_code: String,
     pub verification_uri: String,
     pub expires_in: u64,
-    /// Minimum seconds between polls; going faster earns a `slow_down` error.
+    /// Minimum seconds between polls, going faster earns a `slow_down` error.
     pub interval: u64,
 }
 
-/** Device-flow poll result. GitHub reports "not yet" states
-(`authorization_pending`, `slow_down`, ...) as HTTP 200 with an `error`
+/** Device-flow poll result. GitHub reports "not yet" states like
+`authorization_pending` and `slow_down` as HTTP 200 with an `error`
 field, not an error status. */
 #[derive(Deserialize)]
 pub struct AccessToken {

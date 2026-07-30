@@ -13,25 +13,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /** How stale an index cache may be before `open` shells out to git again.
-Every refresh *attempt* stamps the cache dir — attempts, not successes, so
+Every refresh *attempt* stamps the cache dir, attempts not successes, so
 an offline machine warns once per window instead of re-hanging on git for
 every install. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refresh {
-    /// never refresh an existing cache (a cold cache still clones)
+    /// never refresh an existing cache, a cold cache still clones
     Never,
     /// refresh unless the cache was refreshed within the TTL
     Ttl,
-    /// refresh no matter what (`--refresh`)
+    /// refresh no matter what, `--refresh`
     Force,
 }
 
-/// default TTL; `LPM_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
+/// default TTL. `LPM_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
 const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
 
-/** computed once per process: it never changes mid-run, and a malformed
+/** computed once per process. it never changes mid-run, and a malformed
 value should warn exactly once, not per index. a garbage value falls back
-to the default *with* a warning — silently ignoring "-1" or "30s" would
+to the default *with* a warning, silently ignoring "-1" or "30s" would
 read as the variable doing nothing. */
 pub(crate) fn index_ttl() -> Duration {
     static TTL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
@@ -50,7 +50,7 @@ pub(crate) fn index_ttl() -> Duration {
     })
 }
 
-/** A package index: a git repo cached under ~/.lpm/index-cache. Root
+/** A package index, a git repo cached under ~/.lpm/index-cache. Root
 config.json means wally, root config.toml means pesde. */
 pub struct Index {
     url: String,
@@ -68,8 +68,8 @@ enum Kind {
 /// A concrete package version picked from an index.
 pub struct ResolvedPackage {
     pub version: semver::Version,
-    /** Known from index metadata; None means inspect the archive after
-    extraction (lpm.toml -> pesde.toml -> wally.toml). */
+    /** Known from index metadata. None means inspect the archive after
+    extraction, lpm.toml -> pesde.toml -> wally.toml. */
     pub environment: Option<Environment>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
@@ -80,21 +80,21 @@ pub struct TransitiveDependency {
     pub version_req: String,
     /// None = resolve in the same index as the parent package.
     pub index_url: Option<String>,
-    /// the alias the parent declared this dependency under; [overrides] paths address edges by it.
+    /// the alias the parent declared this dependency under. [overrides] paths address edges by it.
     pub alias: String,
 }
 
-/** Everything needed to re-download a resolved package; also stored in
+/** Everything needed to re-download a resolved package, also stored in
 lpm.lock. Resolution bakes the full URL so --locked installs never consult
 an index. */
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum DownloadSource {
-    /// Zip archive (wally registry APIs).
+    /// Zip archive, wally registry APIs.
     Zip { url: String },
-    /// Gzipped tarball (pesde registry APIs).
+    /// Gzipped tarball, pesde registry APIs.
     TarGz { url: String },
-    /** A workspace member, linked in place instead of downloaded; `path` is
+    /** A workspace member, linked in place instead of downloaded. `path` is
     the member's directory relative to the consuming project. */
     Workspace { path: String },
 }
@@ -110,7 +110,7 @@ impl Index {
         } else if root.join("config.toml").exists() {
             Kind::Pesde(pesde::load_config(&root)?)
         } else {
-            /* Empty or half-set-up index repo; a raw io error here would
+            /* Empty or half-set-up index repo. a raw io error here would
             read as an lpm bug rather than an index problem. */
             return Err(Error::IndexFetch {
                 url: url.to_string(),
@@ -127,7 +127,7 @@ impl Index {
     }
 
     /** whether a requested refresh was skipped because the cache was still
-    TTL-fresh — the signal resolution failures use to retry against a
+    TTL-fresh, the signal resolution failures use to retry against a
     forced refresh before surfacing an error. */
     pub fn ttl_skipped(&self) -> bool {
         self.ttl_skipped
@@ -161,13 +161,13 @@ impl Index {
 }
 
 /** Downloads and extracts a resolved package into `dest`. All downloads are
-anonymous: lpm's registry serves tarballs from a public CDN, wally/pesde
+anonymous, lpm's registry serves tarballs from a public CDN and wally/pesde
 registries are public too. If credentialed downloads ever come back, restore
-the old restraint: tokens only to GitHub-owned hosts, so an arbitrary
+the old restraint of tokens only to GitHub-owned hosts, so an arbitrary
 registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
-        // Workspace members are linked in place; install never gets here.
+        // Workspace members are linked in place, install never gets here.
         return Err(Error::IndexFetch {
             url: String::new(),
             reason: "workspace dependencies are linked in place, not downloaded".to_string(),
@@ -183,8 +183,8 @@ pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Res
     let (bytes, from_cache) = fetch_archive(url, &headers, cache)?;
     match extract(source, &bytes, dest) {
         Ok(()) => Ok(()),
-        /* cached bytes that no longer extract are poison (bitrot the
-        integrity record missed, or a bad write): drop the entry, fetch
+        /* cached bytes that no longer extract are poison, bitrot the
+        integrity record missed or a bad write. drop the entry, fetch
         fresh once, and try again on a clean dest */
         Err(_) if from_cache => {
             evict_archive(url);
@@ -212,8 +212,8 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
             archive.extract(dest)?;
         }
         DownloadSource::TarGz { .. } => {
-            /* ureq already gunzips Content-Encoding: gzip bodies (leaving a
-            raw tar), so sniff the magic bytes instead of assuming. */
+            /* ureq already gunzips Content-Encoding: gzip bodies, leaving a
+            raw tar, so sniff the magic bytes instead of assuming. */
             if bytes.starts_with(&[0x1f, 0x8b]) {
                 let decoder = flate2::read::GzDecoder::new(bytes);
                 tar::Archive::new(decoder).unpack(dest)?;
@@ -227,9 +227,9 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
 }
 
 /** the archive's bytes, from the cache when allowed and present. published
-registry versions are immutable by policy (registries reject duplicate
-publishes), which is what makes caching by URL sound; `--refresh` is the
-escape hatch for the exceptions (takedowns, republished storage), and
+registry versions are immutable by policy, registries reject duplicate
+publishes, which is what makes caching by URL sound. `--refresh` is the
+escape hatch for the exceptions like takedowns or republished storage, and
 `lpm cache clean` drops everything. the bool is "these came from the
 cache", which decides whether an extract failure warrants a refetch. */
 fn fetch_archive(
@@ -250,9 +250,9 @@ fn fetch_archive(
     let bytes = http::get_bytes(url, headers)?;
     crate::ui::timing(&format!("download {url}"), started);
 
-    /* caching is best-effort: a full disk or permission problem must not
+    /* caching is best-effort, a full disk or permission problem must not
     fail an install that already has the bytes in hand. no size budget or
-    eviction yet (`lpm cache clean` is the release valve); an
+    eviction yet, `lpm cache clean` is the release valve. an
     extracted-file store shared across projects, pesde-style, is the
     natural next step if this ever needs more */
     if let Some(entry) = &entry {
@@ -261,9 +261,9 @@ fn fetch_archive(
     Ok((bytes, false))
 }
 
-/** where `url`'s archive lives in the cache; None when there's no home
+/** where `url`'s archive lives in the cache, None when there's no home
 directory to cache under. readable slug + stable FNV hash, same naming
-scheme as the index cache — but never DefaultHasher, whose output may
+scheme as the index cache, but never DefaultHasher, whose output may
 change between Rust releases and would orphan every entry. */
 fn archive_entry(url: &str) -> Option<PathBuf> {
     let slug: String = url
@@ -279,15 +279,15 @@ fn archive_entry(url: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{slug}-{:016x}", fnv1a(url.as_bytes()))))
 }
 
-/** cached bytes, verified against the sidecar record: length, FNV, and the
-url itself, so a filename-key collision can never serve another package's
-archive. any mismatch or unreadable half deletes the entry and reads as a
-miss. */
+/** cached bytes, verified against the sidecar record of length, FNV, and
+the url itself, so a filename-key collision can never serve another
+package's archive. any mismatch or unreadable half deletes the entry and
+reads as a miss. */
 fn load_archive(entry: &Path, url: &str) -> Option<Vec<u8>> {
     let meta = fs::read_to_string(meta_path(entry)).ok()?;
     let bytes = fs::read(entry).ok()?;
 
-    // "v1 <len> <hash> <url>"; the url comes last since it can contain anything
+    // "v1 <len> <hash> <url>". the url comes last since it can contain anything
     let mut fields = meta.trim_end().splitn(4, ' ');
     let valid = fields.next() == Some("v1")
         && fields.next().and_then(|len| len.parse::<usize>().ok()) == Some(bytes.len())
@@ -301,8 +301,8 @@ fn load_archive(entry: &Path, url: &str) -> Option<Vec<u8>> {
 }
 
 /** temp-file + rename, so a torn write can never be mistaken for an entry.
-the sidecar lands before the payload: a reader catching the pair mid-swap
-sees a mismatch, treats it as a miss, and refetches — wasteful, never
+the sidecar lands before the payload, a reader catching the pair mid-swap
+sees a mismatch, treats it as a miss, and refetches. wasteful, never
 wrong. */
 fn store_archive(entry: &Path, bytes: &[u8], url: &str) -> std::io::Result<()> {
     let dir = entry.parent().expect("cache entries have a parent");
@@ -314,7 +314,7 @@ fn store_archive(entry: &Path, bytes: &[u8], url: &str) -> std::io::Result<()> {
 }
 
 /** write-to-staging + rename. staging names carry pid and a counter, so
-concurrent writers — other processes or this one's worker threads — can't
+concurrent writers, other processes or this one's worker threads, can't
 tear each other's half-written files. */
 fn replace_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -351,7 +351,7 @@ fn meta_path(entry: &Path) -> PathBuf {
 
 /** existing index caches were keyed with DefaultHasher, whose output is
 stable in practice within a compiler release series but documented as
-unstable; fnv1a_parts with a marker keeps the same "slug-hash" shape under
+unstable. fnv1a_parts with a marker keeps the same "slug-hash" shape under
 a deliberate, stable function. old-key caches are simply re-cloned once. */
 pub(crate) fn cache_dir(url: &str) -> Result<PathBuf, Error> {
     let slug: String = url
@@ -384,7 +384,7 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
             let started = std::time::Instant::now();
             let result = git::run(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"]);
             crate::ui::timing(&format!("index-refresh {url}"), started);
-            /* stamp the attempt, success or not: an unreachable remote
+            /* stamp the attempt, success or not. an unreachable remote
             should warn once per TTL window, not hang every install */
             touch(&stamp);
             if let Err(reason) = result {
@@ -407,16 +407,16 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
     Ok((dir, false))
 }
 
-/** whether `url`'s index cache was refreshed within the TTL — what
-install's fast path asks before trusting a lockfile without resolving:
+/** whether `url`'s index cache was refreshed within the TTL, what
+install's fast path asks before trusting a lockfile without resolving.
 inside the window, re-resolving against the same index state could only
-reproduce the lock, so skipping is free; past it, `^` requirements deserve
+reproduce the lock, so skipping is free. past it, `^` requirements deserve
 a real look. */
 pub fn is_fresh(url: &str) -> bool {
     cache_dir(url).is_ok_and(|dir| stamp_fresh(&dir.join(REFRESH_STAMP), index_ttl()))
 }
 
-/// marks when an index cache last attempted a refresh (see `Refresh`).
+/// marks when an index cache last attempted a refresh, see `Refresh`.
 const REFRESH_STAMP: &str = ".lpm-refreshed";
 
 /** whether `stamp` exists and is younger than `ttl`. a zero ttl is never
@@ -433,10 +433,10 @@ pub(crate) fn stamp_fresh(stamp: &Path, ttl: Duration) -> bool {
         .is_some_and(|age| age < ttl)
 }
 
-/** (re)writes `stamp` so its mtime is now. the payload matters: writing
+/** (re)writes `stamp` so its mtime is now. the payload matters, writing
 zero bytes over an already-empty file is a no-op Windows won't bump the
 mtime for, which would freeze the stamp at its creation time forever.
-best-effort: worst case is an extra pull. */
+best-effort, worst case is an extra pull. */
 fn touch(stamp: &Path) {
     let _ = fs::write(stamp, b"refreshed\n");
 }
@@ -498,8 +498,8 @@ mod tests {
         assert!(!stamp_fresh(&stamp, Duration::ZERO));
 
         /* re-touching an EXISTING stamp must renew it. this is where a
-        zero-byte write bites on Windows: no bytes, no truncation, no
-        mtime update — the stamp would age out once and stay expired */
+        zero-byte write bites on Windows. no bytes, no truncation, no
+        mtime update, the stamp would age out once and stay expired */
         let file = fs::OpenOptions::new().write(true).open(&stamp).unwrap();
         file.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
             .unwrap();
@@ -514,13 +514,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /** the WS1 contract, against a real local git index: a TTL-fresh cache
-    skips the pull (and serves stale data, by design), a resolve that fails
+    /** the WS1 contract, against a real local git index. a TTL-fresh cache
+    skips the pull and serves stale data by design, a resolve that fails
     on that stale data forces one refresh and succeeds, and Force always
     pulls. */
     #[test]
     fn ttl_skips_pulls_and_failed_resolves_force_one() {
-        /* the assertions below assume the default TTL; a dev running the
+        /* the assertions below assume the default TTL. a dev running the
         suite with the knob exported gets a skip, not a bogus failure */
         if std::env::var_os("LPM_INDEX_TTL_SECS").is_some() {
             return;
@@ -540,7 +540,7 @@ mod tests {
         let _ = fs::remove_dir_all(&origin);
         fs::create_dir_all(origin.join("acme")).unwrap();
         let url = origin.to_string_lossy().replace('\\', "/");
-        // same url = same cache dir; start every run from nothing
+        // same url = same cache dir, start every run from nothing
         let cache = cache_dir(&url).unwrap();
         let _ = fs::remove_dir_all(&cache);
         let _cleanup = Cleanup(vec![origin.clone(), cache.clone()]);
@@ -577,7 +577,7 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-m", "v1"]);
 
-        // first open clones; nothing was skipped
+        // first open clones, nothing was skipped
         let index = Index::open(&url, Refresh::Ttl).unwrap();
         assert!(!index.ttl_skipped());
         let any = semver::VersionReq::STAR;
@@ -591,7 +591,7 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-m", "v2"]);
 
-        // within the TTL the pull is skipped: still v1, and v2 can't resolve
+        // within the TTL the pull is skipped, still v1, and v2 can't resolve
         let index = Index::open(&url, Refresh::Ttl).unwrap();
         assert!(index.ttl_skipped());
         assert_eq!(
@@ -601,7 +601,7 @@ mod tests {
         let two = semver::VersionReq::parse("^2.0.0").unwrap();
         assert!(index.resolve("acme/thing", &two, None).is_err());
 
-        /* the resolver-level guardrail: a failing resolve on a skipped
+        /* the resolver-level guardrail, a failing resolve on a skipped
         index earns one forced refresh and then succeeds */
         let manifest: crate::project::manifest::Manifest = toml::from_str(&format!(
             "[package]\nname = \"acme/consumer\"\nversion = \"0.1.0\"\n\n\
@@ -609,7 +609,7 @@ mod tests {
              [dependencies]\nthing = {{ name = \"acme/thing\", version = \"^2.0.0\" }}\n"
         ))
         .unwrap();
-        // project_dir only matters for workspace deps; origin keeps it hermetic
+        // project_dir only matters for workspace deps, origin keeps it hermetic
         let resolved =
             crate::registry::resolver::resolve(&manifest, &origin, Refresh::Ttl, &mut Vec::new())
                 .unwrap();
@@ -634,7 +634,7 @@ mod tests {
 
         assert!(wally.starts_with(paths::index_cache_dir().unwrap()));
         /* Readable half of the folder name comes from the url's last
-        segment; the hash keeps same-named indices apart. */
+        segment. the hash keeps same-named indices apart. */
         assert!(
             wally
                 .file_name()

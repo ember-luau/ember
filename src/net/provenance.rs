@@ -1,8 +1,8 @@
 /*!
-publish provenance: inside a GitHub Actions job that can mint OIDC tokens,
+publish provenance. inside a GitHub Actions job that can mint OIDC tokens,
 grab one and send it along with the publish so the registry can verify
 "built from repo X at commit Y by workflow Z". local publishes simply have
-no token, which is normal, not suspicious. best effort all the way down:
+no token, which is normal, not suspicious. best effort all the way down,
 nothing here may fail or noticeably delay a publish.
 */
 
@@ -10,13 +10,13 @@ use crate::net::http;
 use serde::Deserialize;
 use std::time::Duration;
 
-/// the audience the registry verifies; anything else gets rejected server side
+/// the audience the registry verifies, anything else gets rejected server side
 const AUDIENCE: &str = "luaupm.com";
 
 /// header the publish request carries the token in
 pub const HEADER: &str = "X-GitHub-OIDC-Token";
 
-/* the token endpoint answers fast when it answers at all; don't let a
+/* the token endpoint answers fast when it answers at all. don't let a
 wedged runner hold the publish hostage for the agent's usual 60s */
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -27,8 +27,8 @@ struct TokenResponse {
 }
 
 /** the workflow's token endpoint, present only when the job has
-`permissions: id-token: write` (that's what puts the request url + bearer
-in the env). detecting Actions itself keeps us from ever calling out on a
+`permissions: id-token: write`, which is what puts the request url + bearer
+in the env. detecting Actions itself keeps us from ever calling out on a
 developer machine that happens to have the vars set. */
 struct TokenEndpoint {
     url: String,
@@ -67,8 +67,8 @@ impl TokenEndpoint {
 }
 
 /** an OIDC token for this publish, or None when we're not in Actions or
-anything at all goes wrong (missing permission, non-200, timeout, bad
-JSON). None means "publish without provenance", never an error. */
+anything at all goes wrong, missing permission, non-200, timeout, bad
+JSON. None means "publish without provenance", never an error. */
 pub fn actions_token() -> Option<String> {
     let endpoint = TokenEndpoint::from_env()?;
     let response = http::agent()

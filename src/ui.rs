@@ -5,7 +5,7 @@ use clap::builder::styling;
 use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
 
-/// theme accent (#e61048). the only place the color lives; everything derives from it.
+/// theme accent #e61048. the only place the color lives, everything derives from it.
 pub const ACCENT: (u8, u8, u8) = (0xe6, 0x10, 0x48);
 
 fn accent() -> crossterm::style::Color {
@@ -13,7 +13,7 @@ fn accent() -> crossterm::style::Color {
     crossterm::style::Color::Rgb { r, g, b }
 }
 
-/** Styles clap's help/usage/error output to match the prompt theme: plain
+/** Styles clap's help/usage/error output to match the prompt theme. plain
 section headers, accent command/flag names, dimmed placeholders. */
 pub fn help_styles() -> styling::Styles {
     let (r, g, b) = ACCENT;
@@ -21,7 +21,7 @@ pub fn help_styles() -> styling::Styles {
     let dimmed = styling::Style::new().fg_color(Some(styling::AnsiColor::BrightBlack.into()));
 
     styling::Styles::styled()
-        // section headers ("Usage:", "Commands:", "Options:")
+        // section headers like "Usage:" and "Commands:"
         .header(styling::Style::new())
         .usage(styling::Style::new())
         // command/flag/value names as typed literally
@@ -52,7 +52,7 @@ pub fn print_success(message: &str) {
 
 /** Prints a line to stdout while `bar` is live. `ProgressBar::println` goes
 through the bar's draw target, which writes to stderr on a terminal and
-swallows the line entirely when piped; suspending keeps the line on
+swallows the line entirely when piped. suspending keeps the line on
 stdout in both worlds. */
 pub fn bar_println(bar: &indicatif::ProgressBar, line: &str) {
     bar.suspend(|| println!("{line}"));
@@ -60,7 +60,7 @@ pub fn bar_println(bar: &indicatif::ProgressBar, line: &str) {
 
 /** A `{msg} ━━━╸─── {pos}/{len}` bar with the filled portion in the accent
 color. indicatif templates only speak ANSI-16/256, so the exact accent
-RGB gets smuggled in as crossterm escapes around the bar placeholder;
+RGB gets smuggled in as crossterm escapes around the bar placeholder.
 literal template text passes through untouched, and width measurement is
 escape-aware. */
 pub fn progress_bar(len: u64) -> indicatif::ProgressBar {
@@ -74,7 +74,7 @@ pub fn progress_bar(len: u64) -> indicatif::ProgressBar {
     bar
 }
 
-/// accent spinner, self-ticking; the caller finishes or clears it.
+/// accent spinner, self-ticking, the caller finishes or clears it.
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     let template = format!("{} {{msg}}", "{spinner}".with(accent()));
     let style =
@@ -112,7 +112,7 @@ pub fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
-/** prints "timing: <label> <elapsed>" to stderr when LPM_TIMINGS is set;
+/** prints "timing: <label> <elapsed>" to stderr when LPM_TIMINGS is set,
 free when it isn't. labels end up in benchmark diffs, so keep them stable. */
 pub fn timing(label: &str, started: std::time::Instant) {
     if std::env::var_os("LPM_TIMINGS").is_some() {
@@ -161,7 +161,7 @@ pub fn render_config() -> RenderConfig<'static> {
         // ">" cursor and highlighted row in select lists
         .with_highlighted_option_prefix(Styled::new(">").with_fg(accent))
         .with_selected_option(Some(StyleSheet::new().with_fg(accent)))
-        // validation errors below a prompt (inquire's default prefix is "#")
+        // validation errors below a prompt, inquire's default prefix is "#"
         .with_error_message(
             ErrorMessageRenderConfig::default_colored()
                 .with_prefix(Styled::new("✗").with_fg(accent))

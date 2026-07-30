@@ -28,7 +28,7 @@ When lpm.toml, lpm.lock, and the global tools file are unchanged since the \
 last successful install, `install` trusts the lockfile: within the index \
 TTL (5 minutes; LPM_INDEX_TTL_SECS overrides) it skips everything, and \
 past it, it re-checks the indices so `^` requirements still pick up new \
-releases — rebuilding only when something actually resolved differently. \
+releases, rebuilding only when something actually resolved differently. \
 Two things this check cannot see: hand-edits inside an installed packages \
 folder, and a repository that commits its packages folders (those packages \
 really are present, and tools still verify). --refresh forces the full \
@@ -38,7 +38,7 @@ pub struct InstallArgs {
     #[arg(long)]
     pub locked: bool,
 
-    /// Skip nothing: re-resolve, re-fetch indices, and re-download archives even when caches are fresh
+    /// Re-resolve, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
     pub refresh: bool,
 }
@@ -46,23 +46,23 @@ pub struct InstallArgs {
 struct Job {
     name: String,
     version: String,
-    /// the package's own environment; None = detect from the archive.
+    /// the package's own environment, None means detect from the archive.
     environment: Option<Environment>,
-    /// the output root: the environment of the dependency tree's root.
+    /// the output root, the environment of the dependency tree's root.
     context: Environment,
     source: index::DownloadSource,
     index_url: String,
-    /// top-level link name; None for transitives, which never get one.
+    /// top level link name, None for transitives, they never get one.
     link: Option<String>,
-    /// [overrides]-rewritten edges of this package: declared alias -> replacement name.
+    /// [overrides] rewritten edges of this package, declared alias -> replacement name.
     redirects: BTreeMap<String, String>,
     /// the [patches] entry this copy gets, when one names it.
     patch: Option<JobPatch>,
 }
 
-/** a patch ready to apply: what the lockfile records, plus the file
-resolved to an absolute path up front — workers apply it while
-`workspace::in_dir` may have moved the process cwd. */
+/** a patch ready to apply, the lockfile record plus the file resolved
+to an absolute path up front. workers apply it while `workspace::in_dir`
+may have moved the process cwd. */
 #[derive(Clone)]
 struct JobPatch {
     record: PatchRecord,
@@ -82,9 +82,9 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     install_project(&args, &manifest, true)?;
 
-    /* a workspace root installs every member too, pesde's order: root first,
-    then each member. member installs never recurse further (nested
-    workspaces aren't a thing) */
+    /* a workspace root installs every member too, pesde's order, root
+    first then each member. member installs never recurse further, nested
+    workspaces aren't a thing */
     if !manifest.workspace_members().is_empty() {
         let workspace = Workspace::open(Path::new("."))?;
         for member in &workspace.members {
@@ -102,8 +102,8 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
 }
 
 /** installs one project from the current directory. global tools only
-install on the primary run: workspace members share them, and repeating
-the merge per member would just re-print every pin. */
+install on the primary run since workspace members share them and
+repeating the merge per member would just re-print every pin. */
 fn install_project(
     args: &InstallArgs,
     manifest: &Manifest,
@@ -111,12 +111,12 @@ fn install_project(
 ) -> Result<(), Error> {
     let started = Instant::now();
 
-    /* the fast path: nothing local changed since the last install, so the
-    lockfile is what would resolve anyway. within the index TTL that is a
-    certainty and everything is skipped; past it, `^` requirements have
-    earned a real look — resolution runs below, and only a resolution that
-    actually lands somewhere new triggers a rebuild. tools are verified
-    either way (cheap stats), because install doubles as their repair path. */
+    /* fast path. nothing local changed since the last install, so the
+    lockfile is what would resolve anyway. within the index TTL that's a
+    certainty and everything is skipped. past it, `^` requirements have
+    earned a real look, resolution runs below and only a resolution that
+    lands somewhere new triggers a rebuild. tools are verified either way,
+    cheap stats, install doubles as their repair path. */
     let fast = fast_path(args, manifest, include_global_tools)?;
     if fast == FastPath::Skip {
         finish_up_to_date(manifest, include_global_tools)?;
@@ -130,24 +130,24 @@ fn install_project(
         index::CachePolicy::Use
     };
 
-    /* captured before resolution: the stamp must record the inputs this
-    install *consumed*, not whatever is on disk once it finishes — an edit
+    /* captured before resolution. the stamp must record the inputs this
+    install consumed, not whatever is on disk once it finishes, an edit
     landing mid-install has to bust the next fast path */
     let state_inputs = state_inputs(include_global_tools);
 
     let mut jobs: Vec<Job> = if args.locked {
         let lock = Lockfile::load()?;
-        /* a v1 lock predates contexts: replaying it would scatter a
+        /* a v1 lock predates contexts. replaying it would scatter a
         dependent and its deps across environment roots, and the nested
-        pass (which looks up within one context) would silently link
-        nothing. --locked never rewrites the lock, so refuse loudly
+        pass looks up within one context so it would silently link
+        nothing. --locked never rewrites the lock, refuse loudly
         instead of shipping a broken tree forever */
         if lock.version < 2 {
             return Err(Error::LockfileOutdated(lock.version));
         }
         /* --locked replays the lock's own patch records without consulting
-        [patches] at all; a recorded file that's gone or edited is drift
-        the lock can't vouch for, so it fails here, before any download */
+        [patches] at all. a recorded file that's gone or edited is drift
+        the lock can't vouch for, so it fails here before any download */
         lock.packages
             .into_iter()
             .map(|package| {
@@ -172,7 +172,7 @@ fn install_project(
         } else {
             index::Refresh::Ttl
         };
-        /* collected, not printed, inside the spinner: a bare eprintln
+        /* collected, not printed, inside the spinner. a bare eprintln
         would land mid-frame and get redrawn over */
         let mut warnings = Vec::new();
         let resolved = ui::with_spinner("Resolving dependencies", || {
@@ -198,25 +198,25 @@ fn install_project(
             .collect()
     };
 
-    /* [patches] lands on the resolved graph before anything downloads: a
-    key that no longer matches (version drift, package gone) is an error
-    here, never a silent skip — an unapplied patch could be someone's
-    security fix. --locked skipped this on purpose; its patches came from
+    /* [patches] lands on the resolved graph before anything downloads. a
+    key that no longer matches, version drift or package gone, is an error
+    here, never a silent skip, an unapplied patch could be someone's
+    security fix. --locked skipped this on purpose, its patches came from
     the lock above */
     if !args.locked {
         attach_patches(manifest, Path::new("."), &mut jobs)?;
     }
 
     /* two [config] keys pointed at one folder would let one context's
-    storage silently overwrite the other's; refuse before touching disk */
+    storage silently overwrite the other's. refuse before touching disk */
     assert_distinct_roots(manifest, &jobs)?;
 
-    /* the recheck half of the fast path: local inputs were unchanged but
-    the indices were stale, so resolution ran fresh (pulling them). when it
-    lands exactly on the lockfile — the overwhelmingly common outcome —
-    the rebuild is skipped; the refreshed TTL stamps make the next few
-    installs full skips. anything new resolves fall through to the rebuild,
-    which is `^` doing its job */
+    /* recheck half of the fast path. local inputs were unchanged but the
+    indices were stale, so resolution ran fresh and pulled them. when it
+    lands exactly on the lockfile, the overwhelmingly common outcome, the
+    rebuild is skipped and the refreshed TTL stamps make the next few
+    installs full skips. anything new resolves fall through to the
+    rebuild, which is `^` doing its job */
     if fast == FastPath::Recheck
         && let Ok(lock) = Lockfile::load()
         && jobs_match_lock(&jobs, &lock)
@@ -226,7 +226,7 @@ fn install_project(
         return Ok(());
     }
 
-    /* installs rebuild from scratch each run: every env's output folder is
+    /* installs rebuild from scratch each run. every env's output folder is
     wiped even with nothing to install, so removing the last dependency
     leaves no stale packages */
     for environment in Environment::ALL {
@@ -236,9 +236,9 @@ fn install_project(
         }
     }
 
-    /* extraction can happen before we know the environment (and so the
-    output folder), so stage in a project-local temp dir; a rename then
-    moves it into place (same filesystem as the outputs) */
+    /* extraction can happen before we know the environment and so the
+    output folder, so stage in a project local temp dir. a rename then
+    moves it into place, same filesystem as the outputs */
     let staging = Path::new(".lpm-staging").to_path_buf();
     let packages_started = Instant::now();
     let locked = ui::with_progress(jobs.len() as u64, |bar| {
@@ -251,13 +251,13 @@ fn install_project(
     let locked = locked?;
     ui::timing("packages", packages_started);
 
-    /* second pass, now that everything is extracted: link files *inside*
+    /* second pass now that everything is extracted, link files inside
     each stored package for the dependencies it declares */
     let stored: Vec<StoredPackage> = locked
         .iter()
         .map(|package| match &package.source {
             /* members link in place, so they're link targets like anything
-            else but never get written into: that would dirty a source tree
+            else but never get written into, that would dirty a source tree
             the user edits */
             index::DownloadSource::Workspace { path } => StoredPackage {
                 name: package.name.to_lowercase(),
@@ -285,7 +285,7 @@ fn install_project(
     ui::timing("nested-links", nested_started);
 
     let package_count = locked.len();
-    // stamps land in the folders actually written: the contexts
+    // stamps land in the folders actually written, the contexts
     let environments: BTreeSet<Environment> =
         locked.iter().map(|package| package.context()).collect();
     if !args.locked {
@@ -293,10 +293,10 @@ fn install_project(
         Lockfile::new(locked).save()?;
     }
 
-    /* tool versions are exact pins, so no lockfile entries; normal and
-    --locked runs install them the same way. global tools (~/.lpm/tools.toml)
-    install here too: `tool add` never downloads, this is the one place
-    every tool gets installed */
+    /* tool versions are exact pins, so no lockfile entries. normal and
+    --locked runs install them the same way. global tools from
+    ~/.lpm/tools.toml install here too, `tool add` never downloads, this
+    is the one place every tool gets installed */
     let tool_jobs = tool_jobs(manifest, include_global_tools)?;
     let tool_count = tool_jobs.len();
     if !tool_jobs.is_empty() {
@@ -304,8 +304,8 @@ fn install_project(
         ui::with_progress(tool_count as u64, |bar| install_tools(&tool_jobs, bar))?;
     }
 
-    /* everything succeeded: record what this install saw, so the next run
-    can skip itself when nothing has changed. never on --locked — that path
+    /* everything succeeded, record what this install saw so the next run
+    can skip itself when nothing changed. never on --locked, that path
     installs the lockfile without reconciling it against the manifest, so
     stamping there would let a later plain install skip a manifest edit the
     lock has never seen */
@@ -327,7 +327,7 @@ fn install_project(
     Ok(())
 }
 
-/** the manifest's tools plus (on the primary run) global ones, deduped:
+/** the manifest's tools plus global ones on the primary run, deduped.
 the same pin in both scopes only needs one install. */
 fn tool_jobs(
     manifest: &Manifest,
@@ -352,11 +352,11 @@ fn tool_jobs(
     Ok(jobs)
 }
 
-/** what the fast path saw when it decided to skip: one hash over every
-local input that can change what an install produces. coarse on purpose —
-a comment edit in lpm.toml busts the fast path (a wasted handful of
-milliseconds), while anything finer risks missing an input (a broken
-install). */
+/** what the fast path saw when it decided to skip, one hash over every
+local input that can change what an install produces. coarse on purpose,
+a comment edit in lpm.toml busts the fast path and wastes a few
+milliseconds, anything finer risks missing an input and breaking an
+install. */
 fn state_hash(
     manifest_text: &str,
     lock_text: &str,
@@ -367,24 +367,24 @@ fn state_hash(
         manifest_text.as_bytes(),
         lock_text.as_bytes(),
         tools_text.as_bytes(),
-        /* fnv1a_parts is length-prefixed, so growing a fourth part just
-        moves every hash once (one rebuild) — no version bump needed */
+        /* fnv1a_parts is length prefixed, so growing a fourth part just
+        moves every hash once, one rebuild, no version bump needed */
         patches_text.as_bytes(),
     ]);
-    /* v2: bumped with the self-contained-roots layout change, so every
+    /* v2 was bumped with the self contained roots layout change, so every
     project's first install under the new binary misses its old stamps and
-    rebuilds into the new layout — the fast path can't skip past a
+    rebuilds into the new layout. the fast path can't skip past a
     migration it can't see in its inputs */
     format!("lpm-state-v2:{hash:016x}\n")
 }
 
-/** the manifest and global-tools inputs of the state hash, as text. read
-once per install, *before* resolution, so an edit landing mid-install can
-never be stamped as satisfied (it wasn't). None = an input exists but
-can't be read; the fast path then stays off, the safe direction.
+/** the manifest and global tools inputs of the state hash, as text. read
+once per install, before resolution, so an edit landing mid-install can
+never be stamped as satisfied. None means an input exists but can't be
+read, the fast path then stays off, the safe direction.
 
 member installs don't consume global tools (include_global = false), so
-those hash a fixed marker instead of the file — editing ~/.lpm/tools.toml
+those hash a fixed marker instead of the file, editing ~/.lpm/tools.toml
 shouldn't wipe and rebuild every member of a workspace. absence is a
 distinct marker too, not an empty string. */
 fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
@@ -405,11 +405,11 @@ fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
 
 /** the [patches] files' bytes, concatenated in manifest key order, so
 editing a patch file without touching lpm.toml still busts the fast path.
-a missing file is a distinct marker, not an empty string — same discipline
+a missing file is a distinct marker, not an empty string, same discipline
 as the global tools file's `<absent>`. */
 fn patches_state_text(manifest_text: &str) -> String {
     let Ok(manifest) = toml::from_str::<Manifest>(manifest_text) else {
-        /* an unparseable manifest can't say which patches exist; the fast
+        /* an unparseable manifest can't say which patches exist. the fast
         path fails elsewhere on the same input, this just stays stable */
         return "<unparseable manifest>".to_string();
     };
@@ -426,7 +426,7 @@ fn patches_state_text(manifest_text: &str) -> String {
     text
 }
 
-/// the full state hash as things stand right now; None if any input is unreadable.
+/// the full state hash as things stand right now, None if any input is unreadable.
 fn current_state_hash(include_global: bool) -> Option<String> {
     let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
     let lock_text = fs::read_to_string(crate::project::lockfile::LOCKFILE).ok()?;
@@ -441,25 +441,25 @@ fn current_state_hash(include_global: bool) -> Option<String> {
 /// how much of an install the unchanged-inputs check lets us skip.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FastPath {
-    /// nothing changed and the indices are TTL-fresh: skip everything
+    /// nothing changed and the indices are TTL fresh, skip everything
     Skip,
-    /** nothing changed locally, but the indices are stale: resolve for
-    real (so `^` can pick up new releases), then skip the rebuild if
+    /** nothing changed locally but the indices are stale. resolve for
+    real so `^` can pick up new releases, then skip the rebuild if
     resolution lands exactly on the lockfile */
     Recheck,
-    /// something changed (or the check doesn't apply): full install
+    /// something changed or the check doesn't apply, full install
     Full,
 }
 
 /** decides how much of this install can be skipped, from the stamps the
 last successful install left in each output folder.
 
-never anything but Full for workspaces, in either direction: a root's
+never anything but Full for workspaces, in either direction, a root's
 install reads member manifests and member source, none of which these
-stamps see. two documented blind spots, both shared with pesde:
-hand-edits *inside* an output folder, and a repo that commits its
-packages folders (the packages really are present, and tools still
-verify, so skipping is right). */
+stamps see. two documented blind spots, both shared with pesde.
+hand edits inside an output folder, and a repo that commits its
+packages folders, those packages really are present and tools still
+verify, so skipping is right. */
 fn fast_path(
     args: &InstallArgs,
     manifest: &Manifest,
@@ -470,15 +470,15 @@ fn fast_path(
     }
     // same include_global flag the stamp writer used, or hashes never match
     let Some(hash) = current_state_hash(include_global_tools) else {
-        return Ok(FastPath::Full); // no lockfile yet (or an unreadable input)
+        return Ok(FastPath::Full); // no lockfile yet, or an unreadable input
     };
     let Ok(lock) = Lockfile::load() else {
-        return Ok(FastPath::Full); // unparseable lockfile: let the full path deal with it
+        return Ok(FastPath::Full); // unparseable lockfile, the full path deals with it
     };
 
-    /* an empty lock matches an empty manifest and nothing else: with no
+    /* an empty lock matches an empty manifest and nothing else. with no
     output dirs there are no stamps to consult, but resolving zero
-    dependencies can only produce zero packages — nothing `^` could ever
+    dependencies can only produce zero packages, nothing `^` could ever
     upgrade to, so index freshness doesn't matter either */
     if lock.packages.is_empty() {
         return Ok(if manifest.dependencies.is_empty() {
@@ -511,8 +511,8 @@ fn fast_path(
     }
 
     /* local inputs are unchanged, so the lock's own indices decide whether
-    resolving could possibly answer differently: fresh caches mean it
-    provably can't (same index state, same inputs, deterministic resolver),
+    resolving could possibly answer differently. fresh caches mean it
+    provably can't, same index state, same inputs, deterministic resolver.
     stale ones mean `^` requirements have a real question to ask */
     let fresh = lock
         .packages
@@ -529,11 +529,11 @@ fn fast_path(
 }
 
 /** resolves [patches] against what this install will actually build and
-hangs each patch on its matching jobs. every key must land exactly: a key
-naming a package that resolved to a different version (or is not in the
-graph at all) fails before any download, and one key must mean one
-archive — a multi-target pesde package resolving to different archives
-under different roots is refused rather than half-patched. */
+hangs each patch on its matching jobs. every key must land exactly. a key
+naming a package that resolved to a different version or isn't in the
+graph at all fails before any download, and one key must mean one
+archive, a multi target pesde package resolving to different archives
+under different roots is refused rather than half patched. */
 fn attach_patches(manifest: &Manifest, project_dir: &Path, jobs: &mut [Job]) -> Result<(), Error> {
     for (key, path) in &manifest.patches {
         let (name, version) = manifest::patch_key(key)?;
@@ -567,8 +567,8 @@ fn attach_patches(manifest: &Manifest, project_dir: &Path, jobs: &mut [Job]) -> 
             });
         }
         /* contexts resolve independently, so one name CAN land at different
-        versions under different roots; a copy the key doesn't cover would
-        install unpatched, which is the silent half-skip this feature must
+        versions under different roots. a copy the key doesn't cover would
+        install unpatched, which is the silent half skip this feature must
         never do */
         if hits.len() != matching.len() {
             let other = matching
@@ -585,7 +585,7 @@ fn attach_patches(manifest: &Manifest, project_dir: &Path, jobs: &mut [Job]) -> 
             });
         }
 
-        // one key means one archive; check before anything downloads
+        // one key means one archive, check before anything downloads
         let mut urls = BTreeSet::new();
         for slot in &hits {
             match &jobs[*slot].source {
@@ -649,16 +649,16 @@ fn locked_patch(
 }
 
 /** applies a saved patch onto the freshly extracted tree. the diff carries
-git's own a/ b/ headers (the working copy is its own repo), so `git apply`
-consumes it at default -p1. failure is a hard error naming the package,
-the patch, and git's stderr — never a warning.
+git's own a/ b/ headers since the working copy is its own repo, so
+`git apply` consumes it at default -p1. failure is a hard error naming the
+package, the patch, and git's stderr, never a warning.
 
-the staging dir is git-inited first and the .git dropped after, and that
-is load-bearing: staging lives inside the user's project, which is almost
-always a git repo, and `git apply` under an ENCLOSING repo resolves patch
-paths against that repo's root — silently skipping every path outside the
-subdir, with exit 0. a throwaway repo in staging pins the resolution to
-the tree being patched. */
+the staging dir is git-inited first and the .git dropped after, and that's
+load bearing. staging lives inside the user's project, almost always a git
+repo, and `git apply` under an ENCLOSING repo resolves patch paths against
+that repo's root, silently skipping every path outside the subdir with
+exit 0. a throwaway repo in staging pins the resolution to the tree being
+patched. */
 fn apply_patch(name: &str, patch: &JobPatch, staging: &Path) -> Result<(), Error> {
     if !git::available() {
         return Err(Error::GitMissing);
@@ -685,15 +685,15 @@ fn apply_patch(name: &str, patch: &JobPatch, staging: &Path) -> Result<(), Error
 }
 
 /** whether a fresh resolution landed exactly where the lockfile already
-stands — the "checked the indices, nothing new" case that skips the
-rebuild. environment is compared only when resolution knows it up front;
+stands, the "checked the indices, nothing new" case that skips the
+rebuild. environment is compared only when resolution knows it up front.
 None means "detect from the archive", and the same version of the same
 archive detects the same. */
 fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
     if jobs.len() != lock.packages.len() {
         return false;
     }
-    /* keyed by (name, context): one package may be locked once per
+    /* keyed by (name, context) since one package may be locked once per
     environment root, and each copy has to match its own entry */
     let by_key: HashMap<(&str, Environment), &LockedPackage> = lock
         .packages
@@ -708,10 +708,10 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                     && job.link == locked.link
                     && job.index_url == locked.index
                     && job.source == locked.source
-                    /* redirects shape the nested links on disk; an [overrides]
+                    /* redirects shape the nested links on disk, an [overrides]
                     edit that lands on the same versions still has to rebuild */
                     && job.redirects == locked.redirects
-                    /* same for a patch: an edited file changes the record's
+                    /* same for a patch, an edited file changes the record's
                     hash, so identical versions still rebuild */
                     && job.patch.as_ref().map(|patch| &patch.record) == locked.patch.as_ref()
                     && job
@@ -721,7 +721,7 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
     })
 }
 
-/** refuses an install whose contexts map to one output folder: `[config]`
+/** refuses an install whose contexts map to one output folder. `[config]`
 lets users repoint each environment's out dir, and two contexts sharing a
 folder would race their `.lpm` stores against each other. */
 fn assert_distinct_roots(manifest: &Manifest, jobs: &[Job]) -> Result<(), Error> {
@@ -749,9 +749,9 @@ fn assert_distinct_roots(manifest: &Manifest, jobs: &[Job]) -> Result<(), Error>
     Ok(())
 }
 
-/** the tail every skipped install shares: verify the pinned tools (a few
-stats — install is also the repair path for wiped tool storage), download
-any that are missing, and say so. */
+/** the tail every skipped install shares. verify the pinned tools with a
+few stats, install is also the repair path for wiped tool storage,
+download any that are missing, and say so. */
 fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<(), Error> {
     let missing: Vec<ToolJob> = tool_jobs(manifest, include_global_tools)?
         .into_iter()
@@ -769,9 +769,9 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
 }
 
 /** stamps every environment that received packages with the state hash.
-best-effort: a failed stamp only costs the next run its shortcut. the
-manifest and tools inputs are the ones captured *before* resolution — what
-this install actually consumed — while the lock text is read back fresh,
+best effort, a failed stamp only costs the next run its shortcut. the
+manifest and tools inputs are the ones captured before resolution, what
+this install actually consumed, while the lock text is read back fresh
 since this install just wrote it. */
 fn write_state_stamps(
     manifest: &Manifest,
@@ -796,8 +796,8 @@ fn write_state_stamps(
 /** downloads, stages, and links every package, reporting progress on `bar`.
 caller owns the bar's lifecycle so it gets cleared on errors too.
 
-registry packages fan out over a small thread pool: each worker owns one
-job at a time end to end (download, extract, rewrite, parse), under its
+registry packages fan out over a small thread pool. each worker owns one
+job at a time end to end, download, extract, rewrite, parse, under its
 own staging dir, so nothing is shared but the target `.lpm` parents. this
 thread keeps the bar, writes the link files, and fills `locked` by job
 index, so lockfile order is exactly the resolver's order no matter who
@@ -813,8 +813,8 @@ fn install_packages(
     let mut slots: Vec<Option<LockedPackage>> = Vec::new();
     slots.resize_with(jobs.len(), || None);
 
-    /* workspace members link in place on this thread (no network, and
-    they touch source dirs the user owns); registry jobs queue for the pool */
+    /* workspace members link in place on this thread, no network and
+    they touch source dirs the user owns. registry jobs queue for the pool */
     let mut queue: VecDeque<(usize, Job)> = VecDeque::new();
     for (slot, job) in jobs.into_iter().enumerate() {
         if matches!(job.source, index::DownloadSource::Workspace { .. }) {
@@ -853,7 +853,7 @@ fn install_packages(
                     let next = queue.lock().expect("job queue lock").pop_front();
                     let Some((slot, job)) = next else { break };
 
-                    /* context-suffixed: the same package installing under
+                    /* context suffixed, the same package installing under
                     two roots is two concurrent jobs, and they must not
                     tear down each other's staging */
                     let staging = staging_root.join(format!(
@@ -865,7 +865,7 @@ fn install_packages(
                     if result.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
-                    // a closed channel means the run is over; stop quietly
+                    // a closed channel means the run is over, stop quietly
                     if sender.send((slot, job, result)).is_err() {
                         break;
                     }
@@ -874,7 +874,7 @@ fn install_packages(
         }
         drop(sender);
 
-        /* errors are kept by lowest job index, not arrival order: when an
+        /* errors are kept by lowest job index, not arrival order. when an
         outage fails several in-flight downloads at once, the error the
         user sees shouldn't depend on thread timing */
         let mut error_slot = usize::MAX;
@@ -890,7 +890,7 @@ fn install_packages(
                         continue;
                     }
                     bar.set_message(job.name.clone());
-                    // transitives have no link; show where they landed instead
+                    // transitives have no link, show where they landed instead
                     let shown = job
                         .link
                         .clone()
@@ -928,7 +928,7 @@ fn install_packages(
     if let Some(error) = first_error {
         return Err(error);
     }
-    /* every slot must have reported; a hole here is an lpm bug, and
+    /* every slot must have reported. a hole here is an lpm bug, and
     silently writing a shorter lockfile would be far worse than failing */
     slots
         .into_iter()
@@ -942,16 +942,16 @@ fn install_packages(
         .collect()
 }
 
-/// what a worker learned about one extracted package; links come later.
+/// what a worker learned about one extracted package, links come later.
 struct Extracted {
     environment: Environment,
-    /// None = no entry point found (warned already at link time)
+    /// None means no entry point found, warned already at link time
     entry: Option<String>,
     types: Vec<String>,
 }
 
-/** one registry package, end to end except the link file: download (or
-cache hit), extract under `staging`, detect the environment, move into the
+/** one registry package, end to end except the link file. download or
+cache hit, extract under `staging`, detect the environment, move into the
 store, mirror project files, rewrite instance requires, and pull exported
 types. runs on a worker thread. */
 fn install_one(
@@ -968,7 +968,7 @@ fn install_one(
     index::download(&job.source, staging, cache)?;
     package::flatten_single_dir(staging)?;
 
-    /* the tree is staged and pristine here; patch it now so environment
+    /* the tree is staged and pristine here, patch it now so environment
     detection, rojo mirroring, require rewriting, and the nested links all
     see patched files. two contexts of one package run this twice and both
     copies get the same patch */
@@ -976,19 +976,19 @@ fn install_one(
         apply_patch(&job.name, patch, staging)?;
     }
 
-    /* indices usually know the environment; otherwise ask the files
-    (lpm.toml -> pesde.toml -> wally.toml) */
+    /* indices usually know the environment, otherwise ask the files,
+    lpm.toml then pesde.toml then wally.toml */
     let environment = match job.environment {
         Some(environment) => environment,
         None => package::environment(staging)
             .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
     };
 
-    /* real contents live under <out>/.lpm/<scope>_<name>/ — <out> being the
-    CONTEXT's folder, not the package's own environment: each root is
-    self-contained, so a server package's shared deps stay under server.
-    workers race to create the same .lpm parent (create_dir_all treats
-    existing as success) and Windows occasionally answers concurrent
+    /* real contents live under <out>/.lpm/<scope>_<name>/ where <out> is
+    the CONTEXT's folder, not the package's own environment. each root is
+    self contained, so a server package's shared deps stay under server.
+    workers race to create the same .lpm parent, create_dir_all treats
+    existing as success, and Windows occasionally answers concurrent
     creation or a fresh rename with a transient denial worth one retry */
     let folder = job.name.replace('/', "_");
     let out = manifest.packages_out(job.context);
@@ -1000,8 +1000,8 @@ fn install_one(
     with_retry(|| fs::rename(staging, &storage))?;
 
     /* a project file the package ships would mount it under its own
-    name and tree, which our link files (and the package's own relative
-    requires) don't spell; make it mirror the disk instead. after
+    name and tree, which our link files and the package's own relative
+    requires don't spell. make it mirror the disk instead. after
     entry_point, so the entry is read from what the package shipped */
     let entry = package::entry_point(&storage);
     rojo::mirror_disk_layout(&storage, &mut bar_warn(bar));
@@ -1009,8 +1009,8 @@ fn install_one(
     let (entry, types) = match entry {
         Some(entry) => {
             /* packages from any index can talk roblox instance paths
-            (require(script.Parent.X)), wally stuff especially but ports
-            published to pesde or our index too; rewrite what we can into
+            like require(script.Parent.X), wally stuff especially but ports
+            published to pesde or our index too. rewrite what we can into
             string requires so they work without an instance tree. string
             require packages come through unchanged */
             requires::rewrite_instance_requires(&storage, &entry)?;
@@ -1037,9 +1037,9 @@ fn with_retry(operation: impl Fn() -> std::io::Result<()>) -> std::io::Result<()
     })
 }
 
-/** the consumer-level `<out>/<link>.luau` for one extracted package;
+/** the consumer level `<out>/<link>.luau` for one extracted package,
 runs on the main thread once a worker reports in. only direct
-dependencies (link = Some) get one — transitives are reachable through
+dependencies (link = Some) get one, transitives are reachable through
 their dependents' nested links alone. */
 fn write_registry_link(
     manifest: &Manifest,
@@ -1057,7 +1057,7 @@ fn write_registry_link(
                 package::link_contents(&folder, entry, &extracted.types),
             )?;
         }
-        // entry-less packages warn even without a link to write: nothing
+        // entry-less packages warn even without a link to write, nothing
         // else warns when the only dependent links in place
         (_, None) => warn_no_entry(&job.name, bar),
         (None, Some(_)) => {}
@@ -1065,7 +1065,7 @@ fn write_registry_link(
     Ok(())
 }
 
-/** workspace members link in place (no download, no copy under .lpm/)
+/** workspace members link in place, no download, no copy under .lpm/,
 so edits to the member are picked up without reinstalling, like pesde's
 symlinks. */
 fn link_workspace_member(
@@ -1097,7 +1097,7 @@ fn link_workspace_member(
             fs::write(&link_path, package::link_contents_at(&require, &types))?;
         }
         (_, None) => warn_no_entry(&job.name, bar),
-        // a transitively-pulled member: link targets exist, no link written
+        // a transitively pulled member, link targets exist, no link written
         (None, Some(_)) => {}
     }
 
@@ -1120,7 +1120,7 @@ fn link_workspace_member(
         link: job.link,
         index: job.index_url,
         redirects: job.redirects,
-        // members are the user's own source; attach_patches refused them
+        // members are the user's own source, attach_patches refused them
         patch: None,
         source: job.source,
     })
@@ -1130,58 +1130,58 @@ fn link_workspace_member(
 struct StoredPackage {
     /// lowercased "scope/name", the form dependency declarations resolve by
     name: String,
-    /// where the contents live: <context out>/.lpm/<scope>_<name>, or a member's own directory
+    /// where the contents live, <context out>/.lpm/<scope>_<name> or a member's own directory
     storage: PathBuf,
-    /// the package's own environment: names the nested-link folder dependents use
+    /// the package's own environment, names the nested link folder dependents use
     environment: Environment,
-    /// the environment root it installed under; lookups stay within one context
+    /// the environment root it installed under, lookups stay within one context
     context: Environment,
-    /// a workspace member: fine to link *to*, never written into
+    /// a workspace member, fine to link to, never written into
     in_place: bool,
-    /** [overrides]-rewritten edges: declared alias -> replacement package
+    /** [overrides] rewritten edges, declared alias -> replacement package
     name. the manifest on disk still declares the original, so link
     generation must consult this before trusting what it reads back. */
     redirects: BTreeMap<String, String>,
 }
 
-/** link files *inside* a stored package for its own declared dependencies,
+/** link files inside a stored package for its own declared dependencies,
 at `<storage>/packages/<env>/<alias>.luau`. that folder name is the default
-layout, literally: published code was compiled against it (see Chief's
-build), so a consumer's `[config]` output customization deliberately doesn't
-apply inside packages. (a package published from a project that customized
-*its* output dirs would want those names instead; nothing has needed that
-yet.) each link requires the dependency's store entry directly.
+layout, literally. published code was compiled against it, see Chief's
+build, so a consumer's `[config]` output customization deliberately doesn't
+apply inside packages. a package published from a project that customized
+its own output dirs would want those names instead, nothing has needed that
+yet. each link requires the dependency's store entry directly.
 
-nothing here is fatal: the install has already downloaded and extracted
+nothing here is fatal. the install has already downloaded and extracted
 everything, so a package that can't be linked warns and is skipped rather
-than taking the whole run (and the lockfile write that follows) with it. */
+than taking the whole run, and the lockfile write that follows, with it. */
 fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(String)) {
-    /* keyed by (name, context): a dependent only ever links dependencies
+    /* keyed by (name, context), a dependent only ever links dependencies
     installed in its own tree, which is what keeps every require inside
     one output root */
     let by_name: HashMap<(&str, Environment), &StoredPackage> = packages
         .iter()
         .map(|package| ((package.name.as_str(), package.context), package))
         .collect();
-    /* exported types depend on the dependency AND its context: the same
-    name can resolve to different targets (different archives) per tree */
+    /* exported types depend on the dependency AND its context, the same
+    name can resolve to different targets, different archives, per tree */
     let mut types_cache: HashMap<(String, Environment), Vec<String>> = HashMap::new();
 
     for package in packages.iter().filter(|package| !package.in_place) {
-        /* alias -> environment folder, for the escape-require rewrite
-        below; only aliases that actually linked make it in */
+        /* alias -> environment folder, for the escape require rewrite
+        below. only aliases that actually linked make it in */
         let mut escape_aliases: BTreeMap<String, String> = BTreeMap::new();
         for (alias, declared) in package::declared_dependencies(&package.storage) {
-            /* the shipped manifest declares the ORIGINAL package; an
+            /* the shipped manifest declares the ORIGINAL package. an
             [overrides] redirect on this edge means the alias must link to
             the replacement instead */
             let dependency = package
                 .redirects
                 .get(&alias)
                 .map_or(declared, |replacement| replacement.clone());
-            /* aliases are TOML keys from a *downloaded* manifest, and TOML
-            keys can be quoted anything: a "../.." or absolute one would put
-            the link outside the package (or outside the project) */
+            /* aliases are TOML keys from a downloaded manifest, and TOML
+            keys can be quoted anything. a "../.." or absolute one would put
+            the link outside the package or outside the project */
             if !is_plain_file_name(&alias) {
                 warn(format!(
                     "warning: {} declares dependency {dependency} under the unusable alias '{alias}'; no nested link generated",
@@ -1217,7 +1217,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             }
 
             /* relative_path is lexical, so both sides go through
-            std::path::absolute first: that drops the "." component a
+            std::path::absolute first. that drops the "." component a
             `[config]` dir like "./packages/shared" would otherwise
             contribute, and gives absolute out dirs a common prefix to
             measure from */
@@ -1234,8 +1234,8 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             let types = types_cache
                 .entry((dependency.clone(), package.context))
                 .or_insert_with(|| {
-                    /* install_packages already parsed (and complained about)
-                    every stored entry point, so no warn sink here: it would
+                    /* install_packages already parsed and complained about
+                    every stored entry point, so no warn sink here, it would
                     just say the same thing twice */
                     package::entry_source(&dep.storage, &entry)
                         .and_then(|path| fs::read_to_string(path).ok())
@@ -1246,8 +1246,8 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             let link_path = link_dir.join(format!("{alias}.luau"));
             match fs::write(&link_path, package::link_contents_at(&require, &types)) {
                 /* only now is the alias safe to retarget escape requires
-                at: rewriting toward a link that failed to write would
-                turn a maybe-working chain into a certainly-broken one */
+                at. rewriting toward a link that failed to write would
+                turn a maybe working chain into a certainly broken one */
                 Ok(()) => {
                     escape_aliases.insert(alias.clone(), dep.environment.dir_name().to_string());
                 }
@@ -1258,10 +1258,10 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             }
         }
 
-        /* the second half of the instance-require rewrite: chains that
-        climb into wally's alias zone couldn't be mapped on the workers
-        (dependency environments were unknown); with this package's nested
-        links decided, retarget them at packages/<env>/<alias> */
+        /* second half of the instance require rewrite. escape chains
+        couldn't map on the workers since dependency environments weren't
+        known yet, now the nested links are decided so retarget them at
+        packages/<env>/<alias> */
         if !escape_aliases.is_empty()
             && let Some(entry) = package::entry_point(&package.storage)
             && let Err(error) =
@@ -1275,7 +1275,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
     }
 }
 
-/// one ordinary path segment: no separators, no drive letter, not `.`/`..`.
+/// one ordinary path segment, no separators, no drive letter, not `.` or `..`.
 fn is_plain_file_name(alias: &str) -> bool {
     !alias.is_empty()
         && alias != "."
@@ -1285,7 +1285,7 @@ fn is_plain_file_name(alias: &str) -> bool {
 }
 
 /** exported types have to be restated in the link file to survive the
-wrapper; an unparseable entry point still links, just without its types. */
+wrapper. an unparseable entry point still links, just without its types. */
 fn link_types(
     package_dir: &Path,
     entry: &str,
@@ -1341,9 +1341,9 @@ fn install_tools(jobs: &[ToolJob], bar: &ProgressBar) -> Result<(), Error> {
             )),
         );
 
-        /* another toolchain manager's shim earlier in PATH (aftman, rokit)
-        would run instead of ours and report its own errors; surface that
-        or the tool looks broken for no visible reason */
+        /* another toolchain manager's shim earlier in PATH, aftman or
+        rokit, would run instead of ours and report its own errors. surface
+        that or the tool looks broken for no visible reason */
         if let Some(shadow) = tools::shim::shadowing_executable(alias) {
             bar.suspend(|| {
                 eprintln!(
@@ -1387,7 +1387,7 @@ mod tests {
         fs::create_dir_all(base.join("patches")).unwrap();
         fs::write(base.join("patches/b.patch"), "bbb").unwrap();
 
-        /* paths in the manifest are project-relative; this test runs from
+        /* paths in the manifest are project relative. this test runs from
         the crate dir, so spell them absolute to stay hermetic */
         let patch = |file: &str| {
             base.join("patches")
@@ -1407,7 +1407,7 @@ mod tests {
         assert!(text.contains("acme/a@1.0.0\0<missing>\0"), "{text:?}");
         assert!(text.contains("acme/b@1.0.0\0bbb\0"), "{text:?}");
 
-        // editing a patch file (manifest untouched) moves the hash
+        // editing a patch file with the manifest untouched moves the hash
         fs::write(base.join("patches/b.patch"), "ccc").unwrap();
         let edited = patches_state_text(&manifest_text);
         assert_ne!(text, edited);
@@ -1456,7 +1456,7 @@ mod tests {
             .unwrap()
         };
 
-        /* the happy path: one key, two contexts of the same archive, both
+        /* the happy path, one key, two contexts of the same archive, both
         copies get the same patch */
         let mut jobs = vec![
             patch_job(
@@ -1506,8 +1506,8 @@ mod tests {
             "{missing:?}"
         );
 
-        /* same name@version resolving to two different archives (a
-        multi-target pesde package under two roots) is refused */
+        /* same name@version resolving to two different archives, a
+        multi target pesde package under two roots, is refused */
         let mut jobs = vec![
             patch_job(
                 "chief/traits",
@@ -1559,8 +1559,8 @@ mod tests {
         )
         .unwrap();
 
-        /* contexts resolve independently: shared landed on 0.2.0, server on
-        0.3.0. patching only the 0.2.0 copy would be a silent half-skip */
+        /* contexts resolve independently, shared landed on 0.2.0, server on
+        0.3.0. patching only the 0.2.0 copy would be a silent half skip */
         let mut jobs = vec![
             patch_job(
                 "chief/traits",
@@ -1585,10 +1585,10 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /** regression: staging lives inside the user's project, which is
-    normally a git repo, and `git apply` under an enclosing repo silently
-    skips paths outside its subdir with exit 0. the apply must isolate
-    itself or patches no-op in every real project. */
+    /** regression. staging lives inside the user's project, normally a
+    git repo, and `git apply` under an enclosing repo silently skips
+    paths outside its subdir with exit 0. the apply must isolate itself
+    or patches no-op in every real project. */
     #[test]
     fn patches_apply_inside_an_enclosing_git_repo() {
         if !git::available() {
@@ -1598,7 +1598,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let staging = base.join("project/.lpm-staging/pkg");
         fs::create_dir_all(staging.join("src")).unwrap();
-        // the trap: an enclosing repo above the staging dir
+        // the trap, an enclosing repo above the staging dir
         git::run(&[
             "-C",
             &base.join("project").to_string_lossy(),
@@ -1734,12 +1734,12 @@ mod tests {
         };
         let lock = Lockfile::new(vec![locked(None)]);
 
-        // identical resolution: rebuild skippable (env None tolerated)
+        // identical resolution, rebuild skippable, env None tolerated
         assert!(jobs_match_lock(
             &[job("1.0.0", "https://example.com/thing/1.0.0")],
             &lock
         ));
-        // a new version is `^` doing its job: rebuild
+        // a new version is `^` doing its job, rebuild
         assert!(!jobs_match_lock(
             &[job("1.1.0", "https://example.com/thing/1.1.0")],
             &lock
@@ -1759,7 +1759,7 @@ mod tests {
         shared.environment = Some(Environment::Shared);
         assert!(jobs_match_lock(&[shared], &lock));
 
-        // a moved context or a dropped link is a layout change: rebuild
+        // a moved context or a dropped link is a layout change, rebuild
         let mut moved = job("1.0.0", "https://example.com/thing/1.0.0");
         moved.context = Environment::Server;
         assert!(!jobs_match_lock(&[moved], &lock));
@@ -1767,7 +1767,7 @@ mod tests {
         unlinked.link = None;
         assert!(!jobs_match_lock(&[unlinked], &lock));
 
-        /* one package under two contexts matches a two-entry lock — keyed
+        /* one package under two contexts matches a two-entry lock. keyed
         by name alone the entries would collapse and never match */
         let two_contexts = Lockfile::new(vec![locked(None), locked(Some(Environment::Server))]);
         let mut server_copy = job("1.0.0", "https://example.com/thing/1.0.0");
@@ -1777,8 +1777,8 @@ mod tests {
             &two_contexts
         ));
 
-        /* an identical resolution with a different (or new, or edited)
-        patch is a mismatch: patch bytes shape what lands on disk */
+        /* an identical resolution with a different, new, or edited
+        patch is a mismatch, patch bytes shape what lands on disk */
         let with_patch = |bytes: &[u8]| {
             let mut patched = job("1.0.0", "https://example.com/thing/1.0.0");
             patched.patch = Some(JobPatch {
@@ -1838,7 +1838,7 @@ mod tests {
 
         // a transitive writes nothing at the top level
         write_registry_link(&manifest, &job(None), &extracted(Some("")), &bar).unwrap();
-        // an entry-less package (direct or not) writes nothing either
+        // an entry-less package, direct or not, writes nothing either
         write_registry_link(&manifest, &job(Some("broken")), &extracted(None), &bar).unwrap();
         let files: Vec<String> = fs::read_dir(&out)
             .unwrap()
@@ -1872,7 +1872,7 @@ mod tests {
             patch: None,
         };
 
-        // one context: no collision possible, whatever [config] says
+        // one context, no collision possible, whatever [config] says
         assert!(assert_distinct_roots(&manifest, &[job(Environment::Shared)]).is_ok());
         // two contexts mapped onto one folder must refuse the install
         assert!(matches!(
@@ -1904,8 +1904,8 @@ mod tests {
         ))
         .unwrap();
 
-        /* the lock half of the hash reads from the cwd (the repo root under
-        cargo test); the stamps just have to be consistent with whatever it
+        /* the lock half of the hash reads from the cwd, the repo root under
+        cargo test. the stamps just have to be consistent with whatever it
         hashes to, and absent when there's no lockfile at all */
         let inputs = Some((
             "manifest text".to_string(),
@@ -1958,7 +1958,7 @@ mod tests {
         context: Environment,
     ) -> StoredPackage {
         StoredPackage {
-            // production lowercases here; mirror that so the tests exercise it
+            // production lowercases here, mirror that so the tests exercise it
             name: name.to_lowercase(),
             storage,
             environment,
@@ -1974,9 +1974,9 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let shared = base.join("packages/shared");
 
-        /* chief-shaped fixture: `lifecycles` depends on `core` (which
-        exports a type) and on `util`, a luau-environment package pulled
-        into the shared tree — same context, so its storage sits in the
+        /* chief shaped fixture. `lifecycles` depends on `core`, which
+        exports a type, and on `util`, a luau environment package pulled
+        into the shared tree. same context, so its storage sits in the
         shared root while its link folder keeps the luau name */
         let core = shared.join(".lpm/acme_core");
         write(&core, "lpm.toml", "[target]\nmain = \"out/lpm\"\n");
@@ -2005,7 +2005,7 @@ mod tests {
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
         assert_eq!(warnings, Vec::<String>::new());
 
-        /* the same-environment link: three hops up to the store, entry
+        /* the same environment link, three hops up to the store, entry
         appended, exported types restated */
         assert_eq!(
             fs::read_to_string(lifecycles.join("packages/shared/core.luau")).unwrap(),
@@ -2013,9 +2013,9 @@ mod tests {
              export type Entry = module.Entry\n\
              return module\n"
         );
-        /* the luau-environment dependency: the link folder keeps the
+        /* the luau environment dependency. the link folder keeps the
         dependency's own environment name, but its target stays inside
-        this same output root — no `..` ever escapes it */
+        this same output root, no `..` ever escapes it */
         assert_eq!(
             fs::read_to_string(lifecycles.join("packages/luau/util.luau")).unwrap(),
             "return require(\"../../../acme_util\")\n"
@@ -2033,7 +2033,7 @@ mod tests {
         let shared = base.join("packages/shared");
         let server = base.join("packages/server");
 
-        /* the same dependency name installed under both roots: each
+        /* the same dependency name installed under both roots, each
         consumer must link the copy in its OWN tree */
         let shared_dep = shared.join(".lpm/acme_dep");
         write(&shared_dep, "init.luau", "return { tree = \"shared\" }\n");
@@ -2066,7 +2066,7 @@ mod tests {
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
         assert_eq!(warnings, Vec::<String>::new());
 
-        /* the link folder is named for the dep's own environment (shared),
+        /* the link folder is named for the dep's own environment, shared,
         but the require resolves within the server root */
         let link = fs::read_to_string(consumer.join("packages/shared/dep.luau")).unwrap();
         assert_eq!(link, "return require(\"../../../acme_dep\")\n");
@@ -2081,7 +2081,7 @@ mod tests {
         let shared = base.join("packages/shared");
 
         /* the shipped manifest still declares acme/bar, but [overrides]
-        swapped the edge for acme/qux: the nested link must follow the
+        swapped the edge for acme/qux. the nested link must follow the
         redirect, not the manifest */
         let qux = shared.join(".lpm/acme_qux");
         write(&qux, "init.luau", "return {}\n");
@@ -2138,7 +2138,7 @@ mod tests {
 
         let dep = shared.join(".lpm/acme_dep");
         write(&dep, "init.luau", "return {}\n");
-        /* a downloaded manifest can quote anything as a key; neither of
+        /* a downloaded manifest can quote anything as a key, neither of
         these may put a file outside the package */
         let hostile = shared.join(".lpm/acme_hostile");
         write(

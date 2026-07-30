@@ -17,7 +17,7 @@ use semver::Version;
 pub enum ToolCommand {
     /// Use a tool in the current project
     Add {
-        /// Name of the tool (e.g. owner/repo)
+        /// Name of the tool, e.g. owner/repo
         name: String,
 
         /// Specific version to add
@@ -45,9 +45,9 @@ pub enum ToolCommand {
     /// List installed and pinned tools
     List,
 
-    /// Delete a tool's binaries from your system (its manifest pins remain)
+    /// Delete a tool's binaries from your system, its manifest pins remain
     Delete {
-        /// Name of the tool (e.g. owner/repo)
+        /// Name of the tool, e.g. owner/repo
         name: String,
 
         /// Specific version to delete
@@ -62,7 +62,7 @@ pub enum ToolCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ToolCacheCommand {
-    /// Delete every stored tool binary (manifest pins and shims remain)
+    /// Delete every stored tool binary, manifest pins and shims remain
     Clean,
 }
 
@@ -81,14 +81,14 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
     }
 }
 
-/** wipes the tool store: every version of every tool, plus the `.latest`
+/** wipes the tool store, every version of every tool, plus the `.latest`
 stamps `lpm execute` keeps beside them. shims, manifest pins, and the
-global tools file survive — a shim without storage errors with "run
-`lpm install`", and that (or the next lpx run) is the repair path. */
+global tools file survive. a shim without storage errors with "run
+`lpm install`", and that or the next lpx run is the repair path. */
 fn cache_clean() -> Result<(), Error> {
     let (freed, skipped) = sweep_tool_store(&paths::tools_dir()?);
 
-    /* a tool that is running right now can't be deleted on windows; say
+    /* a tool that is running right now can't be deleted on windows, say
     which ones were left rather than aborting the sweep mid-way */
     for (name, error) in &skipped {
         eprintln!("warning: skipped {name} (still running?): {error}");
@@ -138,7 +138,7 @@ fn sweep_tool_store(tools_dir: &std::path::Path) -> (u64, Vec<(String, std::io::
         }
     }
 
-    // drop the now-empty root too; harmless to leave if something survived
+    // drop the now-empty root too, harmless to leave if something survived
     let _ = fs::remove_dir(tools_dir);
     (freed, skipped)
 }
@@ -148,7 +148,7 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     let name = tools::expand_shorthand(&name);
     let (owner, repo) = Tool::split_repository(&name)?;
 
-    /* the repo short name becomes the alias key and its bin shim; a repo
+    /* the repo short name becomes the alias key and its bin shim, a repo
     named lpm or lpx would shadow lpm's own binaries there */
     if tools::is_reserved_alias(repo) {
         return Err(Error::ReservedToolAlias(repo.to_string()));
@@ -160,11 +160,11 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
         None => github.get_latest_release(&name)?,
     };
 
-    /* global tools live in ~/.lpm/tools.toml (created on first use) and
-    resolve in any directory; project tools only inside their project */
+    /* global tools live in ~/.lpm/tools.toml, created on first use, and
+    resolve in any directory. project tools only inside their project */
     let mut manifest = ManifestDoc::open_or_create(Scope::from_global(global))?;
 
-    /* alias key defaults to the repo short name; the bin shim takes the
+    /* alias key defaults to the repo short name. the bin shim takes the
     same name, which is what `delete` relies on when removing it */
     let version = release.tag_name.trim_start_matches('v');
     manifest.table_or_create("tools")?[repo] =
@@ -191,7 +191,7 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
     };
     let table = manifest.require_table("tools")?;
 
-    /* try the exact alias key first; keys are short names, so a shorthand
+    /* try the exact alias key first. keys are short names, so a shorthand
     or full "owner/repo" falls back to matching table values by repository */
     let mut removed = table.remove(&name).is_some();
     if !removed {
@@ -226,7 +226,7 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
 }
 
 /** true when `latest` is newer than `current`. compared as semver when
-possible; otherwise any plain string difference counts as outdated. */
+possible, otherwise any plain string difference counts as outdated. */
 fn is_outdated(current: &str, latest: &str) -> bool {
     match (Version::parse(current), Version::parse(latest)) {
         (Ok(current), Ok(latest)) => latest > current,
@@ -292,9 +292,9 @@ fn update() -> Result<(), Error> {
 }
 
 fn list() -> Result<(), Error> {
-    /* everything known about one version of a tool: whether its binaries are
-    stored, and which manifests pin it. pins without storage still show up
-    (as "not installed") so a fresh `tool add` never looks like a ghost */
+    /* everything known about one version of a tool, whether its binaries
+    are stored and which manifests pin it. pins without storage still show
+    up as "not installed" so a fresh `tool add` never looks like a ghost */
     #[derive(Default)]
     struct VersionState {
         installed: bool,
@@ -302,7 +302,7 @@ fn list() -> Result<(), Error> {
         global: bool,
     }
 
-    /* keyed by lowercased "owner/repo": manifests may spell the repository
+    /* keyed by lowercased "owner/repo", manifests may spell the repository
     with different casing than the storage folder was created with */
     type Seen = BTreeMap<String, (String, BTreeMap<String, VersionState>)>;
     fn state_of<'a>(seen: &'a mut Seen, name: &str, version: String) -> &'a mut VersionState {
@@ -360,8 +360,8 @@ fn list() -> Result<(), Error> {
         return Ok(());
     }
 
-    /* one accent check line ("name@version") per tool, matching install's
-    output; multiple versions share the line, each annotated with its scopes */
+    /* one accent check line, "name@version", per tool, matching install's
+    output. multiple versions share the line, each annotated with its scopes */
     for (name, versions) in seen.into_values() {
         let mut versions: Vec<_> = versions.into_iter().collect();
         // order versions semver-aware where possible
@@ -417,11 +417,11 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     }
     fs::remove_dir_all(&target)?;
 
-    /* when the whole tool (or its last version) is gone, drop the shim too.
-    manifest pins stay: `tool list` shows it as "not installed" and the
-    next `lpm install` puts it back. only version *directories* count —
+    /* when the whole tool or its last version is gone, drop the shim too.
+    manifest pins stay, `tool list` shows it as "not installed" and the
+    next `lpm install` puts it back. only version directories count.
     the `.latest` stamp `lpm execute` leaves beside them must not keep a
-    deleted tool half-alive (and gets swept along with the dir). */
+    deleted tool half-alive, and gets swept along with the dir. */
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
             .map(|mut dir| !dir.any(|entry| entry.is_ok_and(|entry| entry.path().is_dir())))

@@ -7,29 +7,29 @@ use crate::registry::index::{DownloadSource, Index, Refresh};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-/// A package ready to download: the flattened result of resolution.
+/// A package ready to download, the flattened result of resolution.
 #[derive(Debug)]
 pub struct ResolvedInstall {
     pub name: String,
     pub version: semver::Version,
     /// None means the environment must be detected from the extracted files.
     pub environment: Option<Environment>,
-    /** The environment root this package installs under: the environment of
+    /** The environment root this package installs under, the environment of
     the direct dependency whose subtree discovered it. Every root is
-    self-contained — a server package's shared dependencies live under
-    packages/server — so one package can resolve once per context. */
+    self-contained, a server package's shared dependencies live under
+    packages/server, so one package can resolve once per context. */
     pub context: Environment,
     pub source: DownloadSource,
     pub index_url: String,
-    /** Name of the generated top-level link file: the [dependencies] alias
-    for direct deps. None for transitives — only declared dependencies are
+    /** Name of the generated top-level link file, the [dependencies] alias
+    for direct deps. None for transitives, only declared dependencies are
     part of the project's require surface. */
     pub link: Option<String>,
-    /** Edges of THIS package that [overrides] rewrote: its declared alias ->
+    /** Edges of THIS package that [overrides] rewrote, its declared alias ->
     the replacement's package name. The nested-link pass reads a package's
     declared dependencies back off disk by name, so a name-changing override
-    must travel to the linker (and the lockfile) or the dependent would link
-    the original — or nothing. */
+    must travel to the linker and the lockfile or the dependent would link
+    the original, or nothing. */
     pub redirects: BTreeMap<String, String>,
 }
 
@@ -41,8 +41,8 @@ enum Request {
         index_url: String,
     },
     /** A member of this project's workspace. Like pesde, any `version` on
-    the specifier is ignored locally; you get the member's current version
-    (the req only matters when publishing). */
+    the specifier is ignored locally, you get the member's current version.
+    The req only matters when publishing. */
     Workspace,
 }
 
@@ -50,20 +50,20 @@ enum Request {
 struct QueueEntry {
     name: String,
     request: Request,
-    /// manifest alias for direct deps (their top-level link); None for transitives.
+    /// manifest alias for direct deps, their top-level link. None for transitives.
     link: Option<String>,
     /// alias path from the root, for [overrides] matching and diagnostics.
     alias_path: Vec<String>,
     /** the inherited install root. None only for seeds, whose own resolve
-    decides it — by the time children are queued, it's always known. */
+    decides it. by the time children are queued it's always known. */
     context: Option<Environment>,
 }
 
 /** Resolves the manifest's dependency graph breadth-first. Transitive deps
-(cross-manager ones too, e.g. a pesde package pulling a wally one) flatten
-into one install set, deduped by package name; a requirement that rejects the
-already-chosen version is a hard error. Workspace deps resolve to sibling
-projects on disk and bring their own deps into the same set. */
+flatten into one install set deduped by package name, cross-manager ones
+too, like a pesde package pulling a wally one. A requirement that rejects
+the already-chosen version is a hard error. Workspace deps resolve to
+sibling projects on disk and bring their own deps into the same set. */
 pub fn resolve(
     manifest: &Manifest,
     project_dir: &Path,
@@ -73,7 +73,7 @@ pub fn resolve(
     let mut ttl_skipped = false;
     match resolve_once(manifest, project_dir, refresh, &mut ttl_skipped, warnings) {
         /* an index whose pull was skipped by the TTL can be stale, and most
-        resolver errors don't say which index they came from — so any
+        resolver errors don't say which index they came from, so any
         failure after a skip earns one full forced refresh and a re-run.
         the second outcome, good or bad, is the one that stands. */
         Err(_) if refresh == Refresh::Ttl && ttl_skipped => {
@@ -105,10 +105,10 @@ fn resolve_once(
     let mut workspace_memo: Option<Option<Workspace>> = None;
 
     /* [overrides] expanded and validated up front, one (name, request) per
-    alias path: a dangling alias, unknown index key, or two keys covering
+    alias path. a dangling alias, unknown index key, or two keys covering
     the same path all fail before any network happens, whether or not the
     path ends up matching an edge. Each edge the walk discovers carries its
-    alias path from the root ("foo" -> "foo.bar" -> ...); an exact match
+    alias path from the root ("foo" -> "foo.bar" -> ...), an exact match
     rewrites that edge before it's queued. */
     let mut overrides: HashMap<Vec<String>, (String, Request)> = HashMap::new();
     for (key, value) in &manifest.overrides {
@@ -120,17 +120,17 @@ fn resolve_once(
         }
     }
     let mut overrides_matched: HashSet<Vec<String>> = HashSet::new();
-    /* enough breadcrumbs to say WHY an override never fired: every queued
+    /* enough breadcrumbs to say WHY an override never fired. every queued
     edge path and its package, the one path each package was walked under
-    per context (children are enumerated once per context), and each root
-    alias's context, so diagnostics look in the right tree */
+    per context since children are enumerated once per context, and each
+    root alias's context, so diagnostics look in the right tree */
     let mut discovered: HashMap<Vec<String>, String> = HashMap::new();
     let mut walked_at: HashMap<(String, Environment), Vec<String>> = HashMap::new();
     let mut seed_contexts: HashMap<String, Environment> = HashMap::new();
 
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
 
-    /* Seed all direct deps before any transitive one is discovered: first
+    /* Seed all direct deps before any transitive one is discovered. first
     entry per (name, context) wins, so a package that also shows up
     transitively still links under its manifest alias. */
     for (alias, dependency) in &manifest.dependencies {
@@ -147,7 +147,7 @@ fn resolve_once(
 
     /* (name, context) -> (what we resolved, the req that won). BTreeMap
     keeps the install set, and the lockfile written from it, in name order
-    (context breaking ties). one package may appear once per context:
+    with context breaking ties. one package may appear once per context,
     every environment root is self-contained, wally-style. */
     let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String)> = BTreeMap::new();
 
@@ -166,8 +166,8 @@ fn resolve_once(
         let req = parse_version_req(&req_text)?;
 
         /* transitives inherit their context, so their dedup gate runs
-        before any network; a seed's context is decided by its own resolve,
-        so its gate has to wait until just after (below) */
+        before any network. a seed's context is decided by its own resolve,
+        so its gate has to wait until just after, below */
         if let Some(context) = context
             && let Some((existing, first_req)) = resolved.get(&(name.clone(), context))
         {
@@ -183,7 +183,7 @@ fn resolve_once(
         }
 
         /* a workspace member shadows the registry copy of its name in
-        EVERY context: the member is the copy being developed, and a
+        EVERY context. the member is the copy being developed, and a
         server tree quietly pulling the published version while shared
         uses the local one would split the two. seeds all resolve before
         any transitive pops, so a seeded member is always visible here. */
@@ -199,9 +199,9 @@ fn resolve_once(
             request => request,
         };
 
-        /* children are collected, not queued: whether this package's edges
-        walk at all is decided by the gates, and the side effects (matched
-        overrides, discovered paths, redirects) must not land for a walk
+        /* children are collected, not queued. whether this package's edges
+        walk at all is decided by the gates, and the side effects, matched
+        overrides, discovered paths, redirects, must not land for a walk
         that never happens */
         let mut redirects: BTreeMap<String, String> = BTreeMap::new();
         let mut pending_matched: Vec<Vec<String>> = Vec::new();
@@ -212,7 +212,7 @@ fn resolve_once(
             Request::Registry { index_url, .. } => {
                 let index = open_index(&mut indices, &index_url, refresh, ttl_skipped)?;
                 /* a multi-target entry should pick the target of the tree
-                it installs into; seeds fall back to the project's own */
+                it installs into. seeds fall back to the project's own */
                 let package = index.resolve(&name, &req, context.or(prefer_environment))?;
 
                 for dependency in &package.dependencies {
@@ -261,7 +261,7 @@ fn resolve_once(
                     .map(|target| target.environment)
                     .ok_or_else(|| Error::UnknownPackageEnvironment(name.clone()))?;
 
-                /* The member's own deps install for the consumer too; its
+                /* The member's own deps install for the consumer too. its
                 registry deps resolve against the member's [indices], but
                 the consumer's [overrides] still apply to the edges. */
                 for (alias, dependency) in &member.manifest.dependencies {
@@ -294,7 +294,7 @@ fn resolve_once(
             }
         };
 
-        /* a seed's context is its own environment, else the project's —
+        /* a seed's context is its own environment, else the project's.
         the subtree's placement can't wait for archive extraction */
         let seeded_here = context.is_none();
         let context = match context {
@@ -307,7 +307,7 @@ fn resolve_once(
             seed_contexts.insert(alias_path[0].clone(), context);
             if let Some((existing, first_req)) = resolved.get(&(name.clone(), context)) {
                 if req.matches(&existing.version) {
-                    continue; // this tree already walked the package; children drop
+                    continue; // this tree already walked the package, children drop
                 }
                 return Err(Error::DependencyConflict {
                     name,
@@ -319,7 +319,7 @@ fn resolve_once(
         }
 
         /* a registry edge shadowed onto a member still states a version
-        requirement; honor it like the dedup gate would have. workspace
+        requirement, honor it like the dedup gate would have. workspace
         specifiers' own req is "*", so only converted edges can trip this */
         if matches!(source, DownloadSource::Workspace { .. }) && !req.matches(&version) {
             return Err(Error::DependencyConflict {
@@ -330,7 +330,7 @@ fn resolve_once(
             });
         }
 
-        // the walk is real: commit its breadcrumbs and queue the edges
+        // the walk is real, commit its breadcrumbs and queue the edges
         walked_at
             .entry((name.clone(), context))
             .or_insert(alias_path.clone());
@@ -365,10 +365,10 @@ fn resolve_once(
     }
 
     /* an override that never met its edge would otherwise be silently
-    dead. two distinct reasons deserve distinct messages: a path that
-    exists but wasn't walked (its package's edges were enumerated under an
-    earlier discovery path — root aliases seed alphabetically), and a path
-    that simply never appeared (a typo, or a dependency that moved on). */
+    dead. two distinct reasons deserve distinct messages. a path that
+    exists but wasn't walked, its package's edges were enumerated under an
+    earlier discovery path since root aliases seed alphabetically, and a
+    path that simply never appeared, a typo or a dependency that moved on. */
     let mut unmatched: Vec<&Vec<String>> = overrides
         .keys()
         .filter(|path| !overrides_matched.contains(*path))
@@ -379,7 +379,7 @@ fn resolve_once(
         let elsewhere = discovered
             .get(parent)
             .and_then(|parent_name| {
-                /* the tree this path belongs to is its root alias's; a walk
+                /* the tree this path belongs to is its root alias's. a walk
                 of the same package in another context is a different tree */
                 let context = seed_contexts.get(path.first()?)?;
                 walked_at.get(&(parent_name.clone(), *context))
@@ -401,9 +401,9 @@ fn resolve_once(
     Ok(resolved.into_values().map(|(install, _)| install).collect())
 }
 
-/** what an overridden edge asks for instead: the root manifest's own
+/** what an overridden edge asks for instead, the root manifest's own
 dependency when the override is an alias, or the inline specifier. Either
-way index keys resolve against the ROOT manifest's [indices] — the author
+way index keys resolve against the ROOT manifest's [indices], the author
 of the override is the one naming the index. */
 fn overridden_edge(
     replacement: &Override,
@@ -428,9 +428,9 @@ fn overridden_edge(
     ))
 }
 
-/** a seed's context: its own resolved environment, else the project's
-`[target]` one. placement is decided at resolve time (children queue with
-it), so unlike a package's own environment it can never wait for the
+/** a seed's context is its own resolved environment, else the project's
+`[target]` one. placement is decided at resolve time since children queue
+with it, so unlike a package's own environment it can never wait for the
 archive to be extracted and inspected. */
 fn seed_context(
     environment: Option<Environment>,
@@ -461,7 +461,7 @@ fn request_for(dependency: &Dependency, owner: &Manifest) -> Result<Request, Err
     })
 }
 
-/** The workspace this project resolves members from: itself when it declares
+/** The workspace this project resolves members from, itself when it declares
 members, otherwise the nearest ancestor that claims it. Memoized so glob
 walks and manifest reads don't repeat per dependency. */
 fn workspace_context<'memo>(
@@ -480,7 +480,7 @@ fn workspace_context<'memo>(
     Ok(memo.as_ref().expect("just memoized").as_ref())
 }
 
-/// Opens each index at most once per run (so each gets refreshed once).
+/// Opens each index at most once per run, so each gets refreshed once.
 fn open_index<'a>(
     indices: &'a mut HashMap<String, Index>,
     url: &str,
@@ -531,7 +531,7 @@ mod tests {
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"^\" }\n",
         );
 
-        /* Resolving from a member: its workspace dep and that dep's own
+        /* Resolving from a member, its workspace dep and that dep's own
         workspace dep all land in the install set, linked in place. */
         let member_dir = base.join("packages/extra");
         let manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
@@ -549,8 +549,8 @@ mod tests {
             DownloadSource::Workspace { path } if path == "../core"
         ));
 
-        /* Resolving from the root: members resolve through the root's own
-        member list (no ancestor needed), and members' transitive
+        /* Resolving from the root, members resolve through the root's own
+        member list, no ancestor needed, and members' transitive
         workspace deps come along. */
         let root_manifest_text = "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
              [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
@@ -588,9 +588,9 @@ mod tests {
         ));
     }
 
-    /** the self-contained-roots contract, against a real local git index:
-    a server seed drags its whole subtree into the server context (its
-    shared deps included), the same package under two roots resolves once
+    /** the self-contained-roots contract, against a real local git index.
+    a server seed drags its whole subtree into the server context, shared
+    deps included, the same package under two roots resolves once
     per root, and cross-context version divergence is legal where a
     same-context one conflicts. */
     #[test]
@@ -669,9 +669,9 @@ mod tests {
             resolve(&manifest, &origin, Refresh::Never, &mut Vec::new())
         };
 
-        /* svc (server) pulls lib and pin into the server context; lib and
-        pin are ALSO direct shared deps — so both exist twice, once per
-        root, and pin's versions may even diverge across them */
+        /* svc, a server package, pulls lib and pin into the server context.
+        lib and pin are ALSO direct shared deps, so both exist twice, once
+        per root, and pin's versions may even diverge across them */
         let installs = resolve_with(
             "svc = { name = \"acme/svc\", version = \"^1\" }\n\
              lib = { name = \"acme/lib\", version = \"^1\" }\n\
@@ -724,9 +724,9 @@ mod tests {
         let _ = fs::remove_dir_all(&cache);
     }
 
-    /** a workspace member owns its name in every context: a server-tree
-    registry edge naming it binds to the local member (at the member's
-    version), never to the published copy — unless its requirement can't
+    /** a workspace member owns its name in every context. a server-tree
+    registry edge naming it binds to the local member at the member's
+    version, never to the published copy, unless its requirement can't
     accept the member, which is a conflict, not a silent split. */
     #[test]
     fn workspace_members_shadow_registry_copies_in_every_context() {
@@ -825,8 +825,8 @@ mod tests {
             resolve(&manifest, &project, Refresh::Never, &mut Vec::new())
         };
 
-        /* svc's server-tree edge to acme/core binds to the member: same
-        version as the shared copy (1.2.0, not the registry's 1.0.0),
+        /* svc's server-tree edge to acme/core binds to the member. same
+        version as the shared copy, 1.2.0 not the registry's 1.0.0,
         workspace source, no top-level link */
         let installs = resolve_with("svc").unwrap();
         let cores: Vec<_> = installs
@@ -853,7 +853,7 @@ mod tests {
         ));
     }
 
-    /** [overrides] end to end, against a real local git index: a specifier
+    /** [overrides] end to end, against a real local git index. a specifier
     override redirects an edge to another package, an alias override reuses
     the root's own dependency, a dangling alias errors, and a pathless key
     errors. Refresh::Never keeps every open on the local clone. */
@@ -938,14 +938,14 @@ mod tests {
                         "{}@{} as {}",
                         install.name,
                         install.version,
-                        // transitives carry no link; "-" marks them
+                        // transitives carry no link, "-" marks them
                         install.link.as_deref().unwrap_or("-")
                     )
                 })
                 .collect()
         };
 
-        // no overrides: foo brings its declared bar, linkless (transitive)
+        // no overrides, foo brings its declared bar, linkless because transitive
         let plain = resolve_with(
             "[dependencies]\nfoo = { name = \"acme/foo\", version = \"^1\" }\n",
             &mut Vec::new(),
@@ -977,7 +977,7 @@ mod tests {
             Some("acme/qux")
         );
 
-        /* an alias override defers to the root's own [dependencies] entry:
+        /* an alias override defers to the root's own [dependencies] entry.
         one bar in the set, at the root's version, under the root's link */
         let aliased = resolve_with(
             "[dependencies]\nfoo = { name = \"acme/foo\", version = \"^1\" }\n\
@@ -992,8 +992,8 @@ mod tests {
         );
 
         /* an override addressed through the SECOND parent of a shared
-        package can't apply — edges are walked once, under the first
-        discovery path — and the warning says that, not "typo" */
+        package can't apply, edges are walked once under the first
+        discovery path, and the warning says that, not "typo" */
         let mut warnings = Vec::new();
         let deep = resolve_with(
             "[dependencies]\naaa = { name = \"acme/foo\", version = \"^1\" }\n\
@@ -1023,7 +1023,7 @@ mod tests {
             "{warnings:?}"
         );
 
-        /* eager validation: a dangling alias, a pathless key, interior
+        /* eager validation. a dangling alias, a pathless key, interior
         whitespace, a duplicate expanded path, and an unknown [indices]
         key all fail before any edge is walked */
         let overrides_error = |overrides: &str| {

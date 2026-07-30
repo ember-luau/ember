@@ -1,6 +1,6 @@
 /*!
 GitHub's OAuth device flow and the token store it writes. Publishing sends
-the token as a Bearer header; the registry API maps it to a GitHub login for
+the token as a Bearer header, the registry API maps it to a GitHub login for
 scope ownership.
 */
 
@@ -24,7 +24,7 @@ pub struct Credentials {
     pub login: String,
 }
 
-/// On-disk shape of credentials.toml; keeps the public struct serde-free.
+/// On-disk shape of credentials.toml. Keeps the public struct serde-free.
 #[derive(Serialize, Deserialize)]
 struct CredentialsFile {
     token: String,
@@ -34,7 +34,7 @@ struct CredentialsFile {
 pub fn load() -> Result<Option<Credentials>, Error> {
     let path = paths::credentials_file()?;
 
-    /* Corrupt or unreadable file reads as "not logged in": worst case is
+    /* Corrupt or unreadable file reads as "not logged in". Worst case is
     re-running the device flow, while a hard failure here would brick
     every command that touches credentials. */
     let Ok(text) = fs::read_to_string(&path) else {
@@ -53,9 +53,9 @@ pub fn save(credentials: &Credentials) -> Result<(), Error> {
     Ok(())
 }
 
-/** Deletes the stored credentials; missing file is fine. Called when the
-registry rejects the token (revoked/expired) so the next attempt runs the
-device flow instead of resending a dead token forever. */
+/** Deletes the stored credentials, missing file is fine. Called when the
+registry rejects the token, revoked or expired, so the next attempt runs
+the device flow instead of resending a dead token forever. */
 pub fn clear() -> Result<(), Error> {
     match fs::remove_file(paths::credentials_file()?) {
         Ok(()) => Ok(()),
@@ -74,7 +74,7 @@ pub fn login(client_id: &str) -> Result<Credentials, Error> {
 }
 
 fn device_flow(client_id: &str) -> Result<Credentials, Error> {
-    /* No OAuth scopes requested: the registry only maps the token to a
+    /* No OAuth scopes requested. The registry only maps the token to a
     GitHub login, and an unscoped token can already read the public
     profile. */
     let device: responses::DeviceCode = http::post_form(

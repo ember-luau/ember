@@ -18,26 +18,26 @@ pub struct Lockfile {
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
-    /// the package's own environment: it names the nested-link folder
+    /// the package's own environment. names the nested-link folder
     /// dependents require it through.
     pub environment: Environment,
-    /** which environment root the package installs under: the root of the
-    dependency tree that pulled it in. absent when it equals `environment`
-    (and in pre-v2 lockfiles, which knew no such distinction) — read it
+    /** which environment root the package installs under, the root of the
+    dependency tree that pulled it in. absent when it equals `environment`,
+    also absent in pre-v2 lockfiles which knew no such distinction. read it
     through [`LockedPackage::context`]. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Environment>,
-    /// top-level link file name; absent for transitives, which get none.
+    /// top-level link file name, absent for transitives which get none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
     pub index: String,
-    /** this package's [overrides]-rewritten edges: declared alias -> the
-    replacement's package name. additive — locks without it parse fine —
-    and required for `--locked` to relink redirected dependencies. */
+    /** this package's [overrides]-rewritten edges, declared alias -> the
+    replacement's package name. additive, locks without it parse fine,
+    and `--locked` needs it to relink redirected dependencies. */
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub redirects: std::collections::BTreeMap<String, String>,
     /** the patch this copy was built with, when [patches] named it.
-    additive within v2 like `redirects`; `--locked` replays it straight
+    additive within v2 like `redirects`. `--locked` replays it straight
     from here without consulting the manifest. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<PatchRecord>,
@@ -45,8 +45,8 @@ pub struct LockedPackage {
     pub source: DownloadSource,
 }
 
-/** a patch as the lockfile remembers it: the repo-relative file plus an
-FNV-1a of its bytes (hex), so an edited patch reads as a change even when
+/** a patch as the lockfile remembers it, the repo-relative file plus a
+hex FNV-1a of its bytes, so an edited patch reads as a change even when
 every version resolved identically. */
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PatchRecord {
@@ -78,8 +78,8 @@ impl LockedPackage {
 impl Lockfile {
     pub fn new(packages: Vec<LockedPackage>) -> Self {
         Lockfile {
-            /* v2: `link` went optional (absent on transitives) and `context`
-            arrived. older lpm can't parse v2 locks; v1 locks load fine. */
+            /* in v2 `link` went optional, absent on transitives, and `context`
+            arrived. older lpm can't parse v2 locks. v1 locks load fine. */
             version: 2,
             packages,
         }
@@ -130,7 +130,7 @@ mod tests {
                 name: "pesde/hello".to_string(),
                 version: "1.0.2".to_string(),
                 environment: Environment::Luau,
-                // a transitive in its own environment: no link, no context
+                // a transitive in its own environment, no link, no context
                 context: None,
                 link: None,
                 index: "https://github.com/pesde-pkg/index".to_string(),
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn v1_lockfiles_still_load() {
-        /* the pre-context format: version 1, `link` on every entry, no
+        /* the pre-context format, version 1, `link` on every entry, no
         `context` anywhere. context() falls back to the environment. */
         let parsed: Lockfile = toml::from_str(
             "version = 1\n\n\

@@ -1,11 +1,11 @@
 /*!
-lpm's own registry API (api.luaupm.com): the write side of publishing.
+lpm's own registry API at api.luaupm.com, the write side of publishing.
 
 Reads never come here. Resolution and installs go through the git index
 clone and the CDN URLs baked into its entries, so they work even when the
 API is down. The one thing the CLI needs the API for is `POST /v1/publish`,
 which validates the tarball, stores it in the CDN bucket, and writes the
-index entry (the API is the index repo's only writer).
+index entry. The API is the index repo's only writer.
 */
 
 use crate::error::Error;
@@ -15,11 +15,11 @@ use serde::Deserialize;
 
 pub const API_URL: &str = "https://api.luaupm.com";
 
-/** The API's hard cap on publish bodies (413 above it); checked client-side
+/** The API's hard cap on publish bodies, 413 above it. Checked client-side
 so an oversized archive fails before uploading. */
 pub const MAX_ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 
-/// The API rejects [package] descriptions longer than this (400).
+/// The API rejects [package] descriptions longer than this with a 400.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 
 /// Every API error is `{"error": "<human readable message>"}`.
@@ -29,14 +29,14 @@ struct ErrorBody {
 }
 
 /** Uploads a packed `.tar.gz` to `POST /v1/publish` as the given user.
-Statuses the API answers with: 401 bad token, 400 malformed tarball or
-lpm.toml, 403 scope owned by someone else (first publish claims a scope),
-409 version already exists, 413 over the size cap. `oidc_token` is the
-Actions provenance token when there is one; it rides along in its own
+The API answers 401 bad token, 400 malformed tarball or lpm.toml, 403
+scope owned by someone else since first publish claims a scope, 409
+version already exists, 413 over the size cap. `oidc_token` is the
+Actions provenance token when there is one. It rides along in its own
 header, auth stays the GitHub token. */
 pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
     let url = format!("{API_URL}/v1/publish");
-    // bulk: a package archive on a slow uplink shouldn't die at the minute mark
+    // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
     let mut request = http::bulk_agent()
         .post(&url)
         .set("User-Agent", http::USER_AGENT)
@@ -53,7 +53,7 @@ pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<
             status,
             message: error_message(status, response.into_string().ok().as_deref()),
         }),
-        // Transport errors (DNS, TLS, ...): no response body to read.
+        // Transport errors like DNS or TLS have no response body to read.
         Err(other) => Err(HttpError::from(other).into()),
     }
 }
@@ -74,7 +74,7 @@ mod tests {
             error_message(409, Some(r#"{"error":"version 1.0.0 already exists"}"#)),
             "version 1.0.0 already exists"
         );
-        // Non-JSON bodies (a proxy error page, say) fall back to the status.
+        // Non-JSON bodies, a proxy error page say, fall back to the status.
         assert_eq!(
             error_message(502, Some("<html>Bad Gateway</html>")),
             "the registry answered HTTP 502"

@@ -1,16 +1,16 @@
 /*!
-`lpm patch`: edit a dependency's source and keep the edit. `lpm patch
-scope/name` extracts a pristine working copy under .lpm-patch/ (its own
-little git repo, so the published state is the baseline commit), the user
+`lpm patch` edits a dependency's source and keeps the edit. `lpm patch
+scope/name` extracts a pristine working copy under .lpm-patch/, its own
+little git repo so the published state is the baseline commit, the user
 edits it, `lpm patch commit` diffs it into patches/ and records the file
 under [patches] in lpm.toml, and every later install re-applies it. pnpm's
 patch/patch-commit and pesde's [patches] are the models.
 
-the working copy is the archive as published (download + flatten), NOT the
-installed folder: rojo mirroring, require rewriting, and nested links all
-run after patching at install time, so patches survive changes to lpm's own
-transforms. that also means the copy won't be byte-identical to what sits
-in packages/<env>/.lpm/.
+the working copy is the archive as published, download plus flatten, NOT
+the installed folder. rojo mirroring, require rewriting, and nested links
+all run after patching at install time, so patches survive changes to
+lpm's own transforms. that also means the copy won't be byte identical to
+what sits in packages/<env>/.lpm/.
 */
 
 use crate::error::Error;
@@ -35,7 +35,7 @@ const PATCHES_DIR: &str = "patches";
 #[derive(Args, Debug)]
 #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct PatchArgs {
-    /// Package to patch, as scope/name (optionally @version)
+    /// Package to patch, scope/name with optional @version
     #[arg(required = true)]
     pub spec: Option<String>,
 
@@ -51,12 +51,12 @@ pub struct PatchArgs {
 pub enum PatchCommand {
     /// Diff the working copy into patches/ and record it in lpm.toml
     Commit {
-        /// Package the working copy belongs to, as scope/name (optionally @version)
+        /// Package the working copy belongs to, scope/name with optional @version
         spec: String,
     },
     /// Drop the [patches] entry and delete the patch file
     Remove {
-        /// Package to unpatch, as scope/name (optionally @version)
+        /// Package to unpatch, scope/name with optional @version
         spec: String,
     },
 }
@@ -66,8 +66,8 @@ pub fn run(args: PatchArgs) -> Result<(), Error> {
         Some(PatchCommand::Commit { spec }) => commit(&spec),
         Some(PatchCommand::Remove { spec }) => remove(&spec),
         None => {
-            /* `required = true` + subcommand_negates_reqs means clap
-            enforces this; the fallback stays graceful just in case */
+            /* `required = true` plus subcommand_negates_reqs means clap
+            enforces this. the fallback stays graceful just in case */
             let Some(spec) = args.spec else {
                 return Err(Error::PatchSpecInvalid {
                     spec: String::new(),
@@ -102,18 +102,18 @@ fn parse_spec(spec: &str) -> Result<(String, Option<semver::Version>), Error> {
     Ok((name.to_string(), version))
 }
 
-/** what one resolved copy of the package looks like: its exact version and
+/** what one resolved copy of the package looks like, its exact version and
 the archive it downloads from. */
 struct Located {
     version: String,
     source: DownloadSource,
 }
 
-/** finds the package in this project: the lockfile when there is one (no
-network), a fresh resolution otherwise. exactly one archive must come out
-of it — several versions can't happen per install, but a multi-target
-pesde package under two roots can, and that's refused (same rule the
-install-side check enforces). */
+/** finds the package in this project, the lockfile when there is one, no
+network, a fresh resolution otherwise. exactly one archive must come out
+of it. several versions can't happen per install, but a multi target
+pesde package under two roots can, and that's refused, same rule the
+install side check enforces. */
 fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Error> {
     let mut candidates: Vec<Located> = if Path::new(crate::project::lockfile::LOCKFILE).exists() {
         Lockfile::load()?
@@ -171,7 +171,7 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
     }
 
     /* contexts resolve independently, so one name can land at different
-    versions under different roots; which one gets patched is the user's
+    versions under different roots. which one gets patched is the user's
     call, not a coin flip */
     let versions: std::collections::BTreeSet<&str> = candidates
         .iter()
@@ -224,8 +224,8 @@ fn slug(name: &str, version: &str) -> String {
     format!("{}@{version}", name.replace('/', "_"))
 }
 
-/** `lpm patch <spec>`: extract the published bytes into a working copy and
-hand the path to the user. */
+/** `lpm patch <spec>` extracts the published bytes into a working copy and
+hands the path to the user. */
 fn start(spec: &str, force: bool) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
     if !git::available() {
@@ -244,12 +244,12 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
         fs::remove_dir_all(&dir)?;
     }
 
-    /* published bytes + flatten: exactly the tree install_one patches, and
-    the archive cache usually makes this free */
+    /* published bytes plus flatten, exactly the tree install_one patches,
+    and the archive cache usually makes this free */
     index::download(&located.source, &dir, CachePolicy::Use)?;
     package::flatten_single_dir(&dir)?;
 
-    /* its own git repo with the published state as the baseline commit:
+    /* its own git repo with the published state as the baseline commit.
     `commit` later diffs against it and gets standard a/ b/ headers, which
     `git apply` at install consumes with no path juggling */
     let in_copy = dir.to_string_lossy().into_owned();
@@ -264,7 +264,7 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
             "-C",
             &in_copy,
             /* a baseline commit needs an identity and must dodge user
-            hooks/signing config; the working copy isn't a real repo */
+            hooks and signing config, the working copy isn't a real repo */
             "-c",
             "user.name=lpm",
             "-c",
@@ -289,8 +289,8 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/** `lpm patch commit <spec>`: diff the working copy against the published
-baseline, write the patch, record it, clean up. */
+/** `lpm patch commit <spec>` diffs the working copy against the published
+baseline, writes the patch, records it, cleans up. */
 fn commit(spec: &str) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
     if !git::available() {
@@ -302,7 +302,7 @@ fn commit(spec: &str) -> Result<(), Error> {
     let (dir, version) = find_working_copy(&name, version.as_ref())?;
     let in_copy = dir.to_string_lossy().into_owned();
 
-    /* intent-to-add makes files the user created show up in the diff;
+    /* intent-to-add makes files the user created show up in the diff,
     without it `git diff` only sees tracked paths */
     git::run(&git::verbatim(&["-C", &in_copy, "add", "-N", "."])).map_err(|stderr| {
         Error::PatchGitFailed {
@@ -334,7 +334,7 @@ fn commit(spec: &str) -> Result<(), Error> {
     let file = Path::new(PATCHES_DIR).join(format!("{}.patch", slug(&name, &version)));
     fs::write(&file, &diff)?;
 
-    // forward slashes: the path lands in lpm.toml and should read the same everywhere
+    // forward slashes, the path lands in lpm.toml and should read the same everywhere
     let recorded = format!("{PATCHES_DIR}/{}.patch", slug(&name, &version));
     let mut document = ManifestDoc::open(Scope::Project)?;
     document
@@ -349,7 +349,7 @@ fn commit(spec: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/** `lpm patch remove <spec>`: drop the entry and the file. */
+/** `lpm patch remove <spec>` drops the entry and the file. */
 fn remove(spec: &str) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
 
@@ -396,7 +396,7 @@ fn remove(spec: &str) -> Result<(), Error> {
     document.save()?;
 
     match file {
-        /* only delete what a valid entry could point at: a hand-edited
+        /* only delete what a valid entry could point at. a hand edited
         absolute or escaping path must not become an rm outside the project */
         Some(file) if crate::project::manifest::patch_path(&key, &file).is_err() => {
             eprintln!(
@@ -416,8 +416,8 @@ fn remove(spec: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/** the working copy `spec` names: exact when a version was given, the only
-`scope_name@*` folder otherwise (several -> ask for the version). */
+/** the working copy `spec` names. exact when a version was given, the only
+`scope_name@*` folder otherwise, several means ask for the version. */
 fn find_working_copy(
     name: &str,
     version: Option<&semver::Version>,
@@ -458,7 +458,7 @@ fn find_working_copy(
     }
 }
 
-/** `lpm init` git-ignores .lpm-patch/ for new projects; existing ones get
+/** `lpm init` git-ignores .lpm-patch/ for new projects, existing ones get
 this nudge once a working copy appears. */
 fn remind_gitignore() {
     let Ok(contents) = fs::read_to_string(".gitignore") else {
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(slug("acme/foo", "1.0.0+build.5"), "acme_foo@1.0.0+build.5");
     }
 
-    /** the whole workstream-1 contract in one round trip: extract a tree,
+    /** the whole workstream-1 contract in one round trip. extract a tree,
     baseline it, edit, diff, apply the diff to a fresh copy of the same
     tree, end up with the edit. guarded on git like the index fixtures. */
     #[test]
@@ -525,7 +525,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, contents).unwrap();
         };
-        // the "published" tree, twice: one to edit, one to apply onto
+        // the "published" tree, twice, one to edit, one to apply onto
         for copy in ["work", "fresh"] {
             let dir = base.join(copy);
             write(&dir, "src/init.luau", "return { value = 1 }\n");
@@ -535,9 +535,9 @@ mod tests {
         let work = base.join("work");
         let in_work = work.to_string_lossy().into_owned();
         /* every step through `verbatim`, exactly as start/commit/apply run
-        it: a machine with core.autocrlf=true (git for windows' default)
+        it. a machine with core.autocrlf=true, git for windows' default,
         would otherwise clean the recorded diff and smudge CRLF back on
-        apply, and the round trip would stop being byte-exact */
+        apply, and the round trip would stop being byte exact */
         git::run(&git::verbatim(&["-C", &in_work, "init", "--quiet"])).unwrap();
         git::run(&git::verbatim(&["-C", &in_work, "add", "-A"])).unwrap();
         git::run(&git::verbatim(&[
@@ -557,7 +557,7 @@ mod tests {
         ]))
         .unwrap();
 
-        // the edit: change a file, add a new one
+        // the edit, change a file, add a new one
         write(&work, "src/init.luau", "return { value = 2 } -- patched\n");
         write(&work, "src/extra.luau", "return {}\n");
         git::run(&git::verbatim(&["-C", &in_work, "add", "-N", "."])).unwrap();

@@ -1,7 +1,7 @@
 /*!
-GitHub's REST API: the release endpoints (tool installs, `lpm self update`)
-and the user lookup the OAuth device flow ends with. Publishing no longer
-touches GitHub; that goes through lpm's own registry API.
+GitHub's REST API. The release endpoints for tool installs and `lpm self
+update`, and the user lookup the OAuth device flow ends with. Publishing no
+longer touches GitHub, that goes through lpm's own registry API.
 */
 
 const BASE_URL: &str = "https://api.github.com";
@@ -27,7 +27,7 @@ impl GithubAPI {
         Self { auth_header }
     }
 
-    /// Like `new`, but authenticated with this token; GITHUB_TOKEN is ignored.
+    /// Like `new`, but authenticated with this token. GITHUB_TOKEN is ignored.
     pub fn with_token(token: &str) -> Self {
         Self {
             auth_header: Some(format!("Bearer {token}")),

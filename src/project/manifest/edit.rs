@@ -1,5 +1,5 @@
-/*! editing side of the manifest. every command that changes lpm.toml (or the
-global tools file) needs the same steps: open the right file, reach for a table,
+/*! editing side of the manifest. every command that changes lpm.toml or the
+global tools file needs the same steps, open the right file, reach for a table,
 write it back. all of it goes through `ManifestDoc` so the toml_edit dance lives
 in one place and comments/formatting survive every write. */
 
@@ -52,7 +52,7 @@ pub struct ManifestDoc {
 
 impl ManifestDoc {
     /** opens an existing manifest. a missing project file is the friendly
-    `ManifestMissing` error rather than a raw io one; these commands get run
+    `ManifestMissing` error rather than a raw io one, these commands get run
     outside projects all the time. */
     pub fn open(scope: Scope) -> Result<Self, Error> {
         let path = scope.path()?;
@@ -63,9 +63,9 @@ impl ManifestDoc {
         Ok(ManifestDoc { path, document })
     }
 
-    /** same, except a missing global tools file starts an empty document (it only
-    exists once the first global tool is added). project manifests are still never
-    created here; that's `lpm init`'s job. */
+    /** same, except a missing global tools file starts an empty document, it only
+    exists once the first global tool is added. project manifests are still never
+    created here, that's `lpm init`'s job. */
     pub fn open_or_create(scope: Scope) -> Result<Self, Error> {
         let path = scope.path()?;
         if scope == Scope::Global && !path.exists() {
@@ -77,7 +77,7 @@ impl ManifestDoc {
         Self::open(scope)
     }
 
-    /// the table named `name`, or None when the file has no such section. a key that exists but isn't a table (`tools = 3`) is always an error.
+    /// the table named `name`, or None when the file has no such section. a key that exists but isn't a table, like `tools = 3`, is always an error.
     pub fn table(&mut self, name: &str) -> Result<Option<&mut Table>, Error> {
         match self.document.get_mut(name) {
             None => Ok(None),

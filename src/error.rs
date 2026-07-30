@@ -34,8 +34,8 @@ pub enum Error {
     AuthFailed(String),
 
     /** the registry refused a publish. `message` is the human-readable
-    `error` field from the API's response body (bad token, scope owned
-    by someone else, version already exists, ...). */
+    `error` field from the API's response body, like a bad token, a scope
+    owned by someone else, or a version that already exists. */
     #[error("Publishing failed: {message}")]
     PublishFailed { status: u16, message: String },
 

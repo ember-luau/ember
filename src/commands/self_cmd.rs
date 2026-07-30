@@ -49,7 +49,7 @@ fn install() -> Result<(), Error> {
         );
     }
 
-    /* lpx: `lpm execute` under its own name, so `lpx thing` runs things
+    /* lpx is `lpm execute` under its own name, so `lpx thing` runs things
     npx-style. a copy of the binary, like the tool shims. */
     if write_lpx_launcher(&bin_dir, &current) {
         println!("Installed the lpx launcher beside it");
@@ -63,7 +63,7 @@ fn lpx_name() -> String {
     format!("lpx{}", env::consts::EXE_SUFFIX)
 }
 
-/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning: on
+/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning. on
 windows the launcher stays locked for as long as anything it started is
 still running, and that must never sink the install or update this rides
 along with. fs::copy carries the executable bit over on unix. */
@@ -104,7 +104,7 @@ fn update() -> Result<(), Error> {
         return Ok(());
     }
 
-    // must match the asset names release.yml uploads: lpm-{os}-{arch}[.exe]
+    // must match the asset names release.yml uploads, lpm-{os}-{arch}[.exe]
     let asset_name = format!(
         "lpm-{}-{}{}",
         env::consts::OS,
@@ -124,7 +124,7 @@ fn update() -> Result<(), Error> {
 
     let bytes = crate::net::http::get_bytes(&asset.browser_download_url, &[])?;
 
-    /* the path is captured before the swap: current_exe() itself can go
+    /* the path is captured before the swap. current_exe() itself can go
     stale after self_replace renames the running file out of the way,
     but the path keeps pointing at the freshly installed binary */
     let exe_path = env::current_exe()?;
@@ -133,8 +133,8 @@ fn update() -> Result<(), Error> {
     self_replace::self_replace(&staged)?;
     fs::remove_file(&staged)?;
 
-    /* keep the lpx launcher (a copy of the binary) in step with what was
-    just installed; created on update too, so existing installs gain lpx
+    /* keep the lpx launcher, a copy of the binary, in step with what was
+    just installed. created on update too, so existing installs gain lpx
     without re-running `self install` */
     let bin_dir = paths::bin_dir()?;
     if bin_dir.is_dir() {
@@ -163,8 +163,8 @@ fn uninstall() -> Result<(), Error> {
 
     remove_from_path(&dir.join("bin"))?;
 
-    /* deleting the directory we're running from needs the self-delete dance;
-    running from elsewhere (e.g. a dev build), plain removal works */
+    /* deleting the directory we're running from needs the self-delete
+    dance. running from elsewhere, like a dev build, plain removal works */
     let running_from_install = env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok())
@@ -182,16 +182,16 @@ fn uninstall() -> Result<(), Error> {
 /// canonical schema URL, served from the lpm website
 const SCHEMA_URL: &str = "https://luaupm.com/lpm.schema.json";
 /** the file-path pattern the schema is associated with. Even Better TOML
-keys its associations by regex over the absolute document URI — which uses
-forward slashes on every platform — so this matches lpm.toml after a path
+keys its associations by regex over the absolute document URI, which uses
+forward slashes on every platform, so this matches lpm.toml after a path
 separator, but not e.g. not-lpm.toml. */
 const ASSOCIATION_PATTERN: &str = "(^|[/\\\\])lpm\\.toml$";
 /// the Even Better TOML setting associations live under
 const ASSOCIATIONS_SETTING: &str = "evenBetterToml.schema.associations";
-/// the extension that reads the association (Taplo)
+/// the extension that reads the association, Taplo
 const EXTENSION_ID: &str = "tamasfe.even-better-toml";
 
-/// a VS Code flavor: where its user settings and extensions live.
+/// a VS Code flavor, where its user settings and extensions live.
 struct Editor {
     /// product dir under the user config root, e.g. "Code - Insiders"
     name: &'static str,
@@ -227,8 +227,8 @@ const EDITORS: &[Editor] = &[
 /** points every detected VS Code flavor's settings.json at the hosted
 lpm.toml schema, so Even Better TOML provides completions and validation.
 settings.json is JSONC and hand-edited, so edits go through a CST that
-keeps comments and existing entries intact (the edited object may be
-reflowed to one key per line — that much is the CST's prerogative). */
+keeps comments and existing entries intact. the edited object may be
+reflowed to one key per line, that much is the CST's prerogative. */
 fn code() -> Result<(), Error> {
     // %APPDATA% on Windows, ~/Library/Application Support on macOS, ~/.config elsewhere
     let config_root = dirs::config_dir().ok_or(Error::NoHomeDir)?;
@@ -242,7 +242,7 @@ fn code() -> Result<(), Error> {
     }
 
     /* an editor whose settings can't be edited shouldn't fail the run when
-    every other editor is (or already was) set up */
+    every other editor is, or already was, set up */
     let mut succeeded = false;
     let mut first_error = None;
     for (editor, settings) in &detected {
@@ -260,7 +260,7 @@ fn code() -> Result<(), Error> {
                 succeeded = true;
             }
             /* repointing overwrites something the user may have set on
-            purpose (a pinned or local schema), so say what was there */
+            purpose, a pinned or local schema, so say what was there */
             Ok(Association::Updated { previous, .. }) => {
                 crate::ui::print_success(&format!(
                     "Repointed {} at {SCHEMA_URL} (was {previous})",
@@ -295,9 +295,9 @@ fn code() -> Result<(), Error> {
     Ok(())
 }
 
-/** the flavors whose settings can be edited: their product dir has a User
+/** the flavors whose settings can be edited, their product dir has a User
 dir, i.e. the editor has actually run on this machine. settings.json itself
-may not exist yet — first write creates it. */
+may not exist yet, first write creates it. */
 fn detect_editors(config_root: &Path) -> Vec<(&'static Editor, std::path::PathBuf)> {
     EDITORS
         .iter()
@@ -313,9 +313,9 @@ fn detect_editors(config_root: &Path) -> Vec<(&'static Editor, std::path::PathBu
 /// what upserting the association did to a settings file.
 #[derive(Debug)]
 enum Association {
-    /// already points at the schema; nothing written
+    /// already points at the schema, nothing written
     Current,
-    /// entry (or the whole file) created
+    /// entry or the whole file created
     Added(String),
     /// entry existed pointing elsewhere and was repointed
     Updated { text: String, previous: String },
@@ -357,8 +357,8 @@ fn configure_settings(path: &Path) -> Result<Association, Error> {
 }
 
 /** writes through a sibling temp file + rename, so an interrupted write
-can't leave a truncated settings.json — unlike lpm's own files, it isn't in
-version control. A symlinked settings.json (dotfile setups) is resolved
+can't leave a truncated settings.json. unlike lpm's own files, it isn't in
+version control. a symlinked settings.json from dotfile setups is resolved
 first so the rename lands on the real file instead of replacing the link. */
 fn write_settings(path: &Path, text: &str) -> std::io::Result<()> {
     let target = if path.exists() {
@@ -377,13 +377,13 @@ fn write_settings(path: &Path, text: &str) -> std::io::Result<()> {
     })
 }
 
-/** the pure edit: adds or repoints the lpm.toml association in JSONC text,
-touching nothing else — comments and existing entries survive. */
+/** the pure edit. adds or repoints the lpm.toml association in JSONC text,
+touching nothing else, comments and existing entries survive. */
 fn upsert_association(text: &str) -> Result<Association, String> {
     use jsonc_parser::cst::{CstInputValue, CstRootNode};
 
-    /* VS Code tolerates a UTF-8 BOM (some Windows tools write one), the
-    JSONC parser does not; carry it around the edit */
+    /* VS Code tolerates a UTF-8 BOM, some Windows tools write one, the
+    JSONC parser does not. carry it around the edit */
     let (bom, body) = match text.strip_prefix('\u{feff}') {
         Some(body) => ("\u{feff}", body),
         None => ("", text),
@@ -393,7 +393,7 @@ fn upsert_association(text: &str) -> Result<Association, String> {
 
     /* the _or_create variants still create missing values but refuse to
     overwrite existing non-object ones, where _or_set would silently delete
-    them (a user's mistyped associations value, say) */
+    them, a user's mistyped associations value, say */
     let settings = root
         .object_value_or_create()
         .ok_or_else(|| "its top-level value is not an object".to_string())?;
@@ -462,8 +462,8 @@ fn add_to_path(bin_dir: &Path) -> Result<(), Error> {
     let new_path = if path.trim().is_empty() {
         dir.to_string()
     } else {
-        /* prepended so lpm's tool shims win over other toolchain managers'
-        (aftman/rokit) shims for the same tools later in PATH */
+        /* prepended so lpm's tool shims win over aftman/rokit shims for
+        the same tools later in PATH */
         format!("{dir};{path}")
     };
     write_user_path(&env_key, &new_path)?;
@@ -515,7 +515,7 @@ fn write_user_path(env_key: &winreg::RegKey, path: &str) -> Result<(), Error> {
     use winreg::RegValue;
     use winreg::enums::RegType;
 
-    // REG_EXPAND_SZ (not REG_SZ) so existing %VAR% entries in PATH keep expanding
+    // REG_EXPAND_SZ, not REG_SZ, so existing %VAR% entries in PATH keep expanding
     let bytes = path
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -532,7 +532,7 @@ fn write_user_path(env_key: &winreg::RegKey, path: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/** tells running apps (e.g. Explorer) the environment changed, so new
+/** tells running apps like Explorer the environment changed, so new
 terminals pick up the PATH edit without logging out. */
 #[cfg(windows)]
 fn broadcast_environment_change() {
@@ -604,7 +604,7 @@ mod code_tests {
             let written = added(text);
             assert!(written.contains(ASSOCIATIONS_SETTING), "in {written:?}");
             assert!(written.contains(SCHEMA_URL), "in {written:?}");
-            // the written pattern is JSON-escaped: backslashes doubled
+            // the written pattern is JSON-escaped, backslashes doubled
             assert!(
                 written.contains(r#"(^|[/\\\\])lpm\\.toml$"#),
                 "in {written:?}"
@@ -632,8 +632,8 @@ mod code_tests {
 
     #[test]
     fn refuses_to_clobber_non_object_values() {
-        // a mistyped associations value (array) must be reported, not
-        // silently deleted; same for a non-object root
+        // a mistyped associations value like an array must be reported,
+        // not silently deleted. same for a non-object root
         let text = r#"{"evenBetterToml.schema.associations": ["oops"]}"#;
         assert!(
             upsert_association(text)
@@ -723,8 +723,8 @@ mod code_tests {
     fn detects_editors_that_have_run() {
         let root = std::env::temp_dir().join("lpm-test-self-code-detect");
         let _ = std::fs::remove_dir_all(&root);
-        // Code has run (User dir exists), Cursor is installed but never ran,
-        // the rest are absent entirely.
+        // Code has run, its User dir exists. Cursor is installed but never
+        // ran, the rest are absent entirely.
         std::fs::create_dir_all(root.join("Code").join("User")).unwrap();
         std::fs::create_dir_all(root.join("Cursor")).unwrap();
 

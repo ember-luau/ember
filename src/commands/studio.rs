@@ -16,8 +16,8 @@ pub enum StudioCommand {
     Open,
 }
 
-/** bare `lpm studio` never gets here: clap prints the studio help instead
-(arg_required_else_help in main.rs). */
+/** bare `lpm studio` never gets here, clap prints the studio help instead
+via arg_required_else_help in main.rs. */
 pub fn run(command: StudioCommand) -> Result<(), Error> {
     match command {
         StudioCommand::Init => init(),
@@ -33,8 +33,8 @@ fn init() -> Result<(), Error> {
     prompting, same as `lpm index add` */
     let mut document = ManifestDoc::open(Scope::Project)?;
 
-    /* a [studio] with anything in it (including an inline `studio = {...}`,
-    which table() rejects) is left alone. an empty table from a hand-edit
+    /* a [studio] with anything in it is left alone, including an inline
+    `studio = {...}` which table() rejects. an empty table from a hand-edit
     just gets filled in, so `open`'s "run `lpm studio init`" advice always
     works */
     let occupied = match document.table("studio") {
@@ -115,15 +115,15 @@ fn open() -> Result<(), Error> {
 }
 
 /** the deep link Roblox's own website uses for its "Edit in Studio" buttons.
-going through the protocol handler (instead of hunting for the versioned,
-auto-updating Studio executable) keeps this working across Studio updates
-on every platform, and involves no credentials: Studio authenticates the
+going through the protocol handler instead of hunting for the versioned,
+auto-updating Studio executable keeps this working across Studio updates
+on every platform, and involves no credentials. Studio authenticates the
 user itself once it opens. */
 fn place_uri(universe: u64, place: u64) -> String {
     format!("roblox-studio:1+launchmode:edit+task:EditPlace+placeId:{place}+universeId:{universe}")
 }
 
-/** everything checkable about `file` before Studio gets involved: names a
+/** everything checkable about `file` before Studio gets involved. names a
 place file, exists, and is a file rather than a folder. */
 fn validate_place_file(path: &Path) -> Result<(), Error> {
     let name = path.display().to_string();
@@ -147,8 +147,8 @@ fn is_place_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("rbxl") || ext.eq_ignore_ascii_case("rbxlx"))
 }
 
-/** validates the file prompt: non-empty and named like a place file. the
-file itself doesn't have to exist yet; building it later (e.g. `rojo build`)
+/** validates the file prompt, non-empty and named like a place file. the
+file itself doesn't have to exist yet, building it later with `rojo build`
 is normal. */
 fn validate_file_input(input: &str) -> Result<(), String> {
     let trimmed = input.trim();
@@ -161,7 +161,7 @@ fn validate_file_input(input: &str) -> Result<(), String> {
     Ok(())
 }
 
-/** parses a Roblox ID as typed at a prompt: positive integer, surrounding
+/** parses a Roblox ID as typed at a prompt, positive integer, surrounding
 whitespace ok. TOML integers are i64, so anything larger is rejected too. */
 fn parse_id(input: &str) -> Result<i64, String> {
     let trimmed = input.trim();
@@ -188,9 +188,9 @@ fn prompt_id(label: &str, help: &str) -> Result<i64, Error> {
     Ok(parse_id(&input).expect("the validator only lets numeric IDs through"))
 }
 
-/** default answer for the file prompt: "<name>.rbxl" from the `name` field
-of the project's Rojo manifest (default.project.json when present, else the
-first *.project.json alphabetically). None when there's no usable one. */
+/** default answer for the file prompt, "<name>.rbxl" from the `name` field
+of the project's Rojo manifest, default.project.json when present, else the
+first *.project.json alphabetically. None when there's no usable one. */
 fn rojo_place_default(dir: &Path) -> Option<String> {
     Some(format!("{}.rbxl", rojo_project_name(dir)?))
 }
@@ -223,7 +223,7 @@ fn rojo_project_name(dir: &Path) -> Option<String> {
 
 /** refuses to launch when the roblox-studio: protocol has no registry
 handler, i.e. Studio was never installed. HKCR merges machine-wide and
-per-user class registrations; a working handler must carry
+per-user class registrations. a working handler must carry
 shell\open\command, so a leftover bare key doesn't count. */
 #[cfg(windows)]
 fn ensure_protocol_handler() -> Result<(), Error> {
@@ -238,9 +238,9 @@ fn ensure_protocol_handler() -> Result<(), Error> {
     }
 }
 
-/** same idea for place files: no .rbxl/.rbxlx association means no Studio.
-the extension key existing is a heuristic (user-choice associations live
-elsewhere); ShellExecuteW still reports SE_ERR_NOASSOC precisely if this
+/** same idea for place files, no .rbxl/.rbxlx association means no Studio.
+the extension key existing is a heuristic, user-choice associations live
+elsewhere. ShellExecuteW still reports SE_ERR_NOASSOC precisely if this
 passes a stale key through. */
 #[cfg(windows)]
 fn ensure_file_handler(path: &Path) -> Result<(), Error> {
@@ -262,7 +262,7 @@ fn ensure_file_handler(path: &Path) -> Result<(), Error> {
 }
 
 /** LaunchServices has no cheap "who handles this?" query, but Studio only
-ever installs as RobloxStudio.app in /Applications or ~/Applications;
+ever installs as RobloxStudio.app in /Applications or ~/Applications.
 missing from both means not installed. */
 #[cfg(target_os = "macos")]
 fn studio_bundle_installed() -> bool {
@@ -286,9 +286,9 @@ fn ensure_file_handler(_path: &Path) -> Result<(), Error> {
     ensure_protocol_handler()
 }
 
-/** best effort: xdg-mime knows the scheme handler when a desktop
+/** best effort. xdg-mime knows the scheme handler when a desktop
 environment is around. failing to ask means "can't tell" and passes
-through; xdg-open still reports missing handlers at launch time. */
+through, xdg-open still reports missing handlers at launch time. */
 #[cfg(all(unix, not(target_os = "macos")))]
 fn ensure_protocol_handler() -> Result<(), Error> {
     let output = std::process::Command::new("xdg-mime")
@@ -308,13 +308,13 @@ fn ensure_protocol_handler() -> Result<(), Error> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn ensure_file_handler(_path: &Path) -> Result<(), Error> {
-    /* file-type defaults are too patchy to query reliably; xdg-open reports
+    /* file-type defaults are too patchy to query reliably, xdg-open reports
     a missing association itself, still before Studio is involved */
     Ok(())
 }
 
-/** opens `target` (URI or file path) with whatever Windows has registered
-for it. ShellExecuteW rather than a `cmd /C start` dance: it's the API
+/** opens `target`, URI or file path, with whatever Windows has registered
+for it. ShellExecuteW rather than a `cmd /C start` dance. it's the API
 `start` itself wraps, needs no shell quoting, and reports "nothing is
 registered for this" as a distinct code instead of a message to parse. */
 #[cfg(windows)]
@@ -328,7 +328,7 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
     let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
     let file: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
 
-    /* returns an HINSTANCE for historical reasons; values over 32 mean the
+    /* returns an HINSTANCE for historical reasons. values over 32 mean the
     handler launched, anything else is one of the SE_ERR_* codes */
     let result = unsafe {
         ShellExecuteW(
@@ -359,8 +359,8 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
 }
 
 /** opens `target` through LaunchServices. `open` exits non-zero for plenty
-of reasons besides a missing handler (the bundle check above rules that
-one out) and prints its own diagnosis to stderr, so the error here just
+of reasons besides a missing handler, which the bundle check above rules
+out, and prints its own diagnosis to stderr, so the error here just
 carries the code and defers to that message. */
 #[cfg(target_os = "macos")]
 fn os_open(target: &OsStr) -> Result<(), Error> {
@@ -489,7 +489,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // no project file at all: no default
+        // no project file at all, no default
         assert_eq!(rojo_place_default(&dir), None);
 
         // default.project.json wins even when others exist
@@ -512,7 +512,7 @@ mod tests {
         std::fs::write(dir.join("default.project.json"), r#"{"name": "  "}"#).unwrap();
         assert_eq!(rojo_place_default(&dir), None);
 
-        // no default.project.json: first *.project.json (sorted) is used
+        // no default.project.json, the first *.project.json in sort order is used
         std::fs::remove_file(dir.join("default.project.json")).unwrap();
         std::fs::write(dir.join("zzz.project.json"), r#"{"name": "zzz"}"#).unwrap();
         std::fs::write(dir.join("aaa.project.json"), r#"{"name": "aaa"}"#).unwrap();

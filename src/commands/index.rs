@@ -10,21 +10,21 @@ use inquire::autocompletion::{Autocomplete, Replacement};
 pub enum IndexCommand {
     /// Add an index under [indices] in lpm.toml
     Add {
-        /// Name dependencies reference the index by (e.g. wally)
+        /// Name dependencies reference the index by, e.g. wally
         name: Option<String>,
 
-        /// Git URL of the index; well-known names fill this in automatically
+        /// Git URL of the index, well-known names fill this in automatically
         url: Option<String>,
     },
 
     /// Remove an index from [indices] in lpm.toml
     Remove {
-        /// Name of the index; picked from a list when omitted
+        /// Name of the index, picked from a list when omitted
         name: Option<String>,
     },
 }
 
-/** autocomplete suggestions only; any name and url the user
+/** autocomplete suggestions only. any name and url the user
 types is accepted as-is. */
 const KNOWN_INDICES: &[(&str, &str)] = &[
     ("pesde", "https://github.com/pesde-pkg/index"),
@@ -39,7 +39,7 @@ fn known_url(name: &str) -> Option<&'static str> {
 }
 
 /** case-insensitive contains filter over a fixed list. tab completes
-the highlighted suggestion, or the only match left; free-form input
+the highlighted suggestion, or the only match left. free-form input
 is never blocked. */
 #[derive(Clone)]
 struct Suggestions(Vec<String>);
@@ -101,7 +101,7 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
 
     let url = match url {
         Some(url) => url,
-        // well-known name already gives us the url; only ask otherwise
+        // well-known name already gives us the url, only ask otherwise
         None => match known_url(&name) {
             Some(url) => url.to_string(),
             None => inquire::Text::new("Index URL:")
@@ -166,7 +166,7 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     document.save()?;
     ui::print_success(&format!("Removed index {name} from lpm.toml"));
 
-    /* deps keyed to the removed index break at the next resolve;
+    /* deps keyed to the removed index break at the next resolve,
     warn now instead of letting install fail mysteriously later */
     let dependents = manifest
         .dependencies
@@ -228,7 +228,7 @@ mod tests {
             suggestions.get_completion("wal", None).unwrap(),
             Some("wally".to_string())
         );
-        // two candidates left: nothing to complete to yet
+        // two candidates left, nothing to complete to yet
         assert_eq!(suggestions.get_completion("", None).unwrap(), None);
     }
 }

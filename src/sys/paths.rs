@@ -9,7 +9,7 @@ pub fn lpm_dir() -> Result<PathBuf, Error> {
     Ok(dirs::home_dir().ok_or(Error::NoHomeDir)?.join(".lpm"))
 }
 
-/// ~/.lpm/bin, the per-alias tool shims; `lpm self install` puts it on PATH.
+/// ~/.lpm/bin, the per-alias tool shims. `lpm self install` puts it on PATH.
 pub fn bin_dir() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("bin"))
 }
@@ -25,7 +25,7 @@ pub fn global_tools_file() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("tools.toml"))
 }
 
-/// ~/.lpm/credentials.toml, the GitHub token kept between commands (auth writes it owner-only on unix).
+/// ~/.lpm/credentials.toml, the GitHub token kept between commands. auth writes it owner-only on unix.
 pub fn credentials_file() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("credentials.toml"))
 }
@@ -35,12 +35,12 @@ pub fn index_cache_dir() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("index-cache"))
 }
 
-/// ~/.lpm/archive-cache, downloaded package archives; `lpm cache clean` deletes it.
+/// ~/.lpm/archive-cache, downloaded package archives. `lpm cache clean` deletes it.
 pub fn archive_cache_root() -> Result<PathBuf, Error> {
     Ok(lpm_dir()?.join("archive-cache"))
 }
 
-/** the versioned layer inside the archive cache: bump the folder name when
+/** the versioned layer inside the archive cache. bump the folder name when
 the entry format changes and old entries just stop being found, instead of
 being misread. */
 pub fn archive_cache_dir() -> Result<PathBuf, Error> {
@@ -48,8 +48,8 @@ pub fn archive_cache_dir() -> Result<PathBuf, Error> {
 }
 
 /** Whether two paths point at the same thing on disk. canonicalizing
-handles symlinks and casing; paths that won't canonicalize (missing
-files) count as different. */
+handles symlinks and casing. paths that won't canonicalize, like missing
+files, count as different. */
 pub fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn everything_lives_under_dot_lpm() {
-        /* skip on machines with no home dir instead of failing; the layout
+        /* skip on machines with no home dir instead of failing. the layout
         shape is all this checks. */
         let Ok(root) = lpm_dir() else {
             return;

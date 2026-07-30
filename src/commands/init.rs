@@ -39,7 +39,7 @@ struct Defaults {
 }
 
 impl Defaults {
-    /** best-effort prompt defaults scraped from git: `name` prefers owner/repo
+    /** best-effort prompt defaults scraped from git. `name` prefers owner/repo
     from the origin remote, falls back to `<git user>/<current dir>`. */
     fn guess() -> Self {
         let remote = git::output(&["remote", "get-url", "origin"]);
@@ -56,9 +56,9 @@ impl Defaults {
                 (!scope.is_empty() && !name.is_empty()).then(|| format!("{scope}/{name}"))
             });
 
-        /* authors must be GitHub usernames (the registry makes them scope
-        co-owners on publish, rejects anything else), so only guess from
-        sources that actually hold one: the login a previous `lpm publish`
+        /* authors must be GitHub usernames, the registry makes them scope
+        co-owners on publish and rejects anything else. so only guess from
+        sources that actually hold one, the login a previous `lpm publish`
         stored, then the owner of a github.com origin remote. never git
         user.name or user.email, those are display identities not usernames */
         let authors = auth::load()
@@ -75,8 +75,8 @@ impl Defaults {
     }
 }
 
-/** owner segment of a github.com https url, kept verbatim (usernames can
-have dashes, so no sanitizing). other hosts give None; a GitLab owner is
+/** owner segment of a github.com https url, kept verbatim since usernames
+can have dashes, so no sanitizing. other hosts give None, a GitLab owner is
 not a GitHub username. */
 fn github_owner(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://github.com/")?;
@@ -207,13 +207,13 @@ pub fn run() -> Result<(), Error> {
     Ok(())
 }
 
-/** git-ignores lpm's generated folders (packages output, patch working
-copies), creating .gitignore if missing. returns a message saying what
-changed, None when everything was already covered. */
+/** git-ignores lpm's generated folders, the packages output and patch
+working copies, creating .gitignore if missing. returns a message saying
+what changed, None when everything was already covered. */
 fn gitignore_lpm(path: &Path) -> Result<Option<String>, Error> {
     const ENTRIES: [&str; 2] = ["packages/", ".lpm-patch/"];
 
-    // any common spelling counts: bare, trailing slash, leading slash
+    // any common spelling counts, bare, trailing slash, leading slash
     let ignored = |contents: &str, entry: &str| {
         let bare = entry.trim_end_matches('/');
         contents.lines().map(str::trim).any(|line| {
@@ -275,7 +275,7 @@ fn parse_authors(input: &str) -> Vec<String> {
         .collect()
 }
 
-/** at least one author, all shaped like GitHub usernames; the registry
+/** at least one author, all shaped like GitHub usernames. the registry
 rejects the publish otherwise. */
 fn validate_authors(input: &str) -> Validation {
     let authors = parse_authors(input);
@@ -339,7 +339,7 @@ mod tests {
             Validation::Valid
         ));
         assert!(matches!(validate_authors("Luau-PM"), Validation::Valid));
-        /* the old default shape ("Name <email>") must be rejected,
+        /* the old default shape "Name <email>" must be rejected,
         not just no longer guessed */
         assert!(matches!(
             validate_authors("Jane Doe <jane@example.com>"),
@@ -406,7 +406,7 @@ mod tests {
             "packages/\n.lpm-patch/\n"
         );
 
-        // both there (any common spelling) leaves the file alone
+        // both there in any common spelling leaves the file alone
         assert_eq!(gitignore_lpm(&path).unwrap(), None);
         std::fs::write(&path, "/target\npackages\n/.lpm-patch\n").unwrap();
         assert_eq!(gitignore_lpm(&path).unwrap(), None);

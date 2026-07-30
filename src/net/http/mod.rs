@@ -9,14 +9,14 @@ pub mod responses;
 
 pub const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
 
-/** the client for small exchanges (index metadata, auth, JSON APIs). an
-agent pools connections (bare `ureq::get` opens a fresh TCP+TLS connection
-per request) and carries timeouts — without them a wedged registry hangs
-an install forever. the 60s overall cap is right for requests whose
-responses are small; bulk transfers go through [`bulk_agent`]. the idle
-pool is sized for the installer's worker count: ureq's default keeps a
-single idle connection per host, which would make concurrent fetches from
-one registry all pay their own handshake. */
+/** the client for small exchanges like index metadata, auth, and JSON
+APIs. an agent pools connections, bare `ureq::get` opens a fresh TCP+TLS
+connection per request, and carries timeouts, without them a wedged
+registry hangs an install forever. the 60s overall cap is right for
+requests whose responses are small, bulk transfers go through
+[`bulk_agent`]. the idle pool is sized for the installer's worker count,
+ureq's default keeps a single idle connection per host, which would make
+concurrent fetches from one registry all pay their own handshake. */
 pub fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -28,8 +28,8 @@ pub fn agent() -> &'static ureq::Agent {
     })
 }
 
-/** the client for archives and release binaries: stall-bounded (30s with
-no bytes moving fails the request) but with no overall deadline, so a
+/** the client for archives and release binaries. stall-bounded, 30s with
+no bytes moving fails the request, but with no overall deadline, so a
 20 MB tool download on a slow connection takes as long as it takes instead
 of dying at the minute mark. same pool as `agent`, different limits. */
 pub fn bulk_agent() -> &'static ureq::Agent {
@@ -54,8 +54,8 @@ fn with_headers(mut request: ureq::Request, headers: &[(&str, &str)]) -> ureq::R
 }
 
 /** Some GitHub endpoints answer 201/204 with an empty body, which serde
-won't parse; treat that as JSON `null` so `T = serde_json::Value` (or an
-Option) still deserializes. */
+won't parse. Treat that as JSON `null` so `T = serde_json::Value` or an
+Option still deserializes. */
 fn parse_json<T: DeserializeOwned>(response: ureq::Response) -> Result<T, HttpError> {
     let body = response.into_string()?;
     if body.trim().is_empty() {
@@ -79,9 +79,9 @@ pub fn post_form<T: DeserializeOwned>(
     parse_json(response)
 }
 
-/** GETs `url`, following redirects by hand: ureq 2 only auto-follows
-301/302/303, and some hosts (pesde's registry, GitHub asset redirects)
-answer 307. */
+/** GETs `url`, following redirects by hand. ureq 2 only auto-follows
+301/302/303, and some hosts like pesde's registry and GitHub asset
+redirects answer 307. */
 pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
     let mut url = url.to_string();
     for _ in 0..5 {

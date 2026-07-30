@@ -17,9 +17,9 @@ pub fn run(command: CacheCommand) -> Result<(), Error> {
     }
 }
 
-/** both caches go: archives, and the index clones — which also sweeps any
-orphaned index dirs left behind by older lpm versions that keyed them
-differently. everything here re-downloads on demand. */
+/** both caches go, archives and index clones. removing the index root
+also sweeps orphaned index dirs left behind by older lpm versions that
+keyed them differently. everything here re-downloads on demand. */
 fn clean() -> Result<(), Error> {
     let mut freed = 0;
     for root in [paths::archive_cache_root()?, paths::index_cache_dir()?] {
@@ -40,7 +40,7 @@ fn clean() -> Result<(), Error> {
     Ok(())
 }
 
-/// best-effort recursive size; an unreadable entry just doesn't count.
+/// best-effort recursive size, an unreadable entry just doesn't count.
 pub(crate) fn dir_size(dir: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;

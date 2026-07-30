@@ -81,8 +81,8 @@ fn main() {
         }
     }
 
-    /* lpx is `lpm execute` under its own name — a copy `self install`
-    drops beside lpm — so every argument belongs to execute. */
+    /* lpx is `lpm execute` under its own name, a copy `self install`
+    drops beside lpm, so every argument belongs to execute. */
     let cli = if tools::shim::invoked_as_lpx() {
         let prefix: [std::ffi::OsString; 2] = ["lpm".into(), "execute".into()];
         parse_cli(prefix.into_iter().chain(std::env::args_os().skip(1)))
@@ -93,8 +93,8 @@ fn main() {
     let started = std::time::Instant::now();
     let result = match cli.command {
         Commands::Init => commands::init::run(),
-        /* execute hands the terminal to another program: its exit code
-        passes through as-is, with no "Done in" line in its output */
+        /* execute hands the terminal to another program, so its exit code
+        passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => match commands::execute::run(args) {
             Ok(code) => std::process::exit(code),
             Err(err) => Err(err),
@@ -130,7 +130,7 @@ fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
             err.exit()
         };
 
-        // clap starts messages lowercase; capitalize to match our own errors.
+        // clap starts messages lowercase, capitalize to match our own errors.
         let message = rest.lines().next().unwrap_or(rest);
         let mut chars = message.chars();
         let capitalized = match chars.next() {
@@ -141,7 +141,7 @@ fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
         let styled = err.render().ansi().to_string();
         if let Some((_error_line, extra)) = styled.split_once('\n') {
             /* clap renders suggestions as "tip: a similar subcommand
-            exists"; drop the "tip:" label and recapitalize. */
+            exists". drop the "tip:" label and recapitalize. */
             let extra = extra
                 .replace("tip:", "")
                 .replace(" a similar", "A similar")

@@ -21,9 +21,9 @@ pub struct PublishArgs {
 pub fn run(args: PublishArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
-    /* provenance: in a GitHub Actions job with id-token permissions this
+    /* provenance. in a GitHub Actions job with id-token permissions this
     fetches an OIDC token the registry can verify the build from. anywhere
-    else (or on any failure) it's just None and nothing changes. fetched
+    else, or on any failure, it's just None and nothing changes. fetched
     once so a workspace publish doesn't re-request per member */
     let oidc_token = if args.dry_run {
         None
@@ -36,9 +36,9 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
         return publish_project(manifest, args.dry_run, oidc_token);
     }
 
-    /* a workspace root publishes the whole workspace, pesde's order: root
-    first, then every member. one package failing doesn't stop the rest;
-    the command fails at the end instead */
+    /* a workspace root publishes the whole workspace in pesde's order,
+    root first, then every member. one package failing doesn't stop the
+    rest, the command fails at the end instead */
     let workspace = Workspace::open(Path::new("."))?;
     let mut failed = Vec::new();
 
@@ -70,7 +70,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
 }
 
 /** publishes the project in the current directory. private packages and
-main-less workspace roots say so and skip instead of failing; that's how
+main-less workspace roots say so and skip instead of failing. that's how
 a container root stays unpublished while its members go out. */
 fn publish_project(
     mut manifest: Manifest,
@@ -84,7 +84,7 @@ fn publish_project(
         );
         return Ok(());
     }
-    /* a workspace root needs no `main`; without one it's a pure container
+    /* a workspace root needs no `main`, without one it's a pure container
     and only its members go out */
     let has_main = manifest
         .target
@@ -105,9 +105,9 @@ fn publish_project(
     };
     let version = semver::Version::parse(&manifest.package.version)?;
 
-    /* the API appends [package] authors to the scope's owner list (each one
-    can then publish to the whole scope) and 400s anything not shaped like
-    a GitHub username; catch that before packing. it does NOT check the
+    /* the API appends [package] authors to the scope's owner list, each one
+    can then publish to the whole scope, and 400s anything not shaped like
+    a GitHub username. catch that before packing. it does NOT check the
     account exists, so a typo silently grants a stranger-to-be */
     if let Some(author) = manifest
         .package
@@ -120,10 +120,10 @@ fn publish_project(
         )));
     }
 
-    // the API 400s descriptions past its cap; catch that before packing too
+    // the API 400s descriptions past its cap, catch that before packing too
     validate_description(manifest.package.description.as_deref())?;
 
-    /* workspace deps become registry ones in the archive's manifest;
+    /* workspace deps become registry ones in the archive's manifest,
     the on-disk lpm.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
     strip_local_tables(&mut manifest);
@@ -132,8 +132,8 @@ fn publish_project(
     let files = pack::packed_files(root, &manifest)?;
     let archive = ui::with_spinner("Packing package", || pack::pack(root, &manifest))?;
 
-    /* the API answers 413 past its cap; failing here saves the upload
-    (and lets --dry-run catch it too) */
+    /* the API answers 413 past its cap, failing here saves the upload
+    and lets --dry-run catch it too */
     if archive.len() > registry::MAX_ARCHIVE_BYTES {
         return Err(Error::PublishTooLarge {
             size_mb: archive.len() as f64 / (1024.0 * 1024.0),
@@ -157,8 +157,8 @@ fn publish_project(
         return Ok(());
     }
 
-    /* stored credentials first; the device flow (and the index clone that
-    provides its client id) only when nothing is stored yet */
+    /* stored credentials first. the device flow, and the index clone that
+    provides its client id, only when nothing is stored yet */
     let credentials = match auth::load()? {
         Some(credentials) => credentials,
         None => auth::login(&oauth_client_id()?)?,
@@ -166,7 +166,7 @@ fn publish_project(
 
     match upload(&credentials.token, oidc_token, &archive) {
         /* 401 means the stored token was revoked or expired, not that this
-        publish is doomed: forget it, log in fresh, retry once */
+        publish is doomed. forget it, log in fresh, retry once */
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
@@ -184,10 +184,10 @@ fn publish_project(
     Ok(())
 }
 
-/** rewrites workspace deps into registry ones, pesde's conversion exactly:
+/** rewrites workspace deps into registry ones, pesde's conversion exactly.
 the requirement is the specifier's version type applied to the member's
-current on-disk version (`^` + `1.2.3` -> `^1.2.3`; a full requirement
-passes through), and the member's `default` index url gets baked in when
+current on-disk version, `^` + `1.2.3` -> `^1.2.3`, and a full requirement
+passes through. the member's `default` index url gets baked in when
 it points somewhere other than lpm's own registry. */
 fn convert_workspace_dependencies(
     manifest: &mut Manifest,
@@ -239,7 +239,7 @@ fn convert_workspace_dependencies(
 
 /** tables that never travel, dropped from the archive's manifest.
 [overrides] is only ever consulted on the installing project, and its
-alias-form values refer to aliases only this manifest has; [patches] points
+alias-form values refer to aliases only this manifest has. [patches] points
 at files in this repo, which the archive doesn't carry. shipping either
 would just mislead readers of the packed manifest. */
 fn strip_local_tables(manifest: &mut Manifest) {
@@ -247,7 +247,7 @@ fn strip_local_tables(manifest: &mut Manifest) {
     manifest.patches.clear();
 }
 
-/// registry caps descriptions at 200 chars; counted as chars, not bytes.
+/// registry caps descriptions at 200 chars, counted as chars, not bytes.
 fn validate_description(description: Option<&str>) -> Result<(), Error> {
     let Some(description) = description else {
         return Ok(());
@@ -269,10 +269,10 @@ fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), E
 }
 
 /** OAuth app client id for the device flow. lives in the lpm index's
-config.toml (not in the binary) so it can rotate without a CLI release. */
+config.toml, not in the binary, so it can rotate without a CLI release. */
 fn oauth_client_id() -> Result<String, Error> {
-    /* a stale oauth id is harmless (it rotates roughly never), so any
-    cached copy will do; a first-ever run still clones */
+    /* a stale oauth id is harmless, it rotates roughly never, so any
+    cached copy will do. a first-ever run still clones */
     let index = Index::open(DEFAULT_INDEX_URL, crate::registry::index::Refresh::Never)?;
     index
         .github_oauth_id()
@@ -280,7 +280,7 @@ fn oauth_client_id() -> Result<String, Error> {
         .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
-/// published packages must say where their code runs; the index entry is keyed by it.
+/// published packages must say where their code runs, the index entry is keyed by it.
 fn publish_environment(manifest: &Manifest) -> Result<Environment, Error> {
     manifest
         .target
@@ -327,7 +327,7 @@ mod tests {
         let mut manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
         convert_workspace_dependencies(&mut manifest, &member_dir).unwrap();
 
-        /* "~" + the member's on-disk 1.2.3 -> "~1.2.3"; no index written
+        /* "~" + the member's on-disk 1.2.3 -> "~1.2.3", no index written
         since the member publishes to lpm's own registry */
         assert!(matches!(
             &manifest.dependencies["core"],
@@ -386,7 +386,7 @@ mod tests {
             validate_description(Some(&"a".repeat(201))),
             Err(Error::ManifestInvalid(_))
         ));
-        // chars, not bytes: 200 two-byte chars are still fine
+        // chars, not bytes, 200 two-byte chars are still fine
         assert!(validate_description(Some(&"é".repeat(200))).is_ok());
     }
 }

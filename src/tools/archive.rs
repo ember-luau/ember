@@ -1,4 +1,4 @@
-/*! Turning a GitHub release into a binary: which asset fits this platform,
+/*! Turning a GitHub release into a binary. which asset fits this platform,
 how to unpack it, and which of the unpacked files is the tool. */
 
 use crate::error::Error;
@@ -17,8 +17,8 @@ const METADATA_SUFFIXES: &[&str] = &[
     ".pem",
 ];
 
-/** Asset-name spellings for an OS. matching is word-start anchored (see
-`contains_word_start`) so the "win" alias doesn't hit "darwin". */
+/** Asset-name spellings for an OS. matching is word-start anchored, see
+`contains_word_start`, so the "win" alias doesn't hit "darwin". */
 fn os_aliases(os: &str) -> &'static [&'static str] {
     match os {
         "windows" => &["windows", "win64", "win32", "win"],
@@ -37,7 +37,7 @@ fn arch_aliases(arch: &str) -> &'static [&'static str] {
     }
 }
 
-/** Picks the release asset for an os/arch pair (std::env::consts values).
+/** Picks the release asset for an os/arch pair, std::env::consts values.
 prefers a full OS+arch match, falling back to OS-only since many tools
 ship one arch per OS. None means nothing fits. */
 pub fn select_asset<'a>(assets: &'a [Asset], os: &str, arch: &str) -> Option<&'a Asset> {
@@ -69,9 +69,9 @@ fn matches_any(name: &str, aliases: &[&str]) -> bool {
     aliases.iter().any(|alias| contains_word_start(name, alias))
 }
 
-/** True when `needle` sits at a word start in `haystack` (string start or
-right after a non-alphanumeric). keeps short aliases honest: "win"
-matches "win64" and "tool-win.zip" but not "darwin". */
+/** True when `needle` sits at a word start in `haystack`, meaning the
+string start or right after a non-alphanumeric. keeps short aliases
+honest, "win" matches "win64" and "tool-win.zip" but not "darwin". */
 fn contains_word_start(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -124,13 +124,13 @@ enum Kind {
     Zip,
     TarGz,
     Tar,
-    /// not an archive: the asset is the executable itself.
+    /// not an archive, the asset is the executable itself.
     Raw,
 }
 
 /** Decides how to unpack an asset. content is magic-byte sniffed rather
 than trusted from the file name because ureq transparently decodes
-Content-Encoding: gzip (see index::download); only plain tar, which has
+Content-Encoding: gzip, see index::download. only plain tar, which has
 no leading magic, falls back to the name. */
 fn kind(name: &str, bytes: &[u8]) -> Kind {
     if bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
@@ -159,9 +159,9 @@ pub fn collect_files(dir: &Path, files: &mut Vec<(PathBuf, u64)>) -> Result<(), 
 }
 
 /** Picks the tool's executable among the extracted files. on platforms with
-an exe suffix (windows) files carrying it are preferred; within the pool
-a file named after the repo or alias wins, else the largest file
-(archives bundle READMEs, licenses, completions). */
+an exe suffix, meaning windows, files carrying it are preferred. within
+the pool a file named after the repo or alias wins, else the largest
+file, since archives bundle READMEs, licenses, completions. */
 pub fn pick_executable(
     files: &[(PathBuf, u64)],
     repo: &str,
@@ -257,7 +257,7 @@ mod tests {
             select_asset(&list, "windows", "x86_64").unwrap().name,
             "rojo-7.4.4-windows-x86_64.zip"
         );
-        // no macos x86_64 build exists: fall back to the OS-only match.
+        // no macos x86_64 build exists, so fall back to the OS-only match.
         assert_eq!(
             select_asset(&list, "macos", "x86_64").unwrap().name,
             "rojo-7.4.4-macos-aarch64.zip"
@@ -317,8 +317,8 @@ mod tests {
     fn sniffs_archive_kinds() {
         assert_eq!(kind("tool.zip", b"PK\x03\x04rest of zip"), Kind::Zip);
         assert_eq!(kind("tool.tar.gz", &[0x1f, 0x8b, 0x08, 0x00]), Kind::TarGz);
-        /* magic bytes win over the name: a ".tar" that's really gzipped
-        (ureq didn't decode it) still gets gunzipped. */
+        /* magic bytes win over the name. a ".tar" that's really gzipped
+        because ureq didn't decode it still gets gunzipped. */
         assert_eq!(kind("tool.tar", &[0x1f, 0x8b, 0x08, 0x00]), Kind::TarGz);
         assert_eq!(kind("tool.tar", b"plain tar header bytes"), Kind::Tar);
         assert_eq!(kind("tool.exe", b"MZ\x90\x00"), Kind::Raw);
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn picks_executables_from_extracted_files() {
-        // unix: a file named after the tool beats the largest file.
+        // on unix a file named after the tool beats the largest file.
         let files = vec![
             (PathBuf::from("staging/README.md"), 10_000),
             (PathBuf::from("staging/bin/stylua"), 2_000),
@@ -361,7 +361,7 @@ mod tests {
             PathBuf::from("staging/fmt")
         );
 
-        // windows: .exe files win over everything else.
+        // on windows .exe files win over everything else.
         let files = vec![
             (PathBuf::from("staging/README.md"), 10_000),
             (PathBuf::from("staging/rojo.exe"), 5_000),
@@ -371,7 +371,7 @@ mod tests {
             PathBuf::from("staging/rojo.exe")
         );
 
-        // no name match anywhere: the largest file wins.
+        // no name match anywhere, the largest file wins.
         let files = vec![
             (PathBuf::from("staging/helper"), 10),
             (PathBuf::from("staging/tool-v2"), 9_000),

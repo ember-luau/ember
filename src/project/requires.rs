@@ -9,26 +9,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /** rewrites every mappable `require(script...)` chain under the package's
-entry module. `entry` is the normalized entry point ("" = root init, "src" =
-dir module, "lib" = single file). returns how many requires got rewritten.
+entry module. `entry` is the normalized entry point, "" = root init, "src" =
+dir module, "lib" = single file. returns how many requires got rewritten.
 
-how the mapping works:
-- paths come out instance-relative, string-require style: "./" is siblings,
+how the mapping works.
+- paths come out instance-relative, string-require style. "./" is siblings,
   "@self/" is children. an init file IS its folder, so its whole frame sits
   one level above a plain file's
 - climbing exactly one level past the module root means a wally dependency
-  alias; those wait for `rewrite_escape_requires` — this pass can't know
+  alias. those wait for `rewrite_escape_requires`, this pass can't know
   which environment folder each alias's nested link lands in
-- anything weirder (children of a plain file module, climbing further, non
-  literal segments) gets skipped */
+- anything weirder, children of a plain file module, climbing further, non
+  literal segments, gets skipped */
 pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usize, Error> {
     rewrite_requires(package_dir, entry, None)
 }
 
 /** the second half, run from the nested-link phase once every dependency's
-environment is known: maps chains that climb exactly one level past the
-module root (wally's alias zone) onto the package's OWN nested links,
-`packages/<env>/<alias>`. `aliases` is alias -> environment folder name;
+environment is known. maps chains that climb exactly one level past the
+module root, wally's alias zone, onto the package's OWN nested links,
+`packages/<env>/<alias>`. `aliases` is alias -> environment folder name.
 aliases absent from it stay untouched, like any other unmappable chain. */
 pub fn rewrite_escape_requires(
     package_dir: &Path,
@@ -43,7 +43,7 @@ fn rewrite_requires(
     entry: &str,
     aliases: Option<&BTreeMap<String, String>>,
 ) -> Result<usize, Error> {
-    // where the mounted tree starts; files outside it have no instance position
+    // where the mounted tree starts, files outside it have no instance position
     let (module_root, single_file) = if entry.is_empty() {
         (PathBuf::new(), None)
     } else if package_dir.join(format!("{entry}.luau")).is_file()
@@ -62,7 +62,7 @@ fn rewrite_requires(
     };
 
     let files: Vec<PathBuf> = match &single_file {
-        // a lone file module mounts by itself; its siblings aren't in the tree
+        // a lone file module mounts by itself, its siblings aren't in the tree
         Some(entry_path) => ["luau", "lua"]
             .iter()
             .map(|ext| package_dir.join(entry_path).with_extension(ext))
@@ -113,9 +113,9 @@ struct FileContext<'a> {
     is_init: bool,
     /// how many dirs the file's folder sits below the module root.
     depth_in_module: usize,
-    /// same but below the package folder; escape targets climb this far up.
+    /// same but below the package folder, escape targets climb this far up.
     depth_in_package: usize,
-    /// alias -> environment folder for escape requires; None leaves them alone.
+    /// alias -> environment folder for escape requires. None leaves them alone.
     aliases: Option<&'a BTreeMap<String, String>>,
 }
 
@@ -144,7 +144,7 @@ fn luau_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
 }
 
 /** rewrites all mappable chains in one file. None = nothing to change, and
-that path allocates nothing: the scan only records ranges, the new string
+that path allocates nothing. the scan only records ranges, the new string
 only gets built when a chain actually matched. matters because this runs
 over every file of every installed package. */
 fn rewrite_source(source: &str, context: &FileContext) -> Option<(String, usize)> {
@@ -172,7 +172,7 @@ fn rewrite_source(source: &str, context: &FileContext) -> Option<(String, usize)
     Some((output, chains.len()))
 }
 
-/// scan pass: finds every mappable chain as (start, end, replacement path).
+/// scan pass, finds every mappable chain as (start, end, replacement path).
 fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String)> {
     let bytes = source.as_bytes();
     let mut found = Vec::new();
@@ -233,8 +233,8 @@ fn parse_chain(
     }
     position = skip_ws(bytes, position + "script".len());
 
-    /* walk the chain file-relative: `leaf` means we're at the file itself
-    (a non-init module), `ups` counts how far above the file's dir we are */
+    /* walk the chain file-relative. `leaf` means we're at the file itself,
+    a non-init module, `ups` counts how far above the file's dir we are */
     let mut leaf = !context.is_init;
     let mut ups = 0usize;
     let mut names: Vec<String> = Vec::new();
@@ -303,12 +303,12 @@ fn parse_chain(
     }
 
     if leaf || (ups == 0 && names.is_empty()) {
-        return None; // require(script) / require(script.Parent): nothing to point at
+        return None; // require(script) / require(script.Parent), nothing to point at
     }
 
-    /* string requires resolve instance-relative: "./" is the module's
+    /* string requires resolve instance-relative. "./" is the module's
     siblings, "@self/" its children. an init file IS its folder, so its
-    frame sits one level higher than a plain file's: children need @self,
+    frame sits one level higher than a plain file's. children need @self,
     and every Parent hop renders with one less "../" */
     let init_shift = usize::from(context.is_init);
     let path = if ups <= context.depth_in_module {
@@ -325,14 +325,14 @@ fn parse_chain(
             }
         }
     } else if ups == context.depth_in_module + 1 && names.len() == 1 {
-        /* one level above the module root is wally's alias zone: the
+        /* one level above the module root is wally's alias zone, the
         package's own nested link for that alias, packages/<env>/<alias>.
         the env folder is only known once dependencies are resolved, so
-        pass one (aliases = None) leaves these chains for
+        pass one, aliases = None, leaves these chains for
         `rewrite_escape_requires` to come back for */
         let environment = context.aliases?.get(&names[0])?;
         if context.depth_in_package + 1 == init_shift {
-            // a root init: the packages folder is among its own children
+            // a root init, the packages folder is among its own children
             format!("@self/packages/{environment}/{}", names[0])
         } else {
             let string_ups = context.depth_in_package - init_shift;
@@ -385,7 +385,7 @@ fn take_ident(source: &str, position: usize) -> Option<(usize, &str)> {
     Some((end, &source[position..end]))
 }
 
-/// a quoted "name" / 'name'; escapes and empty names bail (not worth mapping).
+/// a quoted "name" / 'name'. escapes and empty names bail, not worth mapping.
 fn take_string(source: &str, position: usize) -> Option<(usize, String)> {
     let bytes = source.as_bytes();
     let quote = *bytes.get(position)?;
@@ -405,7 +405,7 @@ fn take_string(source: &str, position: usize) -> Option<(usize, String)> {
     Some((end + 1, source[position + 1..end].to_string()))
 }
 
-/// `--` line or `--[[ ]]` block comment starting at `position`; returns the end.
+/// `--` line or `--[[ ]]` block comment starting at `position`. returns the end.
 fn skip_comment(bytes: &[u8], position: usize) -> usize {
     let after = position + 2;
     if long_bracket_level(bytes, after).is_some() {
@@ -477,7 +477,7 @@ mod tests {
         FileContext {
             is_init,
             depth_in_module,
-            // package with module root "src": file dir depth is one more
+            // package with module root "src", file dir depth is one more
             depth_in_package: depth_in_module + 1,
             aliases: None,
         }
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn init_parent_hops_render_one_level_shorter() {
-        // src/Sub/init.luau: script.Parent.X is src/X, a sibling, so "./"
+        // in src/Sub/init.luau, script.Parent.X is src/X, a sibling, so "./"
         let context = dir_module(1, true);
         let (out, count) = rewrite_source(
             "local A = require(script.Parent.Util)\n\
@@ -532,8 +532,8 @@ mod tests {
 
     #[test]
     fn escaping_the_module_root_lands_on_dependency_links() {
-        /* src/init.luau doing require(script.Parent.Signal): wally would
-        find the alias next to the package; ours is the package's OWN
+        /* src/init.luau doing require(script.Parent.Signal). wally would
+        find the alias next to the package, ours is the package's OWN
         nested link, packages/<env>/Signal. only the nested-link phase
         knows <env>, so the first pass must leave the chain alone... */
         let context = dir_module(0, true);
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(out, "local Dep = require(\"../packages/shared/Signal\")\n");
 
-        // a root init's packages folder is among its own children: @self
+        // a root init's packages folder is among its own children, so @self
         let root_init = FileContext {
             is_init: true,
             depth_in_module: 0,
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn multibyte_text_survives_the_scan() {
-        // satset ships comments with chars like 'ᴗ'; byte-stepping used to panic
+        // satset ships comments with chars like 'ᴗ', byte-stepping used to panic
         let context = dir_module(0, true);
         let source = "local face = \"(ᴗ_ᴗ)\" -- ᴗ\nlocal x = require(script.Core) .. \"日本語\"\n";
         let (out, count) = rewrite_source(source, &context).unwrap();
@@ -651,7 +651,7 @@ mod tests {
         write("src/init.luau", "return require(script.Core)\n");
         write("src/Core/init.luau", "return require(script.Parent.Util)\n");
         write("src/Util.luau", "return {}\n");
-        // outside the module root: not mounted, stays untouched
+        // outside the module root, not mounted, stays untouched
         write("tests/spec.luau", "require(script.Parent.Whatever)\n");
 
         let rewritten = rewrite_instance_requires(&base, "src").unwrap();
