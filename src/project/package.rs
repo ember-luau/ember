@@ -266,48 +266,60 @@ pub fn environment(dir: &Path) -> Option<Environment> {
 
 /** an extracted package's declared runtime dependencies, as (alias,
 lowercased package name) pairs — what install's nested-link pass consumes.
-the first manifest with a [dependencies] table wins, same priority order as
-the other readers here: lpm.toml (each entry's `name` key), pesde.toml
-(`name`, or `wally` for wally-sourced entries), wally.toml
-(`alias = "scope/name@req"`). runtime dependencies only — dev/peer/server
-tables don't ship in the consumer's tree, so they get no links. missing or
-unparseable manifests read as no dependencies, same stance as
-`toml_string`. */
+the first manifest with a matching table wins, same priority order as the
+other readers here: lpm.toml (each entry's `name` key), pesde.toml (`name`,
+or `wally` for wally-sourced entries), wally.toml
+(`alias = "scope/name@req"`). wally splits runtime deps by realm, so its
+[server-dependencies] count too — the resolver installs them (wally.rs
+chains both tables) and a server-realm package like lyra declares ALL its
+deps there; reading only [dependencies] starved those packages of nested
+links and left their escape requires unrewritten. dev/peer tables stay
+out. missing or unparseable manifests read as no dependencies, same stance
+as `toml_string`. */
 pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
-    /// how one manifest flavor names the package a [dependencies] entry means
+    /// how one manifest flavor names the package a dependency entry means
     type DependencyName = fn(&toml::Value) -> Option<String>;
 
-    let manifests: [(&str, DependencyName); 3] = [
-        ("lpm.toml", |entry| {
+    let manifests: [(&str, &[&str], DependencyName); 3] = [
+        ("lpm.toml", &["dependencies"], |entry| {
             Some(entry.get("name")?.as_str()?.to_string())
         }),
-        ("pesde.toml", |entry| {
+        ("pesde.toml", &["dependencies"], |entry| {
             let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
             // pesde serializes wally package names with a "wally#" prefix
             Some(name.strip_prefix("wally#").unwrap_or(name).to_string())
         }),
-        ("wally.toml", |entry| {
-            let spec = entry.as_str()?;
-            Some(
-                spec.split_once('@')
-                    .map_or(spec, |(name, _)| name)
-                    .to_string(),
-            )
-        }),
+        (
+            "wally.toml",
+            &["dependencies", "server-dependencies"],
+            |entry| {
+                let spec = entry.as_str()?;
+                Some(
+                    spec.split_once('@')
+                        .map_or(spec, |(name, _)| name)
+                        .to_string(),
+                )
+            },
+        ),
     ];
 
-    for (file, dependency_name) in manifests {
+    for (file, tables, dependency_name) in manifests {
         let Some(parsed) = fs::read_to_string(dir.join(file))
             .ok()
             .and_then(|text| text.parse::<toml::Value>().ok())
         else {
             continue;
         };
-        let Some(table) = parsed.get("dependencies").and_then(toml::Value::as_table) else {
-            continue;
-        };
-        return table
+        let found: Vec<_> = tables
             .iter()
+            .filter_map(|table| parsed.get(*table).and_then(toml::Value::as_table))
+            .collect();
+        if found.is_empty() {
+            continue;
+        }
+        return found
+            .into_iter()
+            .flat_map(|table| table.iter())
             // entries this flavor can't name (e.g. workspace specifiers) are skipped
             .filter_map(|(alias, entry)| {
                 Some((alias.clone(), dependency_name(entry)?.trim().to_lowercase()))
@@ -454,6 +466,30 @@ mod tests {
         assert_eq!(
             declared_dependencies(&wally),
             [("Promise".to_string(), "evaera/promise".to_string())]
+        );
+
+        /* wally splits runtime deps by realm: a server package (lyra) puts
+        ALL its deps under [server-dependencies]; both tables count, dev
+        still doesn't */
+        let server = base.join("wally-server");
+        write_package(
+            &server,
+            "wally.toml",
+            "[package]\nrealm = \"server\"\n\n\
+             [dependencies]\nSignal = \"a/signal@^1\"\n\n\
+             [server-dependencies]\nPromise = \"evaera/promise@4.0.0\"\n\
+             GreenTea = \"corecii/greentea@0.4.11\"\n\n\
+             [dev-dependencies]\nJest = \"jsdotlua/jest@3.10.0\"\n",
+        );
+        let mut server_deps = declared_dependencies(&server);
+        server_deps.sort();
+        assert_eq!(
+            server_deps,
+            [
+                ("GreenTea".to_string(), "corecii/greentea".to_string()),
+                ("Promise".to_string(), "evaera/promise".to_string()),
+                ("Signal".to_string(), "a/signal".to_string()),
+            ]
         );
 
         // no manifests at all -> no dependencies.
