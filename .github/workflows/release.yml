@@ -31,7 +31,9 @@ jobs:
   # Publishing is irreversible: a crates.io version can be yanked but never
   # replaced or re-uploaded. So it waits for the binaries, which is where a
   # broken build actually shows up, and it runs once rather than per platform.
-  # Needs a CARGO_REGISTRY_TOKEN secret with publish-update scope on luaupm.
+  # Needs the CRATES_SECRET repo secret, a crates.io token with publish-update
+  # scope on luaupm. cargo only reads it as CARGO_REGISTRY_TOKEN, hence the
+  # rename on the way in.
   publish-crate:
     name: Publish to crates.io
     needs: build
@@ -48,7 +50,7 @@ jobs:
       # not a red job. Any other failure still fails the workflow.
       - name: Publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_SECRET }}
         run: |
           # without pipefail the `if` would read tee's status, not cargo's,
           # and every failed publish would look like a success
