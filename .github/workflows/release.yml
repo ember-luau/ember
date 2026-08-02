@@ -28,6 +28,44 @@ jobs:
             exit 1
           fi
 
+  # Publishing is irreversible: a crates.io version can be yanked but never
+  # replaced or re-uploaded. So it waits for the binaries, which is where a
+  # broken build actually shows up, and it runs once rather than per platform.
+  # Needs the CRATES_SECRET repo secret, a crates.io token with publish-update
+  # scope on luaupm. cargo only reads it as CARGO_REGISTRY_TOKEN, hence the
+  # rename on the way in.
+  publish-crate:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Verification is left on deliberately. It builds the packaged crate,
+      # which is the only thing that catches an `exclude` in Cargo.toml having
+      # dropped a file the build needs, and the job above never sees that.
+      #
+      # Re-running a release whose upload already landed should be a no-op,
+      # not a red job. Any other failure still fails the workflow.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_SECRET }}
+        run: |
+          # without pipefail the `if` would read tee's status, not cargo's,
+          # and every failed publish would look like a success
+          set -o pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if cargo publish --locked 2>&1 | tee publish.log; then
+            echo "Published luaupm $version"
+            exit 0
+          fi
+          if grep -qE "already (uploaded|exists)" publish.log; then
+            echo "luaupm $version is already on crates.io, nothing to do"
+            exit 0
+          fi
+          exit 1
+
   build:
     name: Build (${{ matrix.asset }})
     needs: verify-version

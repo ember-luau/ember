@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::net::github::GithubAPI;
+use crate::project::hooks::{self, Lifecycle};
 use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
 use crate::project::manifest::{self, Environment, Manifest, Tool};
 use crate::project::package;
@@ -80,6 +81,13 @@ type ToolJob = (String, Tool, bool);
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
+
+    /* the root's hooks bracket the whole command, members included, so a
+    `postinstall` that builds the project sees a fully installed tree.
+    each member's own hooks bracket only that member, in its own directory */
+    let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);
+    lifecycle.before()?;
+
     install_project(&args, &manifest, true)?;
 
     /* a workspace root installs every member too, pesde's order, root
@@ -94,11 +102,15 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             println!("Installing {}", member.manifest.package.name);
             workspace::in_dir(&member.dir, || {
                 let manifest = Manifest::load()?;
-                install_project(&args, &manifest, false)
+                let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);
+                lifecycle.before()?;
+                install_project(&args, &manifest, false)?;
+                lifecycle.after()
             })?;
         }
     }
-    Ok(())
+
+    lifecycle.after()
 }
 
 /** installs one project from the current directory. global tools only

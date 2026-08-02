@@ -50,6 +50,24 @@ pub fn print_success(message: &str) {
     println!("{}", success_line(message));
 }
 
+/** npm's script banner, dimmed: which package's script this is, then the
+command line it expands to.
+
+```text
+> acme/rocket@0.1.0 build
+> rojo build -o game.rbxl --watch
+```
+
+Printed for every script lpm runs, hooks included, because the whole point
+is that output arriving next has an attributable source -- doubly so for a
+hook, which nobody typed. `package` is "scope/name@version". */
+pub fn print_script_notice(package: &str, name: &str, command: &str) {
+    println!("{}", format!("> {package} {name}").dark_grey());
+    println!("{}", format!("> {command}").dark_grey());
+    // separates the banner from whatever the script itself prints
+    println!();
+}
+
 /** Prints a line to stdout while `bar` is live. `ProgressBar::println` goes
 through the bar's draw target, which writes to stderr on a terminal and
 swallows the line entirely when piped. suspending keeps the line on

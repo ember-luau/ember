@@ -25,6 +25,27 @@ enum Commands {
     /// Runs a script from lpm.toml
     Run(commands::run::RunArgs),
 
+    /* the four [scripts] names that double as subcommands, npm's
+    test/start/stop/restart idea. real variants rather than a fallback for
+    unrecognized commands, so they appear in --help, error like any other
+    command, and the set stays a decision instead of "whatever the manifest
+    happens to define". the list lives in commands::run::SHORTCUTS. */
+    /// Runs the `build` script from lpm.toml
+    Build(commands::run::ShortcutArgs),
+
+    /// Runs the `test` script from lpm.toml
+    Test(commands::run::ShortcutArgs),
+
+    /// Runs the `start` script from lpm.toml
+    Start(commands::run::ShortcutArgs),
+
+    /// Runs the `serve` script from lpm.toml
+    Serve(commands::run::ShortcutArgs),
+
+    /// Runs the `fmt` (or `format`) script from lpm.toml
+    #[command(visible_alias = "format")]
+    Fmt(commands::run::ShortcutArgs),
+
     /// Download (if needed) and run a GitHub-released executable
     #[command(visible_alias = "x")]
     Execute(commands::execute::ExecuteArgs),
@@ -109,47 +130,144 @@ fn main() {
         Commands::Tool(command) => commands::tool::run(command),
         Commands::Studio { command } => commands::studio::run(command),
         Commands::Run(args) => commands::run::run(args),
+        Commands::Build(args) => commands::run::shortcut(&["build"], args),
+        Commands::Test(args) => commands::run::shortcut(&["test"], args),
+        Commands::Start(args) => commands::run::shortcut(&["start"], args),
+        Commands::Serve(args) => commands::run::shortcut(&["serve"], args),
+        Commands::Fmt(args) => commands::run::shortcut(&commands::run::FMT_NAMES, args),
     };
 
     match result {
         Ok(()) => ui::print_elapsed(started.elapsed()),
         Err(err) => {
             ui::print_error(&err.to_string());
-            std::process::exit(1);
+            std::process::exit(err.exit_code());
         }
     }
 }
 
-/** Parses arguments, restyling clap's hardcoded "error: <message>" line as
-an accent "✗ <message>" while keeping the styled usage/tip lines below. */
 fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
-    Cli::try_parse_from(args).unwrap_or_else(|err| {
-        let plain = err.render().to_string();
-        // help and version output pass through clap untouched.
-        let Some(rest) = plain.strip_prefix("error: ") else {
-            err.exit()
-        };
+    Cli::try_parse_from(args).unwrap_or_else(|err| report_parse_error(err))
+}
 
-        // clap starts messages lowercase, capitalize to match our own errors.
-        let message = rest.lines().next().unwrap_or(rest);
-        let mut chars = message.chars();
-        let capitalized = match chars.next() {
-            Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        };
-        ui::print_error(&capitalized);
-        let styled = err.render().ansi().to_string();
-        if let Some((_error_line, extra)) = styled.split_once('\n') {
-            /* clap renders suggestions as "tip: a similar subcommand
-            exists". drop the "tip:" label and recapitalize. */
-            let extra = extra
-                .replace("tip:", "")
-                .replace(" a similar", "A similar")
-                .replace(" some similar", "Some similar");
-            eprint!("{extra}");
-        }
+/** Points at `lpm run <name>` when the unrecognized subcommand turns out to
+be a script this project defines.
 
-        // usage errors exit 2, matching clap.
-        std::process::exit(2)
+Only four script names double as subcommands, so `lpm fmt` is a mistake
+people will make -- and "unrecognized subcommand 'fmt'" is a bad answer when
+lpm.toml plainly has an `fmt` script. None for anything else, including a
+name that is simply nobody's script, which keeps clap's own did-you-mean
+suggestion the only thing said about it. */
+fn script_hint(err: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue};
+
+    if err.kind() != clap::error::ErrorKind::InvalidSubcommand {
+        return None;
+    }
+    let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+
+    let manifest = project::manifest::Manifest::load().ok()?;
+    manifest.scripts.contains_key(name).then(|| {
+        format!(
+            "'{name}' is a script in lpm.toml; run it with `lpm run {name}` (only {} can drop `run`)",
+            commands::run::shortcut_list()
+        )
     })
+}
+
+/** Reports a clap parse failure, restyling its hardcoded "error: <message>"
+line as an accent "✗ <message>" while keeping the styled usage/tip lines
+below. Exits rather than returning. */
+fn report_parse_error(err: clap::Error) -> ! {
+    let plain = err.render().to_string();
+    // help and version output pass through clap untouched.
+    let Some(rest) = plain.strip_prefix("error: ") else {
+        err.exit()
+    };
+
+    // clap starts messages lowercase, capitalize to match our own errors.
+    let message = rest.lines().next().unwrap_or(rest);
+    let mut chars = message.chars();
+    let capitalized = match chars.next() {
+        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    };
+    ui::print_error(&capitalized);
+    if let Some(hint) = script_hint(&err) {
+        eprintln!("{hint}");
+    }
+    let styled = err.render().ansi().to_string();
+    if let Some((_error_line, extra)) = styled.split_once('\n') {
+        /* clap renders suggestions as "tip: a similar subcommand
+        exists". drop the "tip:" label and recapitalize. */
+        let extra = extra
+            .replace("tip:", "")
+            .replace(" a similar", "A similar")
+            .replace(" some similar", "Some similar");
+        eprint!("{extra}");
+    }
+
+    // usage errors exit 2, matching clap.
+    std::process::exit(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn command_tree_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn shortcuts_are_all_real_subcommands() {
+        /* the list documents itself and the enum dispatches. this is what
+        keeps the two from drifting: adding a name to SHORTCUTS without a
+        `Commands` variant fails here rather than at someone's terminal. */
+        for name in commands::run::SHORTCUTS {
+            assert!(
+                Cli::try_parse_from(["lpm", name]).is_ok(),
+                "`lpm {name}` should be a subcommand"
+            );
+            // and it still takes trailing arguments, like `lpm run` does
+            assert!(Cli::try_parse_from(["lpm", name, "--watch"]).is_ok());
+        }
+    }
+
+    #[test]
+    fn every_other_script_needs_run() {
+        /* the point of a fixed list: a script named `lint` is reachable as
+        `lpm run lint` and nothing else, whatever lpm.toml says. */
+        assert!(Cli::try_parse_from(["lpm", "lint"]).is_err());
+        assert!(Cli::try_parse_from(["lpm", "run", "lint"]).is_ok());
+    }
+
+    #[test]
+    fn fmt_answers_to_both_spellings() {
+        // as the subcommand, either way round
+        assert!(Cli::try_parse_from(["lpm", "fmt"]).is_ok());
+        assert!(Cli::try_parse_from(["lpm", "format"]).is_ok());
+        // and as the script name the subcommand looks for
+        assert_eq!(commands::run::FMT_NAMES, ["fmt", "format"]);
+    }
+
+    #[test]
+    fn shortcuts_never_shadow_a_real_command() {
+        // a shortcut named after a command would silently replace it
+        let commands: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_string())
+            .filter(|name| !commands::run::SHORTCUTS.contains(&name.as_str()))
+            .collect();
+        for name in commands::run::SHORTCUTS {
+            assert!(
+                !commands.contains(&name.to_string()),
+                "{name} collides with an existing command"
+            );
+        }
+    }
 }

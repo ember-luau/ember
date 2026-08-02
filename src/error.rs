@@ -240,6 +240,12 @@ pub enum Error {
     #[error("No script named '{0}' under [scripts] in lpm.toml")]
     ScriptMissing(String),
 
+    /** a `pre<event>`/`post<event>` script exited non-zero. only hooks land
+    here. a script named on the command line exits with its own code and no
+    message of ours, since the user already knows which one they ran. */
+    #[error("Script '{hook}' failed with exit code {code}")]
+    HookFailed { hook: String, code: i32 },
+
     #[error(
         "[overrides] key '{0}' must be a dot-separated path like 'parent.child' (commas separate multiple paths)"
     )]
@@ -331,4 +337,17 @@ pub enum Error {
 
     #[error(transparent)]
     Http(#[from] crate::net::http::error::HttpError),
+}
+
+impl Error {
+    /** The status lpm should exit with. 1 for anything lpm itself decided,
+    but a hook failure forwards the child's own code, so a `preinstall` that
+    exits 3 makes `lpm install` exit 3 and CI reads the real reason rather
+    than a flattened "something went wrong". */
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Error::HookFailed { code, .. } if *code != 0 => *code,
+            _ => 1,
+        }
+    }
 }
