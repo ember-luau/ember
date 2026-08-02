@@ -547,6 +547,11 @@ impl Manifest {
         }
     }
 
+    /// "scope/name@version", how lpm names this package in its own output.
+    pub fn id(&self) -> String {
+        format!("{}@{}", self.package.name, self.package.version)
+    }
+
     /// the command a `[scripts]` entry runs. read side only, used by `lpm run`. edits go through `edit::ManifestDoc`.
     pub fn script(&self, name: &str) -> Result<&str, Error> {
         self.scripts

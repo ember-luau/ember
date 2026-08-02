@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::net::{auth, provenance, registry};
+use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::{
     DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Environment, Manifest, is_github_username,
     split_package_name, workspace_version_req,
@@ -21,6 +22,13 @@ pub struct PublishArgs {
 pub fn run(args: PublishArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
+    /* read off the manifest before publish_project consumes it. `prepublish`
+    is the hook for building whatever ships, so it runs before the archive is
+    packed -- including on --dry-run, since the point of a dry run is to see
+    the archive a real publish would produce */
+    let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
+    lifecycle.before()?;
+
     /* provenance. in a GitHub Actions job with id-token permissions this
     fetches an OIDC token the registry can verify the build from. anywhere
     else, or on any failure, it's just None and nothing changes. fetched
@@ -33,7 +41,8 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let oidc_token = oidc_token.as_deref();
 
     if manifest.workspace_members().is_empty() {
-        return publish_project(manifest, args.dry_run, oidc_token);
+        publish_project(manifest, args.dry_run, oidc_token)?;
+        return lifecycle.after();
     }
 
     /* a workspace root publishes the whole workspace in pesde's order,
@@ -54,7 +63,11 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
         }
         let name = member.manifest.package.name.clone();
         let result = workspace::in_dir(&member.dir, || {
-            publish_project(Manifest::load()?, args.dry_run, oidc_token)
+            let manifest = Manifest::load()?;
+            let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
+            lifecycle.before()?;
+            publish_project(manifest, args.dry_run, oidc_token)?;
+            lifecycle.after()
         });
         if let Err(error) = result {
             ui::print_error(&format!("{name}: {error}"));
@@ -62,11 +75,12 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
         }
     }
 
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::WorkspacePublishFailed(failed))
+    if !failed.is_empty() {
+        return Err(Error::WorkspacePublishFailed(failed));
     }
+
+    // the root's `postpublish` waits for the whole workspace to be out
+    lifecycle.after()
 }
 
 /** publishes the project in the current directory. private packages and

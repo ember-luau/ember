@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{Manifest, parse_version_req, split_package_name};
 use crate::registry::index::{Index, Refresh};
@@ -26,6 +27,12 @@ pub struct AddArgs {
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
+
+    /* `preadd` runs before anything else, the index prompt included -- it is
+    the hook for setting up whatever adding a package needs, so it has to be
+    able to run before lpm goes near an index */
+    let lifecycle = Lifecycle::of(&manifest, hooks::ADD);
+    lifecycle.before()?;
 
     let name = args.package.to_lowercase();
     let (_, short_name) = split_package_name(&name)?;
@@ -75,7 +82,9 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
     println!("Run `lpm install` to install it");
-    Ok(())
+
+    // `postadd` sees the written manifest, so it can go straight to installing
+    lifecycle.after()
 }
 
 /** asks which index to search. empty input means the default index,
