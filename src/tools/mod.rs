@@ -22,6 +22,7 @@ const SHORTHANDS: &[(&str, &str)] = &[
     ("darklua", "seaofvoices/darklua"),
     ("lest", "luau-lest/lest"),
     ("luau-lsp", "johnnymorganz/luau-lsp"),
+    ("luaux", "luau-xml/luaux"),
     ("rojo", "rojo-rbx/rojo"),
     ("stylua", "johnnymorganz/stylua"),
 ];
@@ -307,6 +308,7 @@ mod tests {
         assert_eq!(expand_shorthand("acme/tool"), "acme/tool");
         assert_eq!(shorthand_repository("stylua"), Some("johnnymorganz/stylua"));
         assert_eq!(shorthand_repository("acme/tool"), None);
+        assert_eq!(expand_shorthand("luaux"), "luau-xml/luaux");
         // case-insensitive, like alias resolution and windows command lookup
         assert_eq!(expand_shorthand("StyLua"), "johnnymorganz/stylua");
         assert_eq!(shorthand_repository("ROJO"), Some("rojo-rbx/rojo"));
