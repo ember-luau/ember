@@ -325,15 +325,15 @@ mod tests {
         write(
             "lpm.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
+             [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
             "packages/core/lpm.toml",
-            "[package]\nname = \"acme/core\"\nversion = \"1.2.3\"\n\n[target]\nenvironment = \"shared\"\n",
+            "[package]\nname = \"acme/core\"\nversion = \"1.2.3\"\n\n[target]\nenvironment = \"roblox\"\n",
         );
         write(
             "packages/extra/lpm.toml",
-            "[package]\nname = \"acme/extra\"\nversion = \"0.2.0\"\n\n[target]\nenvironment = \"shared\"\n\n\
+            "[package]\nname = \"acme/extra\"\nversion = \"0.2.0\"\n\n[target]\nenvironment = \"roblox\"\n\n\
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"~\" }\n",
         );
 
@@ -377,7 +377,7 @@ mod tests {
     fn publish_strips_overrides_and_patches() {
         let mut manifest: Manifest = toml::from_str(
             "[package]\nname = \"acme/x\"\nversion = \"1.0.0\"\n\n\
-             [target]\nenvironment = \"shared\"\n\n\
+             [target]\nenvironment = \"roblox\"\n\n\
              [overrides]\n\"a.b\" = \"acme/fork\"\n\n\
              [patches]\n\"acme/dep@1.0.0\" = \"patches/acme_dep@1.0.0.patch\"\n",
         )

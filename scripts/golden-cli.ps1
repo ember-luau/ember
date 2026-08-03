@@ -73,7 +73,7 @@ name = "golden/fixture"
 version = "0.1.0"
 
 [target]
-environment = "shared"
+environment = "roblox"
 "@)
 # and one that does not parse, for the manifest-error path
 [IO.File]::WriteAllText((Join-Path $sandboxes["broken"] "lpm.toml"), "[package`nname = ")

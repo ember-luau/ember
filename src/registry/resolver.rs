@@ -16,7 +16,7 @@ pub struct ResolvedInstall {
     pub environment: Option<Environment>,
     /** The environment root this package installs under, the environment of
     the direct dependency whose subtree discovered it. Every root is
-    self-contained, a server package's shared dependencies live under
+    self-contained, a server package's roblox dependencies live under
     packages/server, so one package can resolve once per context. */
     pub context: Environment,
     pub source: DownloadSource,
@@ -184,7 +184,7 @@ fn resolve_once(
 
         /* a workspace member shadows the registry copy of its name in
         EVERY context. the member is the copy being developed, and a
-        server tree quietly pulling the published version while shared
+        server tree quietly pulling the published version while roblox
         uses the local one would split the two. seeds all resolve before
         any transitive pops, so a seeded member is always visible here. */
         let request = match request {
@@ -515,19 +515,19 @@ mod tests {
             &base,
             "lpm.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
+             [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
             &base.join("packages/core"),
             "lpm.toml",
             "[package]\nname = \"acme/core\"\nversion = \"1.2.0\"\n\n\
-             [target]\nenvironment = \"shared\"\n",
+             [target]\nenvironment = \"roblox\"\n",
         );
         write(
             &base.join("packages/extra"),
             "lpm.toml",
             "[package]\nname = \"acme/extra\"\nversion = \"0.3.0\"\n\n\
-             [target]\nenvironment = \"shared\"\n\n\
+             [target]\nenvironment = \"roblox\"\n\n\
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"^\" }\n",
         );
 
@@ -541,8 +541,8 @@ mod tests {
         let core = &installs[0];
         assert_eq!(core.name, "acme/core");
         assert_eq!(core.version, semver::Version::new(1, 2, 0));
-        assert_eq!(core.environment, Some(Environment::Shared));
-        assert_eq!(core.context, Environment::Shared);
+        assert_eq!(core.environment, Some(Environment::Roblox));
+        assert_eq!(core.context, Environment::Roblox);
         assert_eq!(core.link.as_deref(), Some("core"));
         assert!(matches!(
             &core.source,
@@ -553,7 +553,7 @@ mod tests {
         member list, no ancestor needed, and members' transitive
         workspace deps come along. */
         let root_manifest_text = "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-             [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
+             [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n\n\
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";
         write(&base, "lpm.toml", root_manifest_text);
         let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
@@ -575,7 +575,7 @@ mod tests {
     fn seed_contexts_fall_back_to_the_target_environment() {
         // own environment first, [target] second, then a hard error
         assert_eq!(
-            seed_context(Some(Environment::Server), Some(Environment::Shared), "a/b").unwrap(),
+            seed_context(Some(Environment::Server), Some(Environment::Roblox), "a/b").unwrap(),
             Environment::Server
         );
         assert_eq!(
@@ -589,7 +589,7 @@ mod tests {
     }
 
     /** the self-contained-roots contract, against a real local git index.
-    a server seed drags its whole subtree into the server context, shared
+    a server seed drags its whole subtree into the server context, roblox
     deps included, the same package under two roots resolves once
     per root, and cross-context version divergence is legal where a
     same-context one conflicts. */
@@ -670,7 +670,7 @@ mod tests {
         };
 
         /* svc, a server package, pulls lib and pin into the server context.
-        lib and pin are ALSO direct shared deps, so both exist twice, once
+        lib and pin are ALSO direct roblox deps, so both exist twice, once
         per root, and pin's versions may even diverge across them */
         let installs = resolve_with(
             "svc = { name = \"acme/svc\", version = \"^1\" }\n\
@@ -693,9 +693,9 @@ mod tests {
         assert_eq!(
             summary,
             [
-                "acme/lib@1.0.0 shared/lib",
+                "acme/lib@1.0.0 roblox/lib",
                 "acme/lib@1.0.0 server/-",
-                "acme/pin@2.0.0 shared/pin",
+                "acme/pin@2.0.0 roblox/pin",
                 "acme/pin@1.0.0 server/-",
                 "acme/svc@1.0.0 server/svc",
             ]
@@ -705,7 +705,7 @@ mod tests {
             .iter()
             .find(|install| install.name == "acme/lib" && install.context == Environment::Server)
             .unwrap();
-        assert_eq!(server_lib.environment, Some(Environment::Shared));
+        assert_eq!(server_lib.environment, Some(Environment::Roblox));
 
         // within one context, disagreeing requirements still conflict
         let conflict = resolve_with(
@@ -807,7 +807,7 @@ mod tests {
             &project.join("packages/core"),
             "lpm.toml",
             "[package]\nname = \"acme/core\"\nversion = \"1.2.0\"\n\n\
-             [target]\nenvironment = \"shared\"\n",
+             [target]\nenvironment = \"roblox\"\n",
         );
         let resolve_with = |server_dep: &str| {
             write(
@@ -815,7 +815,7 @@ mod tests {
                 "lpm.toml",
                 &format!(
                     "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
-                     [target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n\n\
+                     [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n\n\
                      [indices]\ndefault = \"{url}\"\n\n\
                      [dependencies]\ncore = {{ workspace = \"acme/core\" }}\n\
                      {server_dep} = {{ name = \"acme/{server_dep}\", version = \"^1\" }}\n"
@@ -826,7 +826,7 @@ mod tests {
         };
 
         /* svc's server-tree edge to acme/core binds to the member. same
-        version as the shared copy, 1.2.0 not the registry's 1.0.0,
+        version as the roblox copy, 1.2.0 not the registry's 1.0.0,
         workspace source, no top-level link */
         let installs = resolve_with("svc").unwrap();
         let cores: Vec<_> = installs
@@ -838,7 +838,7 @@ mod tests {
             assert_eq!(core.version, semver::Version::new(1, 2, 0));
             assert!(matches!(core.source, DownloadSource::Workspace { .. }));
         }
-        assert_eq!(cores[0].context, Environment::Shared);
+        assert_eq!(cores[0].context, Environment::Roblox);
         assert_eq!(cores[0].link.as_deref(), Some("core"));
         assert_eq!(cores[1].context, Environment::Server);
         assert_eq!(cores[1].link, None);
@@ -991,7 +991,7 @@ mod tests {
             ["acme/bar@2.0.0 as Bar", "acme/foo@1.0.0 as foo"]
         );
 
-        /* an override addressed through the SECOND parent of a shared
+        /* an override addressed through the SECOND parent of a roblox
         package can't apply, edges are walked once under the first
         discovery path, and the warning says that, not "typo" */
         let mut warnings = Vec::new();

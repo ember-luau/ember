@@ -238,6 +238,10 @@ fn install_project(
         return Ok(());
     }
 
+    /* before the wipe below, which would otherwise take a [config]-claimed
+    packages/shared with it and leave the guard inside with nothing to see */
+    remove_legacy_roblox_out(manifest);
+
     /* installs rebuild from scratch each run. every env's output folder is
     wiped even with nothing to install, so removing the last dependency
     leaves no stale packages */
@@ -780,6 +784,48 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
     Ok(())
 }
 
+/** the pre-rename output folder of what is now the `roblox` environment,
+see [`Environment::Roblox`]. `packages/shared` was the default until the
+rename, and once installs stopped writing there nothing would ever clear
+it: a whole stale tree of link files, which editors go on autocompleting
+and Rojo goes on syncing. so the first install after the rename takes it
+away, and every install after that finds nothing to do.
+
+two things keep this from touching anything that isn't lpm's. the folder
+must still hold the `.lpm` store an install put there, and no [config] key
+may still point an environment at it -- `shared-packages-out` is a
+supported spelling, and a project that aims one at this exact path means
+it. best-effort: a failure to remove costs a stale folder, not an
+install.
+
+said out loud, not swept quietly. the project's own source and Rojo files
+may spell `packages/shared` in requires and `$path`s that lpm cannot
+rewrite, so the one build this breaks has to arrive with its reason
+attached. returns whether it removed anything. */
+fn remove_legacy_roblox_out(manifest: &Manifest) -> bool {
+    let legacy = Path::new("packages").join("shared");
+    if !legacy.join(".lpm").is_dir() {
+        return false;
+    }
+    // unresolvable paths can't be compared, so nothing may be removed on them
+    let Ok(absolute) = std::path::absolute(&legacy) else {
+        return false;
+    };
+    let claimed = Environment::ALL.into_iter().any(|environment| {
+        std::path::absolute(manifest.packages_out(environment)).is_ok_and(|out| out == absolute)
+    });
+    if claimed || fs::remove_dir_all(&legacy).is_err() {
+        return false;
+    }
+    println!(
+        "Removed the old {} folder; the roblox environment now installs to {}",
+        legacy.display(),
+        manifest.packages_out(Environment::Roblox).display()
+    );
+    println!("Update any requires or Rojo paths that still spell it");
+    true
+}
+
 /** stamps every environment that received packages with the state hash.
 best effort, a failed stamp only costs the next run its shortcut. the
 manifest and tools inputs are the ones captured before resolution, what
@@ -998,7 +1044,7 @@ fn install_one(
 
     /* real contents live under <out>/.lpm/<scope>_<name>/ where <out> is
     the CONTEXT's folder, not the package's own environment. each root is
-    self contained, so a server package's shared deps stay under server.
+    self contained, so a server package's roblox deps stay under server.
     workers race to create the same .lpm parent, create_dir_all treats
     existing as success, and Windows occasionally answers concurrent
     creation or a fresh rename with a transient denial worth one retry */
@@ -1230,7 +1276,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
 
             /* relative_path is lexical, so both sides go through
             std::path::absolute first. that drops the "." component a
-            `[config]` dir like "./packages/shared" would otherwise
+            `[config]` dir like "./packages/roblox" would otherwise
             contribute, and gives absolute out dirs a common prefix to
             measure from */
             let from = std::path::absolute(&link_dir).unwrap_or_else(|_| link_dir.clone());
@@ -1486,7 +1532,7 @@ mod tests {
                 "chief/traits",
                 "0.2.0",
                 "https://cdn.example/t/0.2.0.tar.gz",
-                Environment::Shared,
+                Environment::Roblox,
             ),
             patch_job(
                 "chief/traits",
@@ -1508,7 +1554,7 @@ mod tests {
             "chief/traits",
             "0.3.0",
             "https://cdn.example/t/0.3.0.tar.gz",
-            Environment::Shared,
+            Environment::Roblox,
         )];
         let drift = attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs);
         assert!(
@@ -1521,7 +1567,7 @@ mod tests {
             "acme/other",
             "1.0.0",
             "https://cdn.example/o/1.0.0.tar.gz",
-            Environment::Shared,
+            Environment::Roblox,
         )];
         let missing = attach_patches(&manifest("chief/traits@0.2.0"), &base, &mut jobs);
         assert!(
@@ -1536,7 +1582,7 @@ mod tests {
                 "chief/traits",
                 "0.2.0",
                 "https://cdn.example/t/0.2.0/shared.tar.gz",
-                Environment::Shared,
+                Environment::Roblox,
             ),
             patch_job(
                 "chief/traits",
@@ -1555,7 +1601,7 @@ mod tests {
             "chief/traits",
             "0.2.0",
             "https://cdn.example/t/0.2.0.tar.gz",
-            Environment::Shared,
+            Environment::Roblox,
         )];
         let mut gone = manifest("chief/traits@0.2.0");
         gone.patches.insert(
@@ -1582,14 +1628,14 @@ mod tests {
         )
         .unwrap();
 
-        /* contexts resolve independently, shared landed on 0.2.0, server on
+        /* contexts resolve independently, roblox landed on 0.2.0, server on
         0.3.0. patching only the 0.2.0 copy would be a silent half skip */
         let mut jobs = vec![
             patch_job(
                 "chief/traits",
                 "0.2.0",
                 "https://cdn.example/t/0.2.0.tar.gz",
-                Environment::Shared,
+                Environment::Roblox,
             ),
             patch_job(
                 "chief/traits",
@@ -1733,7 +1779,7 @@ mod tests {
             name: "acme/thing".to_string(),
             version: version.to_string(),
             environment: None,
-            context: Environment::Shared,
+            context: Environment::Roblox,
             source: index::DownloadSource::Zip {
                 url: url.to_string(),
             },
@@ -1745,7 +1791,7 @@ mod tests {
         let locked = |context: Option<Environment>| LockedPackage {
             name: "acme/thing".to_string(),
             version: "1.0.0".to_string(),
-            environment: Environment::Shared,
+            environment: Environment::Roblox,
             context,
             link: Some("thing".to_string()),
             index: "https://example.com/index".to_string(),
@@ -1778,9 +1824,9 @@ mod tests {
         let mut server = job("1.0.0", "https://example.com/thing/1.0.0");
         server.environment = Some(Environment::Server);
         assert!(!jobs_match_lock(&[server], &lock));
-        let mut shared = job("1.0.0", "https://example.com/thing/1.0.0");
-        shared.environment = Some(Environment::Shared);
-        assert!(jobs_match_lock(&[shared], &lock));
+        let mut roblox = job("1.0.0", "https://example.com/thing/1.0.0");
+        roblox.environment = Some(Environment::Roblox);
+        assert!(jobs_match_lock(&[roblox], &lock));
 
         // a moved context or a dropped link is a layout change, rebuild
         let mut moved = job("1.0.0", "https://example.com/thing/1.0.0");
@@ -1826,19 +1872,19 @@ mod tests {
     fn top_level_links_are_for_direct_dependencies_only() {
         let base = std::env::temp_dir().join("lpm-test-top-links");
         let _ = fs::remove_dir_all(&base);
-        let out = base.join("packages/shared");
+        let out = base.join("packages/roblox");
         fs::create_dir_all(&out).unwrap();
         let manifest: Manifest = toml::from_str(&format!(
             "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
-             shared-packages-out = \"{}/packages/shared\"\n",
+             roblox-packages-out = \"{}/packages/roblox\"\n",
             base.to_string_lossy().replace('\\', "/")
         ))
         .unwrap();
         let job = |link: Option<&str>| Job {
             name: "acme/thing".to_string(),
             version: "1.0.0".to_string(),
-            environment: Some(Environment::Shared),
-            context: Environment::Shared,
+            environment: Some(Environment::Roblox),
+            context: Environment::Roblox,
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -1848,7 +1894,7 @@ mod tests {
             patch: None,
         };
         let extracted = |entry: Option<&str>| Extracted {
-            environment: Environment::Shared,
+            environment: Environment::Roblox,
             entry: entry.map(str::to_string),
             types: Vec::new(),
         };
@@ -1877,7 +1923,7 @@ mod tests {
     fn colliding_output_roots_are_refused() {
         let manifest: Manifest = toml::from_str(
             "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
-             shared-packages-out = \"packages/everything\"\n\
+             roblox-packages-out = \"packages/everything\"\n\
              server-packages-out = \"packages/everything\"\n",
         )
         .unwrap();
@@ -1896,12 +1942,12 @@ mod tests {
         };
 
         // one context, no collision possible, whatever [config] says
-        assert!(assert_distinct_roots(&manifest, &[job(Environment::Shared)]).is_ok());
+        assert!(assert_distinct_roots(&manifest, &[job(Environment::Roblox)]).is_ok());
         // two contexts mapped onto one folder must refuse the install
         assert!(matches!(
             assert_distinct_roots(
                 &manifest,
-                &[job(Environment::Shared), job(Environment::Server)]
+                &[job(Environment::Roblox), job(Environment::Server)]
             ),
             Err(Error::PackagesOutCollision { .. })
         ));
@@ -1909,10 +1955,61 @@ mod tests {
         assert!(
             assert_distinct_roots(
                 &manifest,
-                &[job(Environment::Shared), job(Environment::Lune)]
+                &[job(Environment::Roblox), job(Environment::Lune)]
             )
             .is_ok()
         );
+    }
+
+    /** the one destructive path this rename added. it must take the store
+    an older lpm left behind, and nothing else: not a folder of the user's
+    own that happens to sit there, and not the output folder of a project
+    that deliberately still points an environment at that path. */
+    #[test]
+    fn the_legacy_output_folder_goes_only_when_it_is_lpm_s() {
+        /* a [package] table neither case cares about, so the fixture stays
+        readable to any lpm: what this varies is [config] */
+        const PACKAGE: &str = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+        let base = std::env::temp_dir().join("lpm-test-legacy-out");
+        let plain: Manifest = toml::from_str(PACKAGE).unwrap();
+        let claimed: Manifest = toml::from_str(&format!(
+            "{PACKAGE}\n[config]\nshared-packages-out = \"packages/shared\"\n"
+        ))
+        .unwrap();
+
+        let setup = |store: bool| {
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(base.join("packages/shared")).unwrap();
+            if store {
+                fs::create_dir_all(base.join("packages/shared/.lpm/acme_thing")).unwrap();
+            }
+            fs::write(base.join("packages/shared/Thing.luau"), "return nil\n").unwrap();
+        };
+        // the function reads relative paths, so it has to run from the project
+        let in_base = |manifest: &Manifest| {
+            crate::project::workspace::in_dir(&base, || Ok(remove_legacy_roblox_out(manifest)))
+                .unwrap()
+        };
+
+        // an lpm store from before the rename goes, and says so
+        setup(true);
+        assert!(in_base(&plain));
+        assert!(!base.join("packages/shared").exists());
+        // ...and a second install finds nothing left to do
+        assert!(!in_base(&plain));
+
+        /* a folder of the user's own that merely shares the name is not an
+        install output: no `.lpm`, no removal */
+        setup(false);
+        assert!(!in_base(&plain));
+        assert!(base.join("packages/shared/Thing.luau").exists());
+
+        // and a project that still aims an environment there keeps it
+        setup(true);
+        assert!(!in_base(&claimed));
+        assert!(base.join("packages/shared/.lpm").exists());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1921,7 +2018,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let manifest: Manifest = toml::from_str(&format!(
             "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
-             shared-packages-out = \"{0}/packages/shared\"\n\
+             roblox-packages-out = \"{0}/packages/roblox\"\n\
              luau-packages-out = \"{0}/packages/luau\"\n",
             base.to_string_lossy().replace('\\', "/")
         ))
@@ -1935,18 +2032,18 @@ mod tests {
             "<absent>".to_string(),
             String::new(),
         ));
-        let environments: BTreeSet<Environment> = [Environment::Shared, Environment::Luau]
+        let environments: BTreeSet<Environment> = [Environment::Roblox, Environment::Luau]
             .into_iter()
             .collect();
         write_state_stamps(&manifest, &environments, &inputs);
 
         let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::LOCKFILE) else {
-            assert!(!base.join("packages/shared/.lpm").join(STATE_FILE).exists());
+            assert!(!base.join("packages/roblox/.lpm").join(STATE_FILE).exists());
             let _ = fs::remove_dir_all(&base);
             return;
         };
         let expected = state_hash("manifest text", &lock_text, "<absent>", "");
-        for environment in ["shared", "luau"] {
+        for environment in ["roblox", "luau"] {
             assert_eq!(
                 fs::read_to_string(
                     base.join("packages")
@@ -1995,12 +2092,12 @@ mod tests {
     fn mounts_the_packages_folder_of_a_package_shipping_a_project_file() {
         let base = std::env::temp_dir().join("lpm-test-nested-links-rojo");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
 
         /* both ship a project file, as wally packages built from Rojo
         projects do. lyra declares its dependency the way a server realm
         package does, under [server-dependencies] */
-        let promise = shared.join(".lpm/evaera_promise");
+        let promise = roblox.join(".lpm/evaera_promise");
         write(
             &promise,
             "default.project.json",
@@ -2008,7 +2105,7 @@ mod tests {
         );
         write(&promise, "lib/init.luau", "return {}\n");
 
-        let lyra = shared.join(".lpm/lyra_lyra");
+        let lyra = roblox.join(".lpm/lyra_lyra");
         write(
             &lyra,
             "wally.toml",
@@ -2032,17 +2129,17 @@ mod tests {
             rojo::mirror_disk_layout(package, &mut |message| warnings.push(message));
         }
         let packages = [
-            stored("evaera/promise", promise.clone(), Environment::Shared),
-            stored("lyra/lyra", lyra.clone(), Environment::Shared),
+            stored("evaera/promise", promise.clone(), Environment::Roblox),
+            stored("lyra/lyra", lyra.clone(), Environment::Roblox),
         ];
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
         assert_eq!(warnings, Vec::<String>::new());
 
         // the link lands and the instance require is retargeted at it...
-        assert!(lyra.join("packages/shared/Promise.luau").exists());
+        assert!(lyra.join("packages/roblox/Promise.luau").exists());
         assert_eq!(
             fs::read_to_string(lyra.join("lib/init.luau")).unwrap(),
-            "local Promise = require(\"./packages/shared/Promise\")\nreturn Promise\n"
+            "local Promise = require(\"./packages/roblox/Promise\")\nreturn Promise\n"
         );
 
         let project = |dir: &Path| -> serde_json::Value {
@@ -2068,7 +2165,7 @@ mod tests {
         tree it published, we don't graft its contents into the sync */
         let base = std::env::temp_dir().join("lpm-test-nested-links-vendored");
         let _ = fs::remove_dir_all(&base);
-        let vendored = base.join("packages/shared/.lpm/acme_vendored");
+        let vendored = base.join("packages/roblox/.lpm/acme_vendored");
 
         // no manifest, so nothing is declared and nothing links
         let project = r#"{"name": "acme_vendored", "tree": {"$className": "Folder",
@@ -2082,7 +2179,7 @@ mod tests {
             &[stored(
                 "acme/vendored",
                 vendored.clone(),
-                Environment::Shared,
+                Environment::Roblox,
             )],
             &mut |message| warnings.push(message),
         );
@@ -2107,14 +2204,14 @@ mod tests {
         alphabetically, which is what puts the dependency first here */
         let base = std::env::temp_dir().join("lpm-test-nested-links-mounted-dep");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
 
-        let promise = shared.join(".lpm/evaera_promise");
+        let promise = roblox.join(".lpm/evaera_promise");
         write(&promise, "lib/init.luau", "return {}\n");
 
         /* roblox-ts shaped: `out` is an entry none of the conventional
         fallbacks can recover, so a broken tree read shows up as a miss */
-        let tslib = shared.join(".lpm/a_tslib");
+        let tslib = roblox.join(".lpm/a_tslib");
         write(
             &tslib,
             "wally.toml",
@@ -2127,7 +2224,7 @@ mod tests {
         );
         write(&tslib, "out/init.lua", "return {}\n");
 
-        let app = shared.join(".lpm/z_app");
+        let app = roblox.join(".lpm/z_app");
         write(
             &app,
             "wally.toml",
@@ -2140,9 +2237,9 @@ mod tests {
             rojo::mirror_disk_layout(package, &mut |message| warnings.push(message));
         }
         let packages = [
-            stored("a/tslib", tslib.clone(), Environment::Shared),
-            stored("evaera/promise", promise, Environment::Shared),
-            stored("z/app", app.clone(), Environment::Shared),
+            stored("a/tslib", tslib.clone(), Environment::Roblox),
+            stored("evaera/promise", promise, Environment::Roblox),
+            stored("z/app", app.clone(), Environment::Roblox),
         ];
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
         assert_eq!(warnings, Vec::<String>::new());
@@ -2155,7 +2252,7 @@ mod tests {
 
         // and app still linked against tslib's real entry, not a fallback
         assert_eq!(
-            fs::read_to_string(app.join("packages/shared/TsLib.luau")).unwrap(),
+            fs::read_to_string(app.join("packages/roblox/TsLib.luau")).unwrap(),
             "return require(\"../../../a_tslib/out\")\n"
         );
 
@@ -2166,22 +2263,22 @@ mod tests {
     fn writes_nested_links_for_stored_dependencies() {
         let base = std::env::temp_dir().join("lpm-test-nested-links");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
 
         /* chief shaped fixture. `lifecycles` depends on `core`, which
         exports a type, and on `util`, a luau environment package pulled
-        into the shared tree. same context, so its storage sits in the
-        shared root while its link folder keeps the luau name */
-        let core = shared.join(".lpm/acme_core");
+        into the roblox tree. same context, so its storage sits in the
+        roblox root while its link folder keeps the luau name */
+        let core = roblox.join(".lpm/acme_core");
         write(&core, "lpm.toml", "[target]\nmain = \"out/lpm\"\n");
         write(
             &core,
             "out/lpm/init.luau",
             "export type Entry = { id: number }\nreturn {}\n",
         );
-        let util = shared.join(".lpm/acme_util");
+        let util = roblox.join(".lpm/acme_util");
         write(&util, "init.luau", "return {}\n");
-        let lifecycles = shared.join(".lpm/acme_lifecycles");
+        let lifecycles = roblox.join(".lpm/acme_lifecycles");
         write(
             &lifecycles,
             "lpm.toml",
@@ -2191,9 +2288,9 @@ mod tests {
         write(&lifecycles, "out/lpm/init.luau", "return {}\n");
 
         let packages = [
-            stored("Acme/Core", core.clone(), Environment::Shared),
-            stored_in("acme/util", util, Environment::Luau, Environment::Shared),
-            stored("acme/lifecycles", lifecycles.clone(), Environment::Shared),
+            stored("Acme/Core", core.clone(), Environment::Roblox),
+            stored_in("acme/util", util, Environment::Luau, Environment::Roblox),
+            stored("acme/lifecycles", lifecycles.clone(), Environment::Roblox),
         ];
         let mut warnings = Vec::new();
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
@@ -2202,7 +2299,7 @@ mod tests {
         /* the same environment link, three hops up to the store, entry
         appended, exported types restated */
         assert_eq!(
-            fs::read_to_string(lifecycles.join("packages/shared/core.luau")).unwrap(),
+            fs::read_to_string(lifecycles.join("packages/roblox/core.luau")).unwrap(),
             "local module = require(\"../../../acme_core/out/lpm\")\n\
              export type Entry = module.Entry\n\
              return module\n"
@@ -2224,13 +2321,13 @@ mod tests {
     fn contexts_keep_their_trees_apart() {
         let base = std::env::temp_dir().join("lpm-test-nested-links-contexts");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
         let server = base.join("packages/server");
 
         /* the same dependency name installed under both roots, each
         consumer must link the copy in its OWN tree */
-        let shared_dep = shared.join(".lpm/acme_dep");
-        write(&shared_dep, "init.luau", "return { tree = \"shared\" }\n");
+        let roblox_dep = roblox.join(".lpm/acme_dep");
+        write(&roblox_dep, "init.luau", "return { tree = \"roblox\" }\n");
         let server_dep = server.join(".lpm/acme_dep");
         write(&server_dep, "init.luau", "return { tree = \"server\" }\n");
         let consumer = server.join(".lpm/acme_service");
@@ -2242,11 +2339,11 @@ mod tests {
         write(&consumer, "init.luau", "return {}\n");
 
         let packages = [
-            stored("acme/dep", shared_dep, Environment::Shared),
+            stored("acme/dep", roblox_dep, Environment::Roblox),
             stored_in(
                 "acme/dep",
                 server_dep,
-                Environment::Shared,
+                Environment::Roblox,
                 Environment::Server,
             ),
             stored_in(
@@ -2260,9 +2357,9 @@ mod tests {
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
         assert_eq!(warnings, Vec::<String>::new());
 
-        /* the link folder is named for the dep's own environment, shared,
+        /* the link folder is named for the dep's own environment, roblox,
         but the require resolves within the server root */
-        let link = fs::read_to_string(consumer.join("packages/shared/dep.luau")).unwrap();
+        let link = fs::read_to_string(consumer.join("packages/roblox/dep.luau")).unwrap();
         assert_eq!(link, "return require(\"../../../acme_dep\")\n");
 
         let _ = fs::remove_dir_all(&base);
@@ -2272,29 +2369,29 @@ mod tests {
     fn redirected_edges_link_the_replacement() {
         let base = std::env::temp_dir().join("lpm-test-nested-links-redirect");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
 
         /* the shipped manifest still declares acme/bar, but [overrides]
         swapped the edge for acme/qux. the nested link must follow the
         redirect, not the manifest */
-        let qux = shared.join(".lpm/acme_qux");
+        let qux = roblox.join(".lpm/acme_qux");
         write(&qux, "init.luau", "return {}\n");
-        let consumer = shared.join(".lpm/acme_foo");
+        let consumer = roblox.join(".lpm/acme_foo");
         write(
             &consumer,
             "lpm.toml",
             "[dependencies]\nbar = { name = \"acme/bar\", version = \"^1\" }\n",
         );
 
-        let mut redirected = stored("acme/foo", consumer.clone(), Environment::Shared);
+        let mut redirected = stored("acme/foo", consumer.clone(), Environment::Roblox);
         redirected.redirects = [("bar".to_string(), "acme/qux".to_string())].into();
-        let packages = [stored("acme/qux", qux, Environment::Shared), redirected];
+        let packages = [stored("acme/qux", qux, Environment::Roblox), redirected];
         let mut warnings = Vec::new();
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
 
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(
-            fs::read_to_string(consumer.join("packages/shared/bar.luau")).unwrap(),
+            fs::read_to_string(consumer.join("packages/roblox/bar.luau")).unwrap(),
             "return require(\"../../../acme_qux\")\n"
         );
 
@@ -2305,14 +2402,14 @@ mod tests {
     fn missing_dependencies_warn_and_skip() {
         let base = std::env::temp_dir().join("lpm-test-nested-links-missing");
         let _ = fs::remove_dir_all(&base);
-        let storage = base.join("packages/shared/.lpm/acme_thing");
+        let storage = base.join("packages/roblox/.lpm/acme_thing");
         write(
             &storage,
             "lpm.toml",
             "[dependencies]\ngone = { name = \"acme/gone\", version = \"^\" }\n",
         );
 
-        let packages = [stored("acme/thing", storage.clone(), Environment::Shared)];
+        let packages = [stored("acme/thing", storage.clone(), Environment::Roblox)];
         let mut warnings = Vec::new();
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
 
@@ -2328,13 +2425,13 @@ mod tests {
     fn aliases_cannot_escape_the_package() {
         let base = std::env::temp_dir().join("lpm-test-nested-links-escape");
         let _ = fs::remove_dir_all(&base);
-        let shared = base.join("packages/shared");
+        let roblox = base.join("packages/roblox");
 
-        let dep = shared.join(".lpm/acme_dep");
+        let dep = roblox.join(".lpm/acme_dep");
         write(&dep, "init.luau", "return {}\n");
         /* a downloaded manifest can quote anything as a key, neither of
         these may put a file outside the package */
-        let hostile = shared.join(".lpm/acme_hostile");
+        let hostile = roblox.join(".lpm/acme_hostile");
         write(
             &hostile,
             "lpm.toml",
@@ -2343,8 +2440,8 @@ mod tests {
         );
 
         let packages = [
-            stored("acme/dep", dep, Environment::Shared),
-            stored("acme/hostile", hostile.clone(), Environment::Shared),
+            stored("acme/dep", dep, Environment::Roblox),
+            stored("acme/hostile", hostile.clone(), Environment::Roblox),
         ];
         let mut warnings = Vec::new();
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
@@ -2368,7 +2465,7 @@ mod tests {
         let member = base.join("packages/core");
         write(&member, "lpm.toml", "[target]\nmain = \"src/init.luau\"\n");
         write(&member, "src/init.luau", "return {}\n");
-        let consumer = base.join("packages/shared/.lpm/acme_extras");
+        let consumer = base.join("packages/roblox/.lpm/acme_extras");
         write(
             &consumer,
             "lpm.toml",
@@ -2379,19 +2476,19 @@ mod tests {
             StoredPackage {
                 name: "acme/core".to_string(),
                 storage: member.clone(),
-                environment: Environment::Shared,
-                context: Environment::Shared,
+                environment: Environment::Roblox,
+                context: Environment::Roblox,
                 in_place: true,
                 redirects: BTreeMap::new(),
             },
-            stored("acme/extras", consumer.clone(), Environment::Shared),
+            stored("acme/extras", consumer.clone(), Environment::Roblox),
         ];
         let mut warnings = Vec::new();
         link_nested_dependencies(&packages, &mut |message| warnings.push(message));
 
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(
-            fs::read_to_string(consumer.join("packages/shared/core.luau")).unwrap(),
+            fs::read_to_string(consumer.join("packages/roblox/core.luau")).unwrap(),
             "return require(\"../../../../../core/src\")\n"
         );
         // the member's own source tree stays untouched

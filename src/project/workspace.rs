@@ -191,7 +191,7 @@ mod tests {
     /// chief-shaped tree, private root with packages/* members.
     fn write_workspace(base: &Path) {
         let root = format!(
-            "{}private = true\n\n[target]\nenvironment = \"shared\"\n\
+            "{}private = true\n\n[target]\nenvironment = \"roblox\"\n\
              workspace = [\"packages/*\", \"!packages/skipped\"]\n",
             manifest("acme/root", "0.0.0")
         );

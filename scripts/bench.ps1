@@ -43,7 +43,7 @@ name = "bench/bench"
 version = "0.1.0"
 
 [target]
-environment = "shared"
+environment = "roblox"
 
 [indices]
 wally = "https://github.com/UpliftGames/wally-index"

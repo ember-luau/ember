@@ -51,11 +51,13 @@ pub struct Manifest {
 /// per-environment install locations, each defaults to "packages/<env>".
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
+    /// `shared-packages-out` is the pre-rename spelling, see [`Environment::Roblox`].
     #[serde(
-        rename = "shared-packages-out",
+        rename = "roblox-packages-out",
+        alias = "shared-packages-out",
         skip_serializing_if = "Option::is_none"
     )]
-    pub shared_packages_out: Option<String>,
+    pub roblox_packages_out: Option<String>,
     #[serde(
         rename = "server-packages-out",
         skip_serializing_if = "Option::is_none"
@@ -71,7 +73,7 @@ pub struct Config {
 
 impl Config {
     fn is_default(&self) -> bool {
-        self.shared_packages_out.is_none()
+        self.roblox_packages_out.is_none()
             && self.server_packages_out.is_none()
             && self.lune_packages_out.is_none()
             && self.luau_packages_out.is_none()
@@ -131,8 +133,13 @@ pub struct Target {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
-    /// Luau code that must run in Roblox
-    Shared,
+    /** Luau code that must run in Roblox, on either side.
+    spelled `shared` before this rename, after wally's realm. that name read
+    as "shared between packages" often enough to be worth losing, so `roblox`
+    is what everything writes now -- but `shared` still parses everywhere,
+    since every already-published manifest and lockfile says it. */
+    #[serde(alias = "shared")]
+    Roblox,
     /// Roblox server-side only
     Server,
     /// needs the Lune runtime
@@ -145,7 +152,7 @@ pub enum Environment {
 
 impl Environment {
     pub const ALL: [Environment; 5] = [
-        Environment::Shared,
+        Environment::Roblox,
         Environment::Server,
         Environment::Lune,
         Environment::Luau,
@@ -154,7 +161,7 @@ impl Environment {
 
     pub fn dir_name(self) -> &'static str {
         match self {
-            Environment::Shared => "shared",
+            Environment::Roblox => "roblox",
             Environment::Server => "server",
             Environment::Lune => "lune",
             Environment::Luau => "luau",
@@ -165,7 +172,7 @@ impl Environment {
     /// translates a pesde `target.environment` value.
     pub fn from_pesde(environment: &str) -> Result<Self, Error> {
         match environment {
-            "roblox" => Ok(Environment::Shared),
+            "roblox" => Ok(Environment::Roblox),
             "roblox_server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
@@ -177,16 +184,16 @@ impl Environment {
     /// translates a wally `realm` value.
     pub fn from_wally_realm(realm: &str) -> Result<Self, Error> {
         match realm {
-            "shared" => Ok(Environment::Shared),
+            "shared" => Ok(Environment::Roblox),
             "server" => Ok(Environment::Server),
             other => Err(Error::UnsupportedEnvironment(other.to_string())),
         }
     }
 
-    /// parses lpm's own environment names like "shared" and "lune".
+    /// parses lpm's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
     pub fn from_lpm(environment: &str) -> Result<Self, Error> {
         match environment {
-            "shared" => Ok(Environment::Shared),
+            "roblox" | "shared" => Ok(Environment::Roblox),
             "server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
@@ -518,7 +525,7 @@ impl Manifest {
     /// folder an environment's packages (and their link files) install to.
     pub fn packages_out(&self, environment: Environment) -> std::path::PathBuf {
         let configured = match environment {
-            Environment::Shared => &self.config.shared_packages_out,
+            Environment::Roblox => &self.config.roblox_packages_out,
             Environment::Server => &self.config.server_packages_out,
             Environment::Lune => &self.config.lune_packages_out,
             Environment::Luau => &self.config.luau_packages_out,
@@ -714,13 +721,13 @@ mod tests {
             version = "0.1.0"
 
             [config]
-            shared-packages-out = "src/ReplicatedStorage/Packages"
+            roblox-packages-out = "src/ReplicatedStorage/Packages"
             "#,
         )
         .unwrap();
 
         assert_eq!(
-            manifest.packages_out(Environment::Shared),
+            manifest.packages_out(Environment::Roblox),
             std::path::PathBuf::from("src/ReplicatedStorage/Packages")
         );
         assert_eq!(
@@ -731,13 +738,33 @@ mod tests {
             manifest.packages_out(Environment::Lute),
             std::path::PathBuf::from("packages").join("lute")
         );
+        // the pre-rename key still points the same environment somewhere else
+        let legacy: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [config]
+            shared-packages-out = "src/ReplicatedStorage/Packages"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.packages_out(Environment::Roblox),
+            std::path::PathBuf::from("src/ReplicatedStorage/Packages")
+        );
+        // and is rewritten under the new name whenever lpm writes the manifest
+        let serialized = toml::to_string(&legacy).unwrap();
+        assert!(serialized.contains("roblox-packages-out"), "{serialized}");
+        assert!(!serialized.contains("shared-packages-out"), "{serialized}");
     }
 
     #[test]
     fn translates_environments() {
         assert_eq!(
             Environment::from_pesde("roblox").unwrap(),
-            Environment::Shared
+            Environment::Roblox
         );
         assert_eq!(
             Environment::from_pesde("roblox_server").unwrap(),
@@ -747,7 +774,7 @@ mod tests {
         assert!(Environment::from_pesde("nonsense").is_err());
         assert_eq!(
             Environment::from_wally_realm("shared").unwrap(),
-            Environment::Shared
+            Environment::Roblox
         );
         assert_eq!(
             Environment::from_wally_realm("server").unwrap(),
@@ -768,7 +795,7 @@ mod tests {
             private = true
 
             [target]
-            environment = "shared"
+            environment = "roblox"
             workspace = ["packages/*", "!packages/legacy"]
             "#,
         )
@@ -786,7 +813,7 @@ mod tests {
             version = "0.0.0"
 
             [target]
-            environment = "shared"
+            environment = "roblox"
             workspace_members = ["packages/*"]
             "#,
         )
@@ -800,6 +827,7 @@ mod tests {
             version = "0.1.0"
 
             [dependencies]
+
             core = { workspace = "chief/core", version = "^" }
             pinned = { workspace = "chief/bin" }
             "#,
