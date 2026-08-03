@@ -99,6 +99,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             if member.dir == workspace.root {
                 continue;
             }
+            println!();
             println!("Installing {}", member.label());
             workspace::in_dir(&member.dir, || {
                 let manifest = Manifest::load()?;
@@ -111,6 +112,18 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     }
 
     lifecycle.after()
+}
+
+/** one phase of an install, announced. the package and tool halves used to
+run into each other as one wall of ✓ lines with no way to tell which was
+which. `printed` carries across the phases so the first one never opens
+with a stray blank line. */
+fn section(title: &str, printed: &mut bool) {
+    if *printed {
+        println!();
+    }
+    println!("{title}");
+    *printed = true;
 }
 
 /** installs one project from the current directory. global tools only
@@ -239,8 +252,10 @@ fn install_project(
     }
 
     /* before the wipe below, which would otherwise take a [config]-claimed
-    packages/shared with it and leave the guard inside with nothing to see */
-    remove_legacy_roblox_out(manifest);
+    packages/shared with it and leave the guard inside with nothing to see.
+    it prints when it removes something, so it opens the output and the
+    sections below separate themselves from it */
+    let mut printed = remove_legacy_roblox_out(manifest);
 
     /* installs rebuild from scratch each run. every env's output folder is
     wiped even with nothing to install, so removing the last dependency
@@ -257,6 +272,9 @@ fn install_project(
     moves it into place, same filesystem as the outputs */
     let staging = Path::new(".lpm-staging").to_path_buf();
     let packages_started = Instant::now();
+    if !jobs.is_empty() {
+        section("Installing packages", &mut printed);
+    }
     let locked = ui::with_progress(jobs.len() as u64, |bar| {
         install_packages(manifest, jobs, &staging, bar, cache)
     });
@@ -316,7 +334,7 @@ fn install_project(
     let tool_jobs = tool_jobs(manifest, include_global_tools)?;
     let tool_count = tool_jobs.len();
     if !tool_jobs.is_empty() {
-        println!("Installing tools");
+        section("Installing tools", &mut printed);
         ui::with_progress(tool_count as u64, |bar| install_tools(&tool_jobs, bar))?;
     }
 
@@ -329,6 +347,10 @@ fn install_project(
         write_state_stamps(manifest, &environments, &state_inputs);
     }
 
+    // the summary belongs to neither section, so it gets its own separation
+    if printed {
+        println!();
+    }
     match (package_count, tool_count) {
         (0, 0) => println!("Nothing to install"),
         (p, 0) => println!("Installed {p} package{}", ui::plural(p)),
@@ -776,9 +798,11 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
     if missing.is_empty() {
         println!("Nothing to install (up to date)");
     } else {
-        println!("Installing tools");
+        let mut printed = false;
+        section("Installing tools", &mut printed);
         let count = missing.len();
         ui::with_progress(count as u64, |bar| install_tools(&missing, bar))?;
+        println!();
         println!("Installed {count} tool{}", ui::plural(count));
     }
     Ok(())
