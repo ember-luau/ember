@@ -5,7 +5,24 @@ use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
 
-const ENVIRONMENTS: &[&str] = &["shared", "server", "lune", "luau", "lute"];
+const ENVIRONMENTS: &[&str] = &["roblox", "server", "lune", "luau", "lute"];
+
+/// what the first question offers, in the order it offers them.
+const KINDS: &[&str] = &[PROJECT, PACKAGE];
+const PROJECT: &str = "project";
+const PACKAGE: &str = "package";
+
+/** the whole manifest a `project` answer produces. a project consumes
+packages and never publishes, so it needs no [package] table and nothing
+else has to be asked -- see [`Manifest::package`]. the empty table is there
+so `lpm add` has somewhere obvious to write, and so the file doesn't read
+as an accident. */
+const PROJECT_MANIFEST: &str = "\
+# Manifest for this project. See https://luaupm.com/docs
+# Add dependencies with `lpm add <scope/name>`, then run `lpm install`.
+
+[dependencies]
+";
 
 const LICENSES: &[&str] = &[
     "MIT",
@@ -111,6 +128,16 @@ pub fn run() -> Result<(), Error> {
 
     inquire::set_global_render_config(crate::ui::render_config());
 
+    /* asked first because the answer decides whether anything else is worth
+    asking. a project is the common case and everything below it -- name,
+    version, license, entry point -- is registry metadata it will never use */
+    let kind = Select::new("initialize:", KINDS.to_vec())
+        .with_help_message("A project consumes packages; a package is published to the registry")
+        .prompt()?;
+    if kind == PROJECT {
+        return write_manifest(manifest_path, PROJECT_MANIFEST);
+    }
+
     let defaults = Defaults::guess();
 
     let mut name_prompt = Text::new("name:")
@@ -197,7 +224,12 @@ pub fn run() -> Result<(), Error> {
         studio: Default::default(),
     };
 
-    std::fs::write(manifest_path, toml::to_string(&manifest)?)?;
+    write_manifest(manifest_path, &toml::to_string(&manifest)?)
+}
+
+/// writes the new manifest and git-ignores what installs generate, the tail both answers share.
+fn write_manifest(path: &Path, contents: &str) -> Result<(), Error> {
+    std::fs::write(path, contents)?;
     crate::ui::print_success("Created lpm.toml");
 
     if let Some(message) = gitignore_lpm(Path::new(".gitignore"))? {
@@ -303,6 +335,34 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /** the `project` answer writes this verbatim and asks nothing else, so
+    nothing else validates it. it has to parse, declare no package, and be
+    somewhere `lpm add` can write. */
+    #[test]
+    fn the_project_template_is_a_package_less_manifest() {
+        let manifest: Manifest = toml::from_str(PROJECT_MANIFEST).unwrap();
+        assert!(manifest.package.is_none());
+        assert!(manifest.dependencies.is_empty());
+
+        // `lpm add` edits the raw document, so [dependencies] must be there
+        let document: toml_edit::DocumentMut = PROJECT_MANIFEST.parse().unwrap();
+        assert!(
+            document
+                .get("dependencies")
+                .is_some_and(|table| table.is_table())
+        );
+    }
+
+    #[test]
+    fn the_environment_choices_are_the_ones_lpm_parses() {
+        for environment in ENVIRONMENTS {
+            let parsed = Environment::from_lpm(environment).unwrap();
+            // and each offers its own canonical spelling, not an alias
+            assert_eq!(parsed.dir_name(), *environment);
+        }
+        assert_eq!(KINDS, [PROJECT, PACKAGE]);
+    }
 
     #[test]
     fn accepts_scoped_alphanumeric_names() {
