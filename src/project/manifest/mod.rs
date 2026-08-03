@@ -294,6 +294,10 @@ pub enum Dependency {
         /// key into [indices]. None means the default luaupm index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
+        /// see [`Dependency::target`]. kept unparsed so a typo reports itself
+        /// instead of failing the untagged match with "no variant".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -304,11 +308,63 @@ pub enum Dependency {
         workspace: String,
         #[serde(default = "default_workspace_version")]
         version: String,
+        /// see [`Dependency::target`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
 }
 
 fn default_workspace_version() -> String {
     "^".to_string()
+}
+
+impl Dependency {
+    /** the `target` an entry states, e.g.
+    `Chief = { name = "chief/core", version = "^", target = "server" }`.
+
+    it overrides which environment tree a *direct* dependency installs
+    under, so a package published for Roblox can be pulled into the server
+    root instead of the project's own, and it picks the target of a
+    multi-target index entry to match. parsed by [`dependency_target`],
+    which is also where the roblox/server restriction lives.
+
+    direct only, and that is a rule about the tree, not a shortcut. every
+    other entry reaches the resolver with a context already inherited from
+    the root of its subtree, and moving one out of that tree would strand
+    its dependents: they link what is installed alongside them and nothing
+    else. so `target` on a specifier lpm only ever meets transitively --
+    an `[overrides]` value, or a workspace member's own dependency while
+    the *root* installs -- has no effect. it is honored when that member
+    installs itself, where the same entry is a direct dependency. */
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Dependency::Registry { target, .. } | Dependency::Workspace { target, .. } => {
+                target.as_deref()
+            }
+        }
+    }
+}
+
+/** parses a dependency's `target` override, see [`Dependency::target`].
+`alias` only names the entry in the error.
+
+only the two Roblox trees can be chosen. the rest are runtimes -- moving a
+Roblox package into `lune` would put it where nothing that runs it lives,
+and lpm would have no way to tell that from a typo. */
+pub fn dependency_target(
+    alias: &str,
+    dependency: &Dependency,
+) -> Result<Option<Environment>, Error> {
+    let Some(target) = dependency.target() else {
+        return Ok(None);
+    };
+    match Environment::from_lpm(target.trim()) {
+        Ok(environment @ (Environment::Roblox | Environment::Server)) => Ok(Some(environment)),
+        _ => Err(Error::DependencyTargetInvalid {
+            alias: alias.to_string(),
+            target: target.to_string(),
+        }),
+    }
 }
 
 /** an [overrides] value, what an alias path should resolve to instead of
@@ -853,6 +909,48 @@ mod tests {
     }
 
     #[test]
+    fn dependency_targets_are_limited_to_the_roblox_trees() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Chief = { name = "chief/core", version = "^", target = "server" }
+            Legacy = { name = "acme/legacy", version = "^", target = "shared" }
+            Plain = { name = "acme/plain", version = "^" }
+            Member = { workspace = "acme/member", target = "server" }
+            Runtime = { name = "acme/runtime", version = "^", target = "lune" }
+            Typo = { name = "acme/typo", version = "^", target = "sever" }
+            "#,
+        )
+        .unwrap();
+
+        let target = |alias: &str| dependency_target(alias, &manifest.dependencies[alias]);
+        assert_eq!(target("Chief").unwrap(), Some(Environment::Server));
+        // `shared` reads as `roblox` here like everywhere else
+        assert_eq!(target("Legacy").unwrap(), Some(Environment::Roblox));
+        assert_eq!(target("Plain").unwrap(), None);
+        // workspace specifiers take one too, so it can't be silently ignored
+        assert_eq!(target("Member").unwrap(), Some(Environment::Server));
+
+        /* a runtime environment and a typo are both refused, and both name
+        the entry: an untagged-enum "matched no variant" would name neither */
+        for alias in ["Runtime", "Typo"] {
+            assert!(
+                matches!(target(alias), Err(Error::DependencyTargetInvalid { alias: named, .. }) if named == alias),
+                "{alias} should be rejected"
+            );
+        }
+
+        // the key round-trips, so `lpm publish` doesn't silently drop it
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(serialized.contains(r#"target = "server""#), "{serialized}");
+        let reparsed: Manifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            dependency_target("Chief", &reparsed.dependencies["Chief"]).unwrap(),
+            Some(Environment::Server)
+        );
+    }
+
+    #[test]
     fn parses_workspace_manifests_and_dependencies() {
         /* the chief repo's shape, private root listing member globs, members
         depending on each other with workspace specifiers. */
@@ -903,7 +1001,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &member.dependencies["core"],
-            Dependency::Workspace { workspace, version }
+            Dependency::Workspace { workspace, version, .. }
                 if workspace == "chief/core" && version == "^"
         ));
         // version defaults to "^", pesde's default version type.

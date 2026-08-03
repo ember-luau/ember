@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::project::manifest::{
-    Dependency, Environment, Manifest, Override, override_paths, parse_version_req,
+    Dependency, Environment, Manifest, Override, dependency_target, override_paths,
+    parse_version_req,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::{DownloadSource, Index, Refresh};
@@ -46,10 +47,24 @@ enum Request {
     Workspace,
 }
 
+/// What one specifier asks for: where it comes from, and its `target`, if any.
+#[derive(Clone)]
+struct Ask {
+    request: Request,
+    /** the specifier's parsed `target` override, see [`Dependency::target`].
+    read only where the entry is a seed, i.e. a direct dependency of the
+    manifest being installed, since that is the only kind whose tree is
+    still open. an entry that reaches the queue with a context already
+    inherited ignores it, and so `target` on a specifier lpm only ever sees
+    transitively -- an `[overrides]` value, or a workspace member's own
+    dependency resolved from the root -- does nothing there. */
+    target: Option<Environment>,
+}
+
 /// One dependency waiting to resolve.
 struct QueueEntry {
     name: String,
-    request: Request,
+    ask: Ask,
     /// manifest alias for direct deps, their top-level link. None for transitives.
     link: Option<String>,
     /// alias path from the root, for [overrides] matching and diagnostics.
@@ -57,6 +72,29 @@ struct QueueEntry {
     /** the inherited install root. None only for seeds, whose own resolve
     decides it. by the time children are queued it's always known. */
     context: Option<Environment>,
+    /// who wanted this, for conflict diagnostics only.
+    required_by: Requirer,
+}
+
+/** Who asked for a package. Only ever read to name the two sides of a
+version conflict: the requirement texts alone say what disagrees but not
+what to go and edit, and the disagreeing pair are usually a direct
+dependency and something several levels below it. */
+#[derive(Clone)]
+enum Requirer {
+    /// an entry under this project's own [dependencies].
+    Manifest(String),
+    /// another package's dependency: its "scope/name@version" and the alias it used.
+    Package { id: String, alias: String },
+}
+
+impl Requirer {
+    fn label(&self) -> String {
+        match self {
+            Requirer::Manifest(alias) => format!("lpm.toml (as '{alias}')"),
+            Requirer::Package { id, alias } => format!("{id} (as '{alias}')"),
+        }
+    }
 }
 
 /** Resolves the manifest's dependency graph breadth-first. Transitive deps
@@ -110,7 +148,7 @@ fn resolve_once(
     path ends up matching an edge. Each edge the walk discovers carries its
     alias path from the root ("foo" -> "foo.bar" -> ...), an exact match
     rewrites that edge before it's queued. */
-    let mut overrides: HashMap<Vec<String>, (String, Request)> = HashMap::new();
+    let mut overrides: HashMap<Vec<String>, (String, Ask)> = HashMap::new();
     for (key, value) in &manifest.overrides {
         for path in override_paths(key)? {
             let edge = overridden_edge(value, &path, manifest)?;
@@ -138,25 +176,28 @@ fn resolve_once(
         discovered.insert(vec![alias.clone()], name.clone());
         queue.push_back(QueueEntry {
             name,
-            request: request_for(dependency, manifest)?,
+            ask: request_for(alias, dependency, manifest)?,
             link: Some(alias.clone()),
             alias_path: vec![alias.clone()],
             context: None,
+            required_by: Requirer::Manifest(alias.clone()),
         });
     }
 
-    /* (name, context) -> (what we resolved, the req that won). BTreeMap
-    keeps the install set, and the lockfile written from it, in name order
-    with context breaking ties. one package may appear once per context,
-    every environment root is self-contained, wally-style. */
-    let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String)> = BTreeMap::new();
+    /* (name, context) -> (what we resolved, the req that won, who asked for
+    it). BTreeMap keeps the install set, and the lockfile written from it, in
+    name order with context breaking ties. one package may appear once per
+    context, every environment root is self-contained, wally-style. */
+    let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String, Requirer)> =
+        BTreeMap::new();
 
     while let Some(QueueEntry {
         name,
-        request,
+        ask: Ask { request, target },
         link,
         alias_path,
         context,
+        required_by,
     }) = queue.pop_front()
     {
         let req_text = match &request {
@@ -169,7 +210,7 @@ fn resolve_once(
         before any network. a seed's context is decided by its own resolve,
         so its gate has to wait until just after, below */
         if let Some(context) = context
-            && let Some((existing, first_req)) = resolved.get(&(name.clone(), context))
+            && let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context))
         {
             if req.matches(&existing.version) {
                 continue;
@@ -178,7 +219,9 @@ fn resolve_once(
                 name,
                 context,
                 first: first_req.clone(),
+                first_by: first_by.label(),
                 second: req_text,
+                second_by: required_by.label(),
             });
         }
 
@@ -189,7 +232,7 @@ fn resolve_once(
         any transitive pops, so a seeded member is always visible here. */
         let request = match request {
             Request::Registry { .. }
-                if resolved.iter().any(|((resolved_name, _), (install, _))| {
+                if resolved.iter().any(|((resolved_name, _), (install, ..))| {
                     *resolved_name == name
                         && matches!(install.source, DownloadSource::Workspace { .. })
                 }) =>
@@ -206,38 +249,51 @@ fn resolve_once(
         let mut redirects: BTreeMap<String, String> = BTreeMap::new();
         let mut pending_matched: Vec<Vec<String>> = Vec::new();
         let mut pending_discovered: Vec<(Vec<String>, String)> = Vec::new();
-        let mut children: Vec<(String, Request, Vec<String>)> = Vec::new();
+        let mut children: Vec<(String, Ask, Vec<String>, String)> = Vec::new();
 
         let (version, environment, source, index_url) = match request {
             Request::Registry { index_url, .. } => {
                 let index = open_index(&mut indices, &index_url, refresh, ttl_skipped)?;
-                /* a multi-target entry should pick the target of the tree
-                it installs into. seeds fall back to the project's own */
-                let package = index.resolve(&name, &req, context.or(prefer_environment))?;
+                /* a multi-target entry picks the target of the tree it
+                installs into. for a seed that tree is still undecided, so its
+                `target`, then the project's own environment, stands in --
+                `seed_context` below settles on exactly the same answer.
+                an inherited context is NOT second-guessed by a `target`: the
+                entry is going into that tree either way, and picking another
+                target's archive for it would store a server build under the
+                roblox root purely because some edge said so. */
+                let preferred = match context {
+                    Some(context) => Some(context),
+                    None => target.or(prefer_environment),
+                };
+                let package = index.resolve(&name, &req, preferred)?;
 
                 for dependency in &package.dependencies {
                     let mut child_path = alias_path.clone();
                     child_path.push(dependency.alias.clone());
 
-                    let (child_name, child_request) = match overrides.get(&child_path) {
-                        Some((child_name, child_request)) => {
+                    let (child_name, child_ask) = match overrides.get(&child_path) {
+                        Some((child_name, child_ask)) => {
                             pending_matched.push(child_path.clone());
                             redirects.insert(dependency.alias.clone(), child_name.clone());
-                            (child_name.clone(), child_request.clone())
+                            (child_name.clone(), child_ask.clone())
                         }
                         None => (
                             dependency.name.clone(),
-                            Request::Registry {
-                                req_text: dependency.version_req.clone(),
-                                index_url: dependency
-                                    .index_url
-                                    .clone()
-                                    .unwrap_or_else(|| index_url.clone()),
+                            Ask {
+                                request: Request::Registry {
+                                    req_text: dependency.version_req.clone(),
+                                    index_url: dependency
+                                        .index_url
+                                        .clone()
+                                        .unwrap_or_else(|| index_url.clone()),
+                                },
+                                target: None,
                             },
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((child_name, child_request, child_path));
+                    children.push((child_name, child_ask, child_path, dependency.alias.clone()));
                 }
 
                 (
@@ -273,19 +329,19 @@ fn resolve_once(
                     let mut child_path = alias_path.clone();
                     child_path.push(alias.clone());
 
-                    let (child_name, child_request) = match overrides.get(&child_path) {
-                        Some((child_name, child_request)) => {
+                    let (child_name, child_ask) = match overrides.get(&child_path) {
+                        Some((child_name, child_ask)) => {
                             pending_matched.push(child_path.clone());
                             redirects.insert(alias.clone(), child_name.clone());
-                            (child_name.clone(), child_request.clone())
+                            (child_name.clone(), child_ask.clone())
                         }
                         None => (
                             dependency_name(dependency).to_lowercase(),
-                            request_for(dependency, &member.manifest)?,
+                            request_for(alias, dependency, &member.manifest)?,
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((child_name, child_request, child_path));
+                    children.push((child_name, child_ask, child_path, alias.clone()));
                 }
 
                 let path =
@@ -304,13 +360,13 @@ fn resolve_once(
         let seeded_here = context.is_none();
         let context = match context {
             Some(context) => context,
-            None => seed_context(environment, prefer_environment, &name)?,
+            None => seed_context(target, environment, prefer_environment, &name)?,
         };
         if seeded_here {
             /* recorded even when the gate below dedups, so unmatched-
             override diagnostics can still find this root's tree */
             seed_contexts.insert(alias_path[0].clone(), context);
-            if let Some((existing, first_req)) = resolved.get(&(name.clone(), context)) {
+            if let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context)) {
                 if req.matches(&existing.version) {
                     continue; // this tree already walked the package, children drop
                 }
@@ -318,7 +374,9 @@ fn resolve_once(
                     name,
                     context,
                     first: first_req.clone(),
+                    first_by: first_by.label(),
                     second: req_text,
+                    second_by: required_by.label(),
                 });
             }
         }
@@ -327,11 +385,12 @@ fn resolve_once(
         requirement, honor it like the dedup gate would have. workspace
         specifiers' own req is "*", so only converted edges can trip this */
         if matches!(source, DownloadSource::Workspace { .. }) && !req.matches(&version) {
-            return Err(Error::DependencyConflict {
+            return Err(Error::WorkspaceMemberConflict {
                 name,
                 context,
-                first: "*".to_string(),
-                second: req_text,
+                version: version.to_string(),
+                req: req_text,
+                required_by: required_by.label(),
             });
         }
 
@@ -341,13 +400,18 @@ fn resolve_once(
             .or_insert(alias_path.clone());
         overrides_matched.extend(pending_matched);
         discovered.extend(pending_discovered);
-        for (child_name, child_request, child_path) in children {
+        let requirer_id = format!("{name}@{version}");
+        for (child_name, child_ask, child_path, child_alias) in children {
             queue.push_back(QueueEntry {
                 name: child_name,
-                request: child_request,
+                ask: child_ask,
                 link: None,
                 alias_path: child_path,
                 context: Some(context),
+                required_by: Requirer::Package {
+                    id: requirer_id.clone(),
+                    alias: child_alias,
+                },
             });
         }
 
@@ -365,6 +429,7 @@ fn resolve_once(
                     redirects,
                 },
                 req_text,
+                required_by,
             ),
         );
     }
@@ -403,7 +468,10 @@ fn resolve_once(
         });
     }
 
-    Ok(resolved.into_values().map(|(install, _)| install).collect())
+    Ok(resolved
+        .into_values()
+        .map(|(install, ..)| install)
+        .collect())
 }
 
 /** what an overridden edge asks for instead, the root manifest's own
@@ -414,35 +482,43 @@ fn overridden_edge(
     replacement: &Override,
     path: &[String],
     manifest: &Manifest,
-) -> Result<(String, Request), Error> {
-    let dependency = match replacement {
-        Override::Alias(alias) => {
+) -> Result<(String, Ask), Error> {
+    /* the label is what an error about this specifier tells the user to go
+    and edit, so it has to follow the alias form to the [dependencies] entry
+    it really borrows -- naming the override path there would send them
+    looking for a dependency by that name, and there isn't one */
+    let (label, dependency) = match replacement {
+        Override::Alias(alias) => (
+            alias.clone(),
             manifest
                 .dependencies
                 .get(alias)
                 .ok_or_else(|| Error::OverrideAliasMissing {
                     path: path.join("."),
                     alias: alias.clone(),
-                })?
-        }
-        Override::Specifier(dependency) => dependency,
+                })?,
+        ),
+        Override::Specifier(dependency) => (path.join("."), dependency),
     };
     Ok((
         dependency_name(dependency).to_lowercase(),
-        request_for(dependency, manifest)?,
+        request_for(&label, dependency, manifest)?,
     ))
 }
 
-/** a seed's context is its own resolved environment, else the project's
-`[target]` one. placement is decided at resolve time since children queue
-with it, so unlike a package's own environment it can never wait for the
-archive to be extracted and inspected. */
+/** a seed's context is what its specifier `target`s, else its own resolved
+environment, else the project's `[target]` one. placement is decided at
+resolve time since children queue with it, so unlike a package's own
+environment it can never wait for the archive to be extracted and
+inspected. */
 fn seed_context(
+    target: Option<Environment>,
     environment: Option<Environment>,
     prefer: Option<Environment>,
     name: &str,
 ) -> Result<Environment, Error> {
-    environment
+    target
+        .or(environment)
         .or(prefer)
         .ok_or_else(|| Error::UnknownPackageEnvironment(name.to_string()))
 }
@@ -455,14 +531,19 @@ fn dependency_name(dependency: &Dependency) -> &str {
 }
 
 /** Queue entry for a dependency of `owner`. Index keys resolve against the
-owner's [indices], so a member's deps use the member's. */
-fn request_for(dependency: &Dependency, owner: &Manifest) -> Result<Request, Error> {
-    Ok(match dependency {
+owner's [indices], so a member's deps use the member's. `alias` names the
+entry in errors about it. */
+fn request_for(alias: &str, dependency: &Dependency, owner: &Manifest) -> Result<Ask, Error> {
+    let request = match dependency {
         Dependency::Registry { version, index, .. } => Request::Registry {
             req_text: version.clone(),
             index_url: owner.index_url(index.as_deref())?.to_string(),
         },
         Dependency::Workspace { .. } => Request::Workspace,
+    };
+    Ok(Ask {
+        request,
+        target: dependency_target(alias, dependency)?,
     })
 }
 
@@ -578,17 +659,34 @@ mod tests {
 
     #[test]
     fn seed_contexts_fall_back_to_the_target_environment() {
-        // own environment first, [target] second, then a hard error
+        /* the specifier's own `target` first, then the package's own
+        environment, then [target], then a hard error */
         assert_eq!(
-            seed_context(Some(Environment::Server), Some(Environment::Roblox), "a/b").unwrap(),
+            seed_context(
+                Some(Environment::Server),
+                Some(Environment::Roblox),
+                Some(Environment::Roblox),
+                "a/b"
+            )
+            .unwrap(),
             Environment::Server
         );
         assert_eq!(
-            seed_context(None, Some(Environment::Lune), "a/b").unwrap(),
+            seed_context(
+                None,
+                Some(Environment::Server),
+                Some(Environment::Roblox),
+                "a/b"
+            )
+            .unwrap(),
+            Environment::Server
+        );
+        assert_eq!(
+            seed_context(None, None, Some(Environment::Lune), "a/b").unwrap(),
             Environment::Lune
         );
         assert!(matches!(
-            seed_context(None, None, "a/b"),
+            seed_context(None, None, None, "a/b"),
             Err(Error::UnknownPackageEnvironment(name)) if name == "a/b"
         ));
     }
@@ -726,6 +824,189 @@ mod tests {
             }
         ));
 
+        /* and it names both sides. the requirement texts alone say what
+        disagrees, never which entry to go and edit */
+        let named = resolve_with(
+            "svc = { name = \"acme/svc\", version = \"^1\" }\n\
+             later = { name = \"acme/svc\", version = \"^2\" }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(named.contains("acme/svc"), "{named}");
+        assert!(named.contains("lpm.toml (as 'svc')"), "{named}");
+        assert!(named.contains("lpm.toml (as 'later')"), "{named}");
+
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /** a `target` on a [dependencies] entry moves that dependency, and its
+    whole subtree, into the tree it names -- a Roblox package pulled in
+    server-side only. the package keeps its own environment, which is what
+    names the folder its dependents link it through. */
+    #[test]
+    fn dependency_targets_move_a_seed_into_another_tree() {
+        /// removes the fixture dirs even when an assertion panics.
+        struct Cleanup(Vec<std::path::PathBuf>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for dir in &self.0 {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }
+
+        let origin = std::env::temp_dir().join("lpm-test-dep-target-origin");
+        let _ = fs::remove_dir_all(&origin);
+        fs::create_dir_all(origin.join("acme")).unwrap();
+        let url = origin.to_string_lossy().replace('\\', "/");
+        let cache = crate::registry::index::cache_dir(&url).unwrap();
+        let _ = fs::remove_dir_all(&cache);
+        let _cleanup = Cleanup(vec![origin.clone(), cache.clone()]);
+
+        let entry = |name: &str, version: &str, dependencies: &str| {
+            format!(
+                "{{\"package\":{{\"name\":\"{name}\",\"version\":\"{version}\",\"realm\":\"shared\",\"registry\":\"\"}},\"dependencies\":{{{dependencies}}}}}\n"
+            )
+        };
+        fs::write(
+            origin.join("config.json"),
+            r#"{"api":"https://example.com"}"#,
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/core"),
+            entry("acme/core", "1.0.0", r#""lib":"acme/lib@^1.0.0""#),
+        )
+        .unwrap();
+        fs::write(
+            origin.join("acme/lib"),
+            entry("acme/lib", "1.0.0", "") + &entry("acme/lib", "2.0.0", ""),
+        )
+        .unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec!["commit", "-m", "fixture"],
+        ] {
+            let mut full = vec![
+                "-C",
+                origin.to_str().unwrap(),
+                "-c",
+                "user.name=lpm-test",
+                "-c",
+                "user.email=lpm-test@localhost",
+            ];
+            full.extend(args);
+            crate::sys::git::run(&full).unwrap();
+        }
+
+        let resolve_with = |dependencies: &str| {
+            let manifest: Manifest = toml::from_str(&format!(
+                "[package]\nname = \"acme/game\"\nversion = \"0.1.0\"\n\n\
+                 [target]\nenvironment = \"roblox\"\n\n\
+                 [indices]\ndefault = \"{url}\"\n\n[dependencies]\n{dependencies}"
+            ))
+            .unwrap();
+            resolve(&manifest, &origin, Refresh::Never, &mut Vec::new())
+        };
+
+        // without a target, a roblox package lands in the roblox tree
+        let plain = resolve_with("Core = { name = \"acme/core\", version = \"^1\" }\n").unwrap();
+        assert!(
+            plain
+                .iter()
+                .all(|install| install.context == Environment::Roblox)
+        );
+
+        /* with one, the seed AND everything it drags in move to the server
+        tree, while each package's own environment is untouched */
+        let targeted = resolve_with(
+            "Core = { name = \"acme/core\", version = \"^1\", target = \"server\" }\n",
+        )
+        .unwrap();
+        assert_eq!(targeted.len(), 2);
+        for install in &targeted {
+            assert_eq!(install.context, Environment::Server, "{}", install.name);
+            assert_eq!(install.environment, Some(Environment::Roblox));
+        }
+
+        /* the same package under two trees is two installs, which is what
+        makes "server-only copy plus the roblox one" expressible at all */
+        let both = resolve_with(
+            "Core = { name = \"acme/core\", version = \"^1\" }\n\
+             ServerCore = { name = \"acme/core\", version = \"^1\", target = \"server\" }\n",
+        )
+        .unwrap();
+        let contexts: Vec<Environment> = both
+            .iter()
+            .filter(|install| install.name == "acme/core")
+            .map(|install| install.context)
+            .collect();
+        assert_eq!(contexts, [Environment::Roblox, Environment::Server]);
+
+        // a target lpm can't move a package into is refused before any network
+        assert!(matches!(
+            resolve_with("Core = { name = \"acme/core\", version = \"^1\", target = \"lune\" }\n"),
+            Err(Error::DependencyTargetInvalid { .. })
+        ));
+
+        /* an entry whose tree is already inherited ignores `target` outright
+        rather than half-honoring it. an [overrides] specifier is the
+        reachable case: acme/core's `lib` edge is redirected, and the
+        replacement lands in acme/core's tree like any other transitive
+        would -- it may not be dragged into the server root, where nothing
+        that requires it lives */
+        let overridden = resolve_with(
+            "Core = { name = \"acme/core\", version = \"^1\" }\n\n\
+             [overrides]\n\
+             \"Core.lib\" = { name = \"acme/lib\", version = \"^2\", target = \"server\" }\n",
+        )
+        .unwrap();
+        let lib = overridden
+            .iter()
+            .find(|install| install.name == "acme/lib")
+            .unwrap();
+        assert_eq!(lib.context, Environment::Roblox);
+        assert_eq!(lib.version, semver::Version::new(2, 0, 0));
+
+        /* and the error about a bad one names the [dependencies] entry to go
+        and edit, not the override path, which is nobody's dependency */
+        let mislabeled = resolve_with(
+            "Core = { name = \"acme/core\", version = \"^1\" }\n\
+             Lib = { name = \"acme/lib\", version = \"^2\", target = \"lune\" }\n\n\
+             [overrides]\n\"Core.lib\" = \"Lib\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&mislabeled, Error::DependencyTargetInvalid { alias, .. } if alias == "Lib"),
+            "{mislabeled:?}"
+        );
+
+        /* separating the two into different trees also separates their
+        version requirements: acme/core wants lib ^1.0.0 and the manifest
+        wants ^2, which conflicts only while they share a tree */
+        let conflict = resolve_with(
+            "Core = { name = \"acme/core\", version = \"^1\" }\n\
+             Lib = { name = \"acme/lib\", version = \"^2\" }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        // the transitive side names the package that asked, not just its req
+        assert!(
+            conflict.contains("acme/core@1.0.0 (as 'lib')"),
+            "{conflict}"
+        );
+        assert!(conflict.contains("lpm.toml (as 'Lib')"), "{conflict}");
+        assert!(conflict.contains("in the roblox tree"), "{conflict}");
+
+        assert!(
+            resolve_with(
+                "Core = { name = \"acme/core\", version = \"^1\", target = \"server\" }\n\
+                 Lib = { name = \"acme/lib\", version = \"^2\" }\n",
+            )
+            .is_ok()
+        );
+
         let _ = fs::remove_dir_all(&cache);
     }
 
@@ -849,13 +1130,21 @@ mod tests {
         assert_eq!(cores[1].link, None);
 
         // an edge whose requirement the member can't satisfy is a conflict
+        let conflict = resolve_with("strict").unwrap_err();
         assert!(matches!(
-            resolve_with("strict").unwrap_err(),
-            Error::DependencyConflict {
+            conflict,
+            Error::WorkspaceMemberConflict {
                 context: Environment::Server,
                 ..
             }
         ));
+        // and says who wanted what, against the version really on disk
+        let message = conflict.to_string();
+        assert!(
+            message.contains("acme/strict@1.0.0 (as 'core')"),
+            "{message}"
+        );
+        assert!(message.contains("1.2.0"), "{message}");
     }
 
     /** [overrides] end to end, against a real local git index. a specifier

@@ -232,6 +232,7 @@ fn convert_workspace_dependencies(
         let Dependency::Workspace {
             workspace: name,
             version,
+            target,
         } = dependency
         else {
             continue;
@@ -260,6 +261,8 @@ fn convert_workspace_dependencies(
                 .get(DEFAULT_INDEX_NAME)
                 .filter(|url| url.as_str() != DEFAULT_INDEX_URL)
                 .cloned(),
+            // the specifier's `target` is the consumer's choice either way
+            target: target.clone(),
         };
     }
     Ok(())
@@ -359,7 +362,7 @@ mod tests {
         since the member publishes to lpm's own registry */
         assert!(matches!(
             &manifest.dependencies["core"],
-            Dependency::Registry { name, version, index: None }
+            Dependency::Registry { name, version, index: None, .. }
                 if name == "acme/core" && version == "~1.2.3"
         ));
         // the converted spec is what the packed manifest carries
@@ -377,6 +380,7 @@ mod tests {
             Dependency::Workspace {
                 workspace: "acme/core".to_string(),
                 version: "^".to_string(),
+                target: None,
             },
         );
         assert!(matches!(
