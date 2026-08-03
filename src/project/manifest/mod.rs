@@ -19,7 +19,12 @@ pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
-    pub package: Package,
+    /** who this package is, for the registry. optional: a manifest that only
+    consumes packages -- a game, an app, anything that never publishes -- has
+    nothing to put here. `lpm publish` is the one command that demands it, see
+    [`Error::PackageMissing`]. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<Package>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
     #[serde(default, skip_serializing_if = "Config::is_default")]
@@ -554,9 +559,16 @@ impl Manifest {
         }
     }
 
-    /// "scope/name@version", how lpm names this package in its own output.
-    pub fn id(&self) -> String {
-        format!("{}@{}", self.package.name, self.package.version)
+    /// the [package] name, when the manifest declares one at all.
+    pub fn name(&self) -> Option<&str> {
+        self.package.as_ref().map(|package| package.name.as_str())
+    }
+
+    /// "scope/name@version", how lpm names this package in its own output. None without a [package] table -- a consuming-only project has no such name.
+    pub fn id(&self) -> Option<String> {
+        self.package
+            .as_ref()
+            .map(|package| format!("{}@{}", package.name, package.version))
     }
 
     /// the command a `[scripts]` entry runs. read side only, used by `lpm run`. edits go through `edit::ManifestDoc`.
@@ -642,7 +654,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.package.name, "scope/name");
+        assert_eq!(manifest.name(), Some("scope/name"));
+        assert_eq!(manifest.id().as_deref(), Some("scope/name@0.1.0"));
         assert_eq!(
             manifest.target.as_ref().unwrap().environment,
             Environment::Lune
@@ -738,6 +751,7 @@ mod tests {
             manifest.packages_out(Environment::Lute),
             std::path::PathBuf::from("packages").join("lute")
         );
+
         // the pre-rename key still points the same environment somewhere else
         let legacy: Manifest = toml::from_str(
             r#"
@@ -783,6 +797,61 @@ mod tests {
         assert!(Environment::from_wally_realm("lune").is_err());
     }
 
+    /** the rename's compatibility contract. `shared` is what every manifest,
+    lockfile and index entry published before it says, so it has to keep
+    parsing, in every reader -- while `roblox` is the only spelling lpm
+    writes, and the only folder name it installs into. */
+    #[test]
+    fn shared_is_still_read_as_roblox_everywhere() {
+        assert_eq!(
+            Environment::from_lpm("shared").unwrap(),
+            Environment::Roblox
+        );
+        assert_eq!(
+            Environment::from_lpm("roblox").unwrap(),
+            Environment::Roblox
+        );
+        assert_eq!(Environment::Roblox.dir_name(), "roblox");
+        assert_eq!(Environment::Roblox.to_string(), "roblox");
+
+        let manifest: Manifest = toml::from_str(
+            "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n\
+             [target]\nenvironment = \"shared\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.target.as_ref().unwrap().environment,
+            Environment::Roblox
+        );
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(
+            serialized.contains(r#"environment = "roblox""#),
+            "{serialized}"
+        );
+    }
+
+    /** [package] is only what a *publishable* package needs. a project that
+    just consumes packages has no name or version to state, and every
+    command but `publish` must work without one. */
+    #[test]
+    fn manifests_without_a_package_table_are_projects() {
+        let manifest: Manifest =
+            toml::from_str("[dependencies]\nChief = { name = \"chief/core\", version = \"^\" }\n")
+                .unwrap();
+
+        assert!(manifest.package.is_none());
+        assert_eq!(manifest.name(), None);
+        assert_eq!(manifest.id(), None);
+        assert_eq!(manifest.dependencies.len(), 1);
+
+        // an absent table stays absent on write, it isn't invented as empty
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(!serialized.contains("[package]"), "{serialized}");
+        // ...and an entirely empty manifest is a valid project too
+        let empty: Manifest = toml::from_str("").unwrap();
+        assert!(empty.package.is_none() && empty.dependencies.is_empty());
+    }
+
     #[test]
     fn parses_workspace_manifests_and_dependencies() {
         /* the chief repo's shape, private root listing member globs, members
@@ -800,7 +869,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(root.package.private);
+        assert!(root.package.as_ref().unwrap().private);
         // a root needs a [target] but no `main`. members carry the code.
         assert!(root.target.as_ref().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
@@ -827,7 +896,6 @@ mod tests {
             version = "0.1.0"
 
             [dependencies]
-
             core = { workspace = "chief/core", version = "^" }
             pinned = { workspace = "chief/bin" }
             "#,
@@ -853,7 +921,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(!plain.package.private);
+        assert!(!plain.package.as_ref().unwrap().private);
         assert!(plain.workspace_members().is_empty());
         let serialized = toml::to_string(&plain).unwrap();
         assert!(!serialized.contains("private"));

@@ -51,7 +51,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let workspace = Workspace::open(Path::new("."))?;
     let mut failed = Vec::new();
 
-    let root_name = manifest.package.name.clone();
+    let root_name = manifest.name().unwrap_or("the workspace root").to_string();
     if let Err(error) = publish_project(manifest, args.dry_run, oidc_token) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
@@ -61,7 +61,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
         if member.dir == workspace.root {
             continue;
         }
-        let name = member.manifest.package.name.clone();
+        let name = member.label();
         let result = workspace::in_dir(&member.dir, || {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
@@ -91,10 +91,22 @@ fn publish_project(
     dry_run: bool,
     oidc_token: Option<&str>,
 ) -> Result<(), Error> {
-    if manifest.package.private {
+    /* the one command that needs a [package] table: it is the registry
+    metadata, and nothing else in lpm reads it. a workspace root without one
+    is the same pure container as a private or main-less root, so it steps
+    aside for its members rather than failing the whole publish */
+    let Some(package) = &manifest.package else {
+        if !manifest.workspace_members().is_empty() {
+            println!("Skipping the workspace root: it declares no [package]");
+            return Ok(());
+        }
+        return Err(Error::PackageMissing);
+    };
+
+    if package.private {
         println!(
             "Skipping {}: package is private, refusing to publish",
-            manifest.package.name
+            package.name
         );
         return Ok(());
     }
@@ -105,26 +117,23 @@ fn publish_project(
         .as_ref()
         .is_some_and(|target| target.main.is_some());
     if !manifest.workspace_members().is_empty() && !has_main {
-        println!(
-            "Skipping {}: workspace root without a main",
-            manifest.package.name
-        );
+        println!("Skipping {}: workspace root without a main", package.name);
         return Ok(());
     }
 
     let environment = publish_environment(&manifest)?;
+    let package_name = package.name.clone();
     let (scope, name) = {
-        let (scope, name) = split_package_name(&manifest.package.name)?;
+        let (scope, name) = split_package_name(&package_name)?;
         (scope.to_string(), name.to_string())
     };
-    let version = semver::Version::parse(&manifest.package.version)?;
+    let version = semver::Version::parse(&package.version)?;
 
     /* the API appends [package] authors to the scope's owner list, each one
     can then publish to the whole scope, and 400s anything not shaped like
     a GitHub username. catch that before packing. it does NOT check the
     account exists, so a typo silently grants a stranger-to-be */
-    if let Some(author) = manifest
-        .package
+    if let Some(author) = package
         .authors
         .iter()
         .find(|author| !is_github_username(author))
@@ -135,7 +144,7 @@ fn publish_project(
     }
 
     // the API 400s descriptions past its cap, catch that before packing too
-    validate_description(manifest.package.description.as_deref())?;
+    validate_description(package.description.as_deref())?;
 
     /* workspace deps become registry ones in the archive's manifest,
     the on-disk lpm.toml is never touched */
@@ -157,8 +166,7 @@ fn publish_project(
 
     if dry_run {
         println!(
-            "Would publish {}@{version} ({environment}) to {}:",
-            manifest.package.name,
+            "Would publish {package_name}@{version} ({environment}) to {}:",
             registry::API_URL,
         );
         println!(
@@ -191,10 +199,9 @@ fn publish_project(
     }
 
     ui::print_success(&format!(
-        "Published {}@{version} ({environment})",
-        manifest.package.name
+        "Published {package_name}@{version} ({environment})"
     ));
-    println!("Install it with `lpm add {}`", manifest.package.name);
+    println!("Install it with `lpm add {package_name}`");
     Ok(())
 }
 
@@ -235,7 +242,14 @@ fn convert_workspace_dependencies(
         let member = workspace
             .member(name)
             .ok_or_else(|| Error::NoWorkspaceMember(name.clone()))?;
-        let member_version = semver::Version::parse(&member.manifest.package.version)?;
+        /* `member()` matched on the [package] name, so a member without one
+        was never a candidate and this cannot be the missing-table case */
+        let member_package = member
+            .manifest
+            .package
+            .as_ref()
+            .ok_or_else(|| Error::NoWorkspaceMember(name.clone()))?;
+        let member_version = semver::Version::parse(&member_package.version)?;
 
         *dependency = Dependency::Registry {
             name: name.clone(),

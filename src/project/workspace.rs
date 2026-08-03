@@ -15,6 +15,22 @@ pub struct Member {
     pub manifest: Manifest,
 }
 
+impl Member {
+    /** how commands name this member while working on it. its [package]
+    name when it publishes one, its folder otherwise -- a member can be a
+    plain project with no [package] table at all. the folder's own name,
+    not `dir`, which `Workspace::open` made absolute and would spell out
+    the user's home directory. */
+    pub fn label(&self) -> String {
+        self.manifest.name().map(str::to_string).unwrap_or_else(|| {
+            self.dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.dir.display().to_string())
+        })
+    }
+}
+
 pub struct Workspace {
     /// absolute path of the root, the dir whose manifest lists the member globs.
     pub root: PathBuf,
@@ -43,11 +59,11 @@ impl Workspace {
         Ok(Workspace { root, members })
     }
 
-    /// the member publishing under `name`, if any.
+    /// the member publishing under `name`, if any. members with no [package] table publish under no name and never match.
     pub fn member(&self, name: &str) -> Option<&Member> {
         self.members
             .iter()
-            .find(|member| member.manifest.package.name == name)
+            .find(|member| member.manifest.name() == Some(name))
     }
 }
 
@@ -221,11 +237,26 @@ mod tests {
         let names: Vec<_> = workspace
             .members
             .iter()
-            .map(|member| member.manifest.package.name.as_str())
+            .filter_map(|member| member.manifest.name())
             .collect();
         assert_eq!(names, ["acme/core", "acme/extra"]);
         assert!(workspace.member("acme/core").is_some());
         assert!(workspace.member("acme/skipped").is_none());
+
+        /* a member that is a plain project, no [package] at all, is still a
+        member -- it just publishes under no name, so nothing resolves a
+        workspace dependency to it, and commands call it by its directory */
+        write(&base.join("packages/app"), "lpm.toml", "[dependencies]\n");
+        let workspace = Workspace::open(&base).unwrap();
+        let app = workspace
+            .members
+            .iter()
+            .find(|member| member.dir.ends_with("app"))
+            .unwrap();
+        assert_eq!(app.manifest.name(), None);
+        // the folder's name, not the absolute path `dir` holds
+        assert_eq!(app.label(), "app");
+        assert!(workspace.member("acme/app").is_none());
 
         let _ = fs::remove_dir_all(&base);
     }

@@ -171,7 +171,7 @@ pub fn run() -> Result<(), Error> {
         .prompt()?;
 
     let manifest = Manifest {
-        package: Package {
+        package: Some(Package {
             name,
             version: version.trim().to_string(),
             private: false,
@@ -179,7 +179,7 @@ pub fn run() -> Result<(), Error> {
             authors: parse_authors(&authors_input),
             repository: non_empty(repository),
             license: Some(license.to_string()),
-        },
+        }),
         target: Some(Target {
             environment: Environment::from_lpm(environment)?,
             main: non_empty(main),

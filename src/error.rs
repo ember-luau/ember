@@ -215,6 +215,11 @@ pub enum Error {
     },
 
     #[error(
+        "No [package] table in lpm.toml; publishing needs one with a name and version (run `lpm init` and choose 'package', or add it by hand)"
+    )]
+    PackageMissing,
+
+    #[error(
         "[config] points {first}-packages-out and {second}-packages-out at the same folder ({path}); environment roots must stay distinct"
     )]
     PackagesOutCollision {

@@ -99,7 +99,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
             if member.dir == workspace.root {
                 continue;
             }
-            println!("Installing {}", member.manifest.package.name);
+            println!("Installing {}", member.label());
             workspace::in_dir(&member.dir, || {
                 let manifest = Manifest::load()?;
                 let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);

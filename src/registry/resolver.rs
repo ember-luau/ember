@@ -253,7 +253,12 @@ fn resolve_once(
                 let member = workspace
                     .member(&name)
                     .ok_or_else(|| Error::NoWorkspaceMember(name.clone()))?;
-                let version = semver::Version::parse(&member.manifest.package.version)?;
+                let member_package = member
+                    .manifest
+                    .package
+                    .as_ref()
+                    .ok_or_else(|| Error::NoWorkspaceMember(name.clone()))?;
+                let version = semver::Version::parse(&member_package.version)?;
                 let environment = member
                     .manifest
                     .target
