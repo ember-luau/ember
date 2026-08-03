@@ -111,8 +111,8 @@ mod tests {
             LockedPackage {
                 name: "evaera/promise".to_string(),
                 version: "4.0.0".to_string(),
-                environment: Environment::Shared,
-                // a shared package pulled in under a server root
+                environment: Environment::Roblox,
+                // a roblox package pulled in under a server root
                 context: Some(Environment::Server),
                 link: Some("Promise".to_string()),
                 index: "https://github.com/UpliftGames/wally-index".to_string(),
@@ -198,6 +198,6 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.packages[0].link.as_deref(), Some("thing"));
-        assert_eq!(parsed.packages[0].context(), Environment::Shared);
+        assert_eq!(parsed.packages[0].context(), Environment::Roblox);
     }
 }

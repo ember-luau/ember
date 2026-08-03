@@ -19,7 +19,12 @@ pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
-    pub package: Package,
+    /** who this package is, for the registry. optional: a manifest that only
+    consumes packages -- a game, an app, anything that never publishes -- has
+    nothing to put here. `lpm publish` is the one command that demands it, see
+    [`Error::PackageMissing`]. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<Package>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
     #[serde(default, skip_serializing_if = "Config::is_default")]
@@ -51,11 +56,13 @@ pub struct Manifest {
 /// per-environment install locations, each defaults to "packages/<env>".
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
+    /// `shared-packages-out` is the pre-rename spelling, see [`Environment::Roblox`].
     #[serde(
-        rename = "shared-packages-out",
+        rename = "roblox-packages-out",
+        alias = "shared-packages-out",
         skip_serializing_if = "Option::is_none"
     )]
-    pub shared_packages_out: Option<String>,
+    pub roblox_packages_out: Option<String>,
     #[serde(
         rename = "server-packages-out",
         skip_serializing_if = "Option::is_none"
@@ -71,7 +78,7 @@ pub struct Config {
 
 impl Config {
     fn is_default(&self) -> bool {
-        self.shared_packages_out.is_none()
+        self.roblox_packages_out.is_none()
             && self.server_packages_out.is_none()
             && self.lune_packages_out.is_none()
             && self.luau_packages_out.is_none()
@@ -131,8 +138,13 @@ pub struct Target {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
-    /// Luau code that must run in Roblox
-    Shared,
+    /** Luau code that must run in Roblox, on either side.
+    spelled `shared` before this rename, after wally's realm. that name read
+    as "shared between packages" often enough to be worth losing, so `roblox`
+    is what everything writes now -- but `shared` still parses everywhere,
+    since every already-published manifest and lockfile says it. */
+    #[serde(alias = "shared")]
+    Roblox,
     /// Roblox server-side only
     Server,
     /// needs the Lune runtime
@@ -145,7 +157,7 @@ pub enum Environment {
 
 impl Environment {
     pub const ALL: [Environment; 5] = [
-        Environment::Shared,
+        Environment::Roblox,
         Environment::Server,
         Environment::Lune,
         Environment::Luau,
@@ -154,7 +166,7 @@ impl Environment {
 
     pub fn dir_name(self) -> &'static str {
         match self {
-            Environment::Shared => "shared",
+            Environment::Roblox => "roblox",
             Environment::Server => "server",
             Environment::Lune => "lune",
             Environment::Luau => "luau",
@@ -165,7 +177,7 @@ impl Environment {
     /// translates a pesde `target.environment` value.
     pub fn from_pesde(environment: &str) -> Result<Self, Error> {
         match environment {
-            "roblox" => Ok(Environment::Shared),
+            "roblox" => Ok(Environment::Roblox),
             "roblox_server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
@@ -177,16 +189,16 @@ impl Environment {
     /// translates a wally `realm` value.
     pub fn from_wally_realm(realm: &str) -> Result<Self, Error> {
         match realm {
-            "shared" => Ok(Environment::Shared),
+            "shared" => Ok(Environment::Roblox),
             "server" => Ok(Environment::Server),
             other => Err(Error::UnsupportedEnvironment(other.to_string())),
         }
     }
 
-    /// parses lpm's own environment names like "shared" and "lune".
+    /// parses lpm's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
     pub fn from_lpm(environment: &str) -> Result<Self, Error> {
         match environment {
-            "shared" => Ok(Environment::Shared),
+            "roblox" | "shared" => Ok(Environment::Roblox),
             "server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
@@ -282,6 +294,10 @@ pub enum Dependency {
         /// key into [indices]. None means the default luaupm index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
+        /// see [`Dependency::target`]. kept unparsed so a typo reports itself
+        /// instead of failing the untagged match with "no variant".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -292,11 +308,63 @@ pub enum Dependency {
         workspace: String,
         #[serde(default = "default_workspace_version")]
         version: String,
+        /// see [`Dependency::target`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
 }
 
 fn default_workspace_version() -> String {
     "^".to_string()
+}
+
+impl Dependency {
+    /** the `target` an entry states, e.g.
+    `Chief = { name = "chief/core", version = "^", target = "server" }`.
+
+    it overrides which environment tree a *direct* dependency installs
+    under, so a package published for Roblox can be pulled into the server
+    root instead of the project's own, and it picks the target of a
+    multi-target index entry to match. parsed by [`dependency_target`],
+    which is also where the roblox/server restriction lives.
+
+    direct only, and that is a rule about the tree, not a shortcut. every
+    other entry reaches the resolver with a context already inherited from
+    the root of its subtree, and moving one out of that tree would strand
+    its dependents: they link what is installed alongside them and nothing
+    else. so `target` on a specifier lpm only ever meets transitively --
+    an `[overrides]` value, or a workspace member's own dependency while
+    the *root* installs -- has no effect. it is honored when that member
+    installs itself, where the same entry is a direct dependency. */
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Dependency::Registry { target, .. } | Dependency::Workspace { target, .. } => {
+                target.as_deref()
+            }
+        }
+    }
+}
+
+/** parses a dependency's `target` override, see [`Dependency::target`].
+`alias` only names the entry in the error.
+
+only the two Roblox trees can be chosen. the rest are runtimes -- moving a
+Roblox package into `lune` would put it where nothing that runs it lives,
+and lpm would have no way to tell that from a typo. */
+pub fn dependency_target(
+    alias: &str,
+    dependency: &Dependency,
+) -> Result<Option<Environment>, Error> {
+    let Some(target) = dependency.target() else {
+        return Ok(None);
+    };
+    match Environment::from_lpm(target.trim()) {
+        Ok(environment @ (Environment::Roblox | Environment::Server)) => Ok(Some(environment)),
+        _ => Err(Error::DependencyTargetInvalid {
+            alias: alias.to_string(),
+            target: target.to_string(),
+        }),
+    }
 }
 
 /** an [overrides] value, what an alias path should resolve to instead of
@@ -518,7 +586,7 @@ impl Manifest {
     /// folder an environment's packages (and their link files) install to.
     pub fn packages_out(&self, environment: Environment) -> std::path::PathBuf {
         let configured = match environment {
-            Environment::Shared => &self.config.shared_packages_out,
+            Environment::Roblox => &self.config.roblox_packages_out,
             Environment::Server => &self.config.server_packages_out,
             Environment::Lune => &self.config.lune_packages_out,
             Environment::Luau => &self.config.luau_packages_out,
@@ -547,9 +615,16 @@ impl Manifest {
         }
     }
 
-    /// "scope/name@version", how lpm names this package in its own output.
-    pub fn id(&self) -> String {
-        format!("{}@{}", self.package.name, self.package.version)
+    /// the [package] name, when the manifest declares one at all.
+    pub fn name(&self) -> Option<&str> {
+        self.package.as_ref().map(|package| package.name.as_str())
+    }
+
+    /// "scope/name@version", how lpm names this package in its own output. None without a [package] table -- a consuming-only project has no such name.
+    pub fn id(&self) -> Option<String> {
+        self.package
+            .as_ref()
+            .map(|package| format!("{}@{}", package.name, package.version))
     }
 
     /// the command a `[scripts]` entry runs. read side only, used by `lpm run`. edits go through `edit::ManifestDoc`.
@@ -635,7 +710,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.package.name, "scope/name");
+        assert_eq!(manifest.name(), Some("scope/name"));
+        assert_eq!(manifest.id().as_deref(), Some("scope/name@0.1.0"));
         assert_eq!(
             manifest.target.as_ref().unwrap().environment,
             Environment::Lune
@@ -714,13 +790,13 @@ mod tests {
             version = "0.1.0"
 
             [config]
-            shared-packages-out = "src/ReplicatedStorage/Packages"
+            roblox-packages-out = "src/ReplicatedStorage/Packages"
             "#,
         )
         .unwrap();
 
         assert_eq!(
-            manifest.packages_out(Environment::Shared),
+            manifest.packages_out(Environment::Roblox),
             std::path::PathBuf::from("src/ReplicatedStorage/Packages")
         );
         assert_eq!(
@@ -731,13 +807,34 @@ mod tests {
             manifest.packages_out(Environment::Lute),
             std::path::PathBuf::from("packages").join("lute")
         );
+
+        // the pre-rename key still points the same environment somewhere else
+        let legacy: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [config]
+            shared-packages-out = "src/ReplicatedStorage/Packages"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.packages_out(Environment::Roblox),
+            std::path::PathBuf::from("src/ReplicatedStorage/Packages")
+        );
+        // and is rewritten under the new name whenever lpm writes the manifest
+        let serialized = toml::to_string(&legacy).unwrap();
+        assert!(serialized.contains("roblox-packages-out"), "{serialized}");
+        assert!(!serialized.contains("shared-packages-out"), "{serialized}");
     }
 
     #[test]
     fn translates_environments() {
         assert_eq!(
             Environment::from_pesde("roblox").unwrap(),
-            Environment::Shared
+            Environment::Roblox
         );
         assert_eq!(
             Environment::from_pesde("roblox_server").unwrap(),
@@ -747,13 +844,110 @@ mod tests {
         assert!(Environment::from_pesde("nonsense").is_err());
         assert_eq!(
             Environment::from_wally_realm("shared").unwrap(),
-            Environment::Shared
+            Environment::Roblox
         );
         assert_eq!(
             Environment::from_wally_realm("server").unwrap(),
             Environment::Server
         );
         assert!(Environment::from_wally_realm("lune").is_err());
+    }
+
+    /** the rename's compatibility contract. `shared` is what every manifest,
+    lockfile and index entry published before it says, so it has to keep
+    parsing, in every reader -- while `roblox` is the only spelling lpm
+    writes, and the only folder name it installs into. */
+    #[test]
+    fn shared_is_still_read_as_roblox_everywhere() {
+        assert_eq!(
+            Environment::from_lpm("shared").unwrap(),
+            Environment::Roblox
+        );
+        assert_eq!(
+            Environment::from_lpm("roblox").unwrap(),
+            Environment::Roblox
+        );
+        assert_eq!(Environment::Roblox.dir_name(), "roblox");
+        assert_eq!(Environment::Roblox.to_string(), "roblox");
+
+        let manifest: Manifest = toml::from_str(
+            "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n\
+             [target]\nenvironment = \"shared\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.target.as_ref().unwrap().environment,
+            Environment::Roblox
+        );
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(
+            serialized.contains(r#"environment = "roblox""#),
+            "{serialized}"
+        );
+    }
+
+    /** [package] is only what a *publishable* package needs. a project that
+    just consumes packages has no name or version to state, and every
+    command but `publish` must work without one. */
+    #[test]
+    fn manifests_without_a_package_table_are_projects() {
+        let manifest: Manifest =
+            toml::from_str("[dependencies]\nChief = { name = \"chief/core\", version = \"^\" }\n")
+                .unwrap();
+
+        assert!(manifest.package.is_none());
+        assert_eq!(manifest.name(), None);
+        assert_eq!(manifest.id(), None);
+        assert_eq!(manifest.dependencies.len(), 1);
+
+        // an absent table stays absent on write, it isn't invented as empty
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(!serialized.contains("[package]"), "{serialized}");
+        // ...and an entirely empty manifest is a valid project too
+        let empty: Manifest = toml::from_str("").unwrap();
+        assert!(empty.package.is_none() && empty.dependencies.is_empty());
+    }
+
+    #[test]
+    fn dependency_targets_are_limited_to_the_roblox_trees() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Chief = { name = "chief/core", version = "^", target = "server" }
+            Legacy = { name = "acme/legacy", version = "^", target = "shared" }
+            Plain = { name = "acme/plain", version = "^" }
+            Member = { workspace = "acme/member", target = "server" }
+            Runtime = { name = "acme/runtime", version = "^", target = "lune" }
+            Typo = { name = "acme/typo", version = "^", target = "sever" }
+            "#,
+        )
+        .unwrap();
+
+        let target = |alias: &str| dependency_target(alias, &manifest.dependencies[alias]);
+        assert_eq!(target("Chief").unwrap(), Some(Environment::Server));
+        // `shared` reads as `roblox` here like everywhere else
+        assert_eq!(target("Legacy").unwrap(), Some(Environment::Roblox));
+        assert_eq!(target("Plain").unwrap(), None);
+        // workspace specifiers take one too, so it can't be silently ignored
+        assert_eq!(target("Member").unwrap(), Some(Environment::Server));
+
+        /* a runtime environment and a typo are both refused, and both name
+        the entry: an untagged-enum "matched no variant" would name neither */
+        for alias in ["Runtime", "Typo"] {
+            assert!(
+                matches!(target(alias), Err(Error::DependencyTargetInvalid { alias: named, .. }) if named == alias),
+                "{alias} should be rejected"
+            );
+        }
+
+        // the key round-trips, so `lpm publish` doesn't silently drop it
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(serialized.contains(r#"target = "server""#), "{serialized}");
+        let reparsed: Manifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            dependency_target("Chief", &reparsed.dependencies["Chief"]).unwrap(),
+            Some(Environment::Server)
+        );
     }
 
     #[test]
@@ -768,12 +962,12 @@ mod tests {
             private = true
 
             [target]
-            environment = "shared"
+            environment = "roblox"
             workspace = ["packages/*", "!packages/legacy"]
             "#,
         )
         .unwrap();
-        assert!(root.package.private);
+        assert!(root.package.as_ref().unwrap().private);
         // a root needs a [target] but no `main`. members carry the code.
         assert!(root.target.as_ref().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
@@ -786,7 +980,7 @@ mod tests {
             version = "0.0.0"
 
             [target]
-            environment = "shared"
+            environment = "roblox"
             workspace_members = ["packages/*"]
             "#,
         )
@@ -807,7 +1001,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &member.dependencies["core"],
-            Dependency::Workspace { workspace, version }
+            Dependency::Workspace { workspace, version, .. }
                 if workspace == "chief/core" && version == "^"
         ));
         // version defaults to "^", pesde's default version type.
@@ -825,7 +1019,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(!plain.package.private);
+        assert!(!plain.package.as_ref().unwrap().private);
         assert!(plain.workspace_members().is_empty());
         let serialized = toml::to_string(&plain).unwrap();
         assert!(!serialized.contains("private"));

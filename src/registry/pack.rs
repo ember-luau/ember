@@ -21,10 +21,15 @@ const SKIP_NAMES: [&str; 6] = [
 /// `src/*`. `excludes` subtracts from the selection, and lpm.toml always
 /// ships.
 pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
-    let out_dirs: Vec<PathBuf> = Environment::ALL
+    let mut out_dirs: Vec<PathBuf> = Environment::ALL
         .into_iter()
         .map(|environment| manifest.packages_out(environment))
         .collect();
+    /* the pre-rename roblox output folder, see `Environment::Roblox`. only
+    `lpm install` clears it, so a publish that happens first would otherwise
+    walk straight into a whole vendored `.lpm` store and ship somebody
+    else's packages inside this archive */
+    out_dirs.push(Path::new("packages").join("shared"));
 
     let mut files = Vec::new();
     walk(root, root, &out_dirs, &mut files)?;
@@ -206,6 +211,14 @@ mod tests {
         write(&base, "node_modules/left-pad/index.js", "");
         write(&base, "packages/luau/Core.luau", "");
         write(&base, "Packages/Chief.luau", "");
+        /* the pre-rename roblox output folder. [config] here repoints that
+        environment elsewhere, so nothing else would exclude it, and an
+        install has not necessarily run to clear it */
+        write(
+            &base,
+            "packages/shared/.lpm/evaera_promise/lib/init.lua",
+            "",
+        );
 
         let manifest = parse_manifest(
             r#"
@@ -214,7 +227,7 @@ mod tests {
             version = "1.0.0"
 
             [config]
-            shared-packages-out = "Packages"
+            roblox-packages-out = "Packages"
             "#,
         );
 

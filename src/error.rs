@@ -204,15 +204,43 @@ pub enum Error {
     )]
     UnknownPackageEnvironment(String),
 
+    /** two requirements on one package that can't both hold. `first_by` and
+    `second_by` name who asked, since the requirement text alone leaves the
+    user grepping for which dependency dragged in the version they never
+    wrote -- the usual case being one package published to two registries
+    under two names. */
     #[error(
-        "Dependency conflict in the {context} tree: {name} is required as both '{first}' and '{second}'"
+        "Dependency conflict in the {context} tree: {name} is required as '{first}' by {first_by} and as '{second}' by {second_by}"
     )]
     DependencyConflict {
         name: String,
         context: Environment,
         first: String,
+        first_by: String,
         second: String,
+        second_by: String,
     },
+
+    #[error(
+        "Dependency conflict in the {context} tree: {name} is required as '{req}' by {required_by}, but the workspace member on disk is {version}; a workspace member always shadows the published copy"
+    )]
+    WorkspaceMemberConflict {
+        name: String,
+        context: Environment,
+        version: String,
+        req: String,
+        required_by: String,
+    },
+
+    #[error(
+        "Invalid target '{target}' for dependency '{alias}': only 'roblox' and 'server' can be targeted"
+    )]
+    DependencyTargetInvalid { alias: String, target: String },
+
+    #[error(
+        "No [package] table in lpm.toml; publishing needs one with a name and version (run `lpm init` and choose 'package', or add it by hand)"
+    )]
+    PackageMissing,
 
     #[error(
         "[config] points {first}-packages-out and {second}-packages-out at the same folder ({path}); environment roots must stay distinct"

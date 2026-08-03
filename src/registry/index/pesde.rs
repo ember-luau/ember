@@ -295,8 +295,8 @@ mod tests {
 
     #[test]
     fn parses_environments_from_both_namings() {
-        assert_eq!(parse_environment("shared").unwrap(), Environment::Shared);
-        assert_eq!(parse_environment("roblox").unwrap(), Environment::Shared);
+        assert_eq!(parse_environment("shared").unwrap(), Environment::Roblox);
+        assert_eq!(parse_environment("roblox").unwrap(), Environment::Roblox);
         assert_eq!(
             parse_environment("roblox_server").unwrap(),
             Environment::Server
@@ -417,7 +417,7 @@ mod tests {
         let candidate = Candidate {
             version: semver::Version::new(1, 2, 3),
             target: Some("shared".to_string()),
-            environment: Some(Environment::Shared),
+            environment: Some(Environment::Roblox),
             entry: parse_entries(r#"download = "https://cdn.luaupm.com/scope/pkg/1.2.3.tar.gz""#),
         };
 
@@ -490,7 +490,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.version, semver::Version::new(0, 1, 0));
-        assert_eq!(resolved.environment, Some(Environment::Shared));
+        assert_eq!(resolved.environment, Some(Environment::Roblox));
         assert_eq!(resolved.dependencies.len(), 1);
         assert_eq!(resolved.dependencies[0].name, "chief/bin");
         // No index named on the dependency, resolve it in the same index.

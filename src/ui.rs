@@ -60,9 +60,13 @@ command line it expands to.
 
 Printed for every script lpm runs, hooks included, because the whole point
 is that output arriving next has an attributable source -- doubly so for a
-hook, which nobody typed. `package` is "scope/name@version". */
-pub fn print_script_notice(package: &str, name: &str, command: &str) {
-    println!("{}", format!("> {package} {name}").dark_grey());
+hook, which nobody typed. `package` is "scope/name@version", or None in a
+project that declares no [package] and so has no such name. */
+pub fn print_script_notice(package: Option<&str>, name: &str, command: &str) {
+    match package {
+        Some(package) => println!("{}", format!("> {package} {name}").dark_grey()),
+        None => println!("{}", format!("> {name}").dark_grey()),
+    }
     println!("{}", format!("> {command}").dark_grey());
     // separates the banner from whatever the script itself prints
     println!();

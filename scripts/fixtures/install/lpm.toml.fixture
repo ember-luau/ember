@@ -5,7 +5,7 @@
 #
 # Same five wally packages scripts/bench.ps1 uses, so the two gates exercise the
 # same tree. They cover what an install actually does: nested dependencies
-# (Comm -> Promise/Signal/T), a shared environment, and entry points that get
+# (Comm -> Promise/Signal/T), a roblox environment, and entry points that get
 # parsed for exported types.
 
 [package]
@@ -13,7 +13,7 @@ name = "fixture/install"
 version = "0.1.0"
 
 [target]
-environment = "shared"
+environment = "roblox"
 
 [indices]
 wally = "https://github.com/UpliftGames/wally-index"

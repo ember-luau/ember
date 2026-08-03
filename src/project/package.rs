@@ -403,7 +403,7 @@ mod tests {
 
         let pesde = base.join("pesde");
         write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");
-        assert_eq!(environment(&pesde), Some(Environment::Shared));
+        assert_eq!(environment(&pesde), Some(Environment::Roblox));
 
         let wally = base.join("wally");
         write_package(&wally, "wally.toml", "[package]\nrealm = \"server\"");
@@ -660,7 +660,7 @@ mod tests {
                 &format!(r#"{{"name": "pkg", "tree": {{"$path": "{path}"}}}}"#),
             );
             write_package(
-                &package.join("packages/shared"),
+                &package.join("packages/roblox"),
                 "Promise.luau",
                 "return nil",
             );

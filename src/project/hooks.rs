@@ -32,8 +32,8 @@ afterwards (publish does), and both lookups happen before either script
 runs, so a run can never get half way through a pair because the second
 name was misspelled -- it just isn't there, and absent means skipped. */
 pub struct Lifecycle {
-    /// "scope/name@version", for the banner each hook prints.
-    package: String,
+    /// "scope/name@version" for the banner each hook prints, absent in a project with no [package].
+    package: Option<String>,
     event: String,
     pre: Option<String>,
     post: Option<String>,
@@ -74,7 +74,7 @@ impl Lifecycle {
             return Ok(());
         };
 
-        ui::print_script_notice(&self.package, name, script);
+        ui::print_script_notice(self.package.as_deref(), name, script);
         match process::wait(process::shell(script))? {
             0 => Ok(()),
             code => Err(Error::HookFailed {

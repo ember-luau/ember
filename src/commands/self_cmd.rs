@@ -55,7 +55,42 @@ fn install() -> Result<(), Error> {
         println!("Installed the lpx launcher beside it");
     }
 
-    add_to_path(&bin_dir)
+    add_to_path(&bin_dir)?;
+    suggest_code_setup();
+    Ok(())
+}
+
+/** points a fresh install at `lpm self code` when there is a VS Code to
+point it at. it's the one setup step `self install` can't do for you --
+it edits an editor's settings, which is not something an install should
+decide -- and nothing else ever mentions it. silent when no flavor is
+installed, and when every installed one is already set up: a suggestion
+that survives being acted on is just noise. */
+fn suggest_code_setup() {
+    let Some(config_root) = dirs::config_dir() else {
+        return;
+    };
+    let pending: Vec<&str> = detect_editors(&config_root)
+        .into_iter()
+        .filter(|(_, settings)| !schema_configured(settings))
+        .map(|(editor, _)| editor.name)
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+
+    println!(
+        "Detected {}; run `lpm self code` for lpm.toml autocomplete and validation",
+        pending.join(", ")
+    );
+}
+
+/// whether a settings.json already points at the lpm.toml schema. unreadable or absent reads as "not yet", the direction that suggests rather than hides.
+fn schema_configured(settings: &Path) -> bool {
+    fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| upsert_association(&text).ok())
+        .is_some_and(|association| matches!(association, Association::Current))
 }
 
 /// "lpx.exe" on windows, "lpx" elsewhere.
@@ -717,6 +752,33 @@ mod code_tests {
     #[test]
     fn rejects_malformed_settings() {
         assert!(upsert_association("{ not json").is_err());
+    }
+
+    /** what `self install`'s suggestion keys off: an editor that has run and
+    is not already pointed at the schema. */
+    #[test]
+    fn schema_setup_is_only_pending_until_it_is_done() {
+        let dir = std::env::temp_dir().join("lpm-test-self-code-pending");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+
+        // never opened, mistyped, or pointed elsewhere: all still pending
+        assert!(!schema_configured(&settings));
+        std::fs::write(&settings, "{ not json").unwrap();
+        assert!(!schema_configured(&settings));
+        std::fs::write(
+            &settings,
+            added("{}").replace(SCHEMA_URL, "https://old.example.com"),
+        )
+        .unwrap();
+        assert!(!schema_configured(&settings));
+
+        // and done once `self code` has run
+        configure_settings(&settings).unwrap();
+        assert!(schema_configured(&settings));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

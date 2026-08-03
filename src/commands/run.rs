@@ -91,7 +91,7 @@ fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error
     /* the banner names the package as well as the script. in a workspace
     the same script name means different things in different directories,
     and the output below it is otherwise unattributable */
-    ui::print_script_notice(&manifest.id(), name, &command);
+    ui::print_script_notice(manifest.id().as_deref(), name, &command);
 
     /* wait rather than exec. a failing script should exit with its own
     code since CI reads it, and a successful one still gets lpm's "Done

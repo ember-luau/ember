@@ -75,9 +75,20 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if let Some(key) = &index_key {
         entry.insert("index", key.clone().into());
     }
-    document
-        .table_or_create("dependencies")?
-        .insert(&alias, toml_edit::value(entry));
+    let dependencies = document.table_or_create("dependencies")?;
+    /* re-adding an alias rewrites its whole entry, which is how a version
+    bump works. `target` is the one key nothing here can re-ask for, and
+    dropping it would quietly move that dependency's whole subtree back
+    into another environment root on the next install, so it is carried
+    over instead. see `Dependency::target` */
+    if let Some(target) = dependencies
+        .get(&alias)
+        .and_then(|existing| existing.get("target"))
+        .and_then(|target| target.as_str())
+    {
+        entry.insert("target", target.to_string().into());
+    }
+    dependencies.insert(&alias, toml_edit::value(entry));
     document.save()?;
 
     ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
