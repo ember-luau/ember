@@ -280,14 +280,14 @@ fn executable_name(repo: &str) -> String {
 
 /// chmod 755. no-op on windows, where the .exe extension is what makes it executable.
 #[cfg(unix)]
-fn make_executable(path: &Path) -> Result<(), Error> {
+pub(crate) fn make_executable(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<(), Error> {
+pub(crate) fn make_executable(_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 

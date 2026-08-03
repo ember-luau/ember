@@ -6,7 +6,7 @@ use clap::Subcommand;
 use semver::Version;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// github repo `self update` pulls releases from
 const REPO: &str = "luaupm/cli";
@@ -139,13 +139,12 @@ fn update() -> Result<(), Error> {
         return Ok(());
     }
 
-    // must match the asset names release.yml uploads, lpm-{os}-{arch}[.exe]
-    let asset_name = format!(
-        "lpm-{}-{}{}",
-        env::consts::OS,
-        env::consts::ARCH,
-        env::consts::EXE_SUFFIX
-    );
+    /* the zipped asset release.yml uploads. releases also carry the bare
+    binary, but only so an lpm from before the zip existed can still find
+    something it understands and update INTO this one -- from here on the
+    zip is the only shape lpm reads, and the bare asset can stop being
+    published once nobody is left on a version that needs it */
+    let asset_name = format!("lpm-{}-{}.zip", env::consts::OS, env::consts::ARCH);
     let asset = release
         .assets
         .iter()
@@ -163,10 +162,12 @@ fn update() -> Result<(), Error> {
     stale after self_replace renames the running file out of the way,
     but the path keeps pointing at the freshly installed binary */
     let exe_path = env::current_exe()?;
-    let staged = env::temp_dir().join(&asset_name);
-    fs::write(&staged, &bytes)?;
-    self_replace::self_replace(&staged)?;
-    fs::remove_file(&staged)?;
+    let staging = env::temp_dir().join(format!("lpm-update-{}", std::process::id()));
+    // the staging dir goes whether or not the swap worked
+    let replaced = unpack_update(&asset_name, &bytes, &staging)
+        .and_then(|binary| Ok(self_replace::self_replace(&binary)?));
+    let _ = fs::remove_dir_all(&staging);
+    replaced?;
 
     /* keep the lpx launcher, a copy of the binary, in step with what was
     just installed. created on update too, so existing installs gain lpx
@@ -178,6 +179,43 @@ fn update() -> Result<(), Error> {
 
     println!("Updated lpm v{current} -> v{latest}");
     Ok(())
+}
+
+/** the new lpm binary, unpacked out of a release asset into `staging`.
+
+releases ship `lpm-{os}-{arch}.zip` holding a bare `lpm[.exe]`, which is
+the shape rokit and mise will install lpm from -- they take archives, not
+loose binaries. so lpm now reads its own release the same way it reads
+every other tool's, through `tools::archive`.
+
+searched for by name rather than taken from the archive root, so an
+archive that nests the binary a folder deep still updates, and the
+executable bit is set because a zip round trip is not required to carry
+one. */
+fn unpack_update(asset_name: &str, bytes: &[u8], staging: &Path) -> Result<PathBuf, Error> {
+    let _ = fs::remove_dir_all(staging);
+    fs::create_dir_all(staging)?;
+
+    let name = format!("lpm{}", env::consts::EXE_SUFFIX);
+    /* `extract` sniffs magic bytes and writes anything that isn't an archive
+    to the raw target as-is, which is right for a tool whose release really
+    is a bare binary. it is not right here: our asset is an archive by
+    contract, so bytes that aren't one are a truncated download or an error
+    page, and writing those over the running lpm would brick the install.
+    parking them under a name the search below can't match turns that into
+    the NoExecutableInAsset error instead. */
+    crate::tools::archive::extract(asset_name, bytes, staging, &staging.join(".raw-asset"))?;
+
+    let mut files = Vec::new();
+    crate::tools::archive::collect_files(staging, &mut files)?;
+    let binary = files
+        .into_iter()
+        .map(|(path, _)| path)
+        .find(|path| path.file_name().and_then(|found| found.to_str()) == Some(name.as_str()))
+        .ok_or_else(|| Error::NoExecutableInAsset(asset_name.to_string()))?;
+
+    crate::tools::make_executable(&binary)?;
+    Ok(binary)
 }
 
 fn uninstall() -> Result<(), Error> {
@@ -618,6 +656,88 @@ mod tests {
         assert!(path_contains(path, r"C:\Users\Me\.lpm\bin"));
         assert!(path_contains(path, r"C:\Tools"));
         assert!(!path_contains(path, r"C:\Users\Me\.lpm"));
+    }
+}
+
+/** what `self update` does with a release asset, minus the network and the
+swap. the asset shape is a contract with release.yml, and the only other
+thing holding it is a comment there. */
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// a zip holding `names`, each one a stand-in binary.
+    fn zip_of(names: &[&str]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for name in names {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(b"\x7fELF not really").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn staging(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("lpm-test-update-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn takes_the_binary_out_of_a_release_zip() {
+        let dir = staging("zip");
+        let binary = format!("lpm{}", env::consts::EXE_SUFFIX);
+
+        // the shape release.yml uploads: the binary alone, at the root
+        let found = unpack_update("lpm-linux-x86_64.zip", &zip_of(&[&binary]), &dir).unwrap();
+        assert_eq!(found.file_name().unwrap().to_str().unwrap(), binary);
+        assert!(found.starts_with(&dir));
+        assert!(found.is_file());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&found).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "a zip need not carry the exec bit");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_the_binary_even_when_the_archive_nests_it() {
+        let dir = staging("nested");
+        let binary = format!("lpm{}", env::consts::EXE_SUFFIX);
+        let nested = format!("lpm-linux-x86_64/{binary}");
+
+        let found = unpack_update("lpm-linux-x86_64.zip", &zip_of(&[&nested]), &dir).unwrap();
+        assert_eq!(found.file_name().unwrap().to_str().unwrap(), binary);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_archive_without_lpm_in_it_is_an_error_not_a_swap() {
+        /* the failure that matters: replacing the running binary with
+        whatever happened to be in the archive would brick the install */
+        let dir = staging("empty");
+        assert!(matches!(
+            unpack_update("lpm-linux-x86_64.zip", &zip_of(&["README.md"]), &dir),
+            Err(Error::NoExecutableInAsset(_))
+        ));
+
+        /* and bytes that are no archive at all -- a truncated download, an
+        error page -- must not be written over the running binary either */
+        let raw = staging("raw");
+        assert!(matches!(
+            unpack_update("lpm-linux-x86_64.zip", b"not an archive", &raw),
+            Err(Error::NoExecutableInAsset(_))
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&raw);
     }
 }
 
