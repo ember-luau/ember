@@ -73,7 +73,8 @@ jobs:
       fail-fast: false
       matrix:
         # Asset names must stay in the form lpm-{os}-{arch}[.exe] that
-        # `lpm self update` derives from std::env::consts.
+        # `lpm self update` derives from std::env::consts. The zip staged
+        # below is named from the same base -- see the Stage assets step.
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -96,19 +97,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Stage asset
+      # Two assets per platform, on purpose:
+      #
+      #   lpm-{os}-{arch}.zip   holding a bare lpm[.exe]. What `lpm self
+      #                         update` reads, and the only shape rokit and
+      #                         mise will install lpm from -- they take
+      #                         archives, not loose binaries.
+      #   lpm-{os}-{arch}[.exe] the bare binary. Kept ONLY so an lpm from
+      #                         before the zip existed, which matches this
+      #                         name exactly and cannot be taught otherwise,
+      #                         can still update into a release that has one.
+      #                         Droppable once nobody is left on such a
+      #                         version; nothing current reads it.
+      - name: Stage assets
         shell: bash
         run: |
-          mkdir dist
-          if [[ "${{ matrix.asset }}" == *.exe ]]; then
-            cp "target/${{ matrix.target }}/release/lpm.exe" "dist/${{ matrix.asset }}"
+          set -euo pipefail
+          asset="${{ matrix.asset }}"
+          if [[ "$asset" == *.exe ]]; then binary="lpm.exe"; else binary="lpm"; fi
+          mkdir -p dist pack
+          cp "target/${{ matrix.target }}/release/$binary" "dist/$asset"
+          cp "target/${{ matrix.target }}/release/$binary" "pack/$binary"
+          # the archive must hold the binary at its root under its plain
+          # name, which is what `lpm self update` looks for inside it.
+          # Compress-Archive on Windows and zip elsewhere: both ship with
+          # the runner images, and zip preserves the executable bit that
+          # rokit and mise need on unix.
+          if [[ "$asset" == *.exe ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path 'pack/$binary' -DestinationPath 'dist/${asset%.exe}.zip' -Force"
           else
-            cp "target/${{ matrix.target }}/release/lpm" "dist/${{ matrix.asset }}"
+            chmod +x "pack/$binary"
+            (cd pack && zip -q "../dist/$asset.zip" "$binary")
           fi
+          ls -l dist
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset }}
+          files: dist/*
           # No generated notes: this step runs once per matrix platform, and
           # each run would append another "What's Changed" section to the same
           # release. Notes are written by hand -- announce.yml waits for them
