@@ -135,31 +135,28 @@ pub fn store_release(
     leaves a half-written storage dir behind, same dance as install.rs.
     pid-suffixed because concurrent `lpx` runs of one cold tool are
     routine and must not tear down each other's staging mid-extraction. */
-    let staging = paths::with_suffix(&storage, &format!(".{}.tmp", std::process::id()));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)?;
+    let staging = Staging(paths::with_suffix(
+        &storage,
+        &format!(".{}.tmp", std::process::id()),
+    ));
+    if staging.0.exists() {
+        fs::remove_dir_all(&staging.0)?;
     }
-    fs::create_dir_all(&staging)?;
+    fs::create_dir_all(&staging.0)?;
 
-    let target = staging.join(executable_name(repo));
-    archive::extract(&asset.name, &bytes, &staging, &target)?;
+    let target = staging.0.join(executable_name(repo));
+    archive::extract(&asset.name, &bytes, &staging.0, &target)?;
 
     let mut files = Vec::new();
-    archive::collect_files(&staging, &mut files)?;
+    archive::collect_files(&staging.0, &mut files)?;
     let found = archive::pick_executable(&files, repo, name_hint, env::consts::EXE_SUFFIX)
         .ok_or_else(|| Error::NoExecutableInAsset(name_hint.to_string()))?;
-    if found != target {
-        if target.exists() {
-            fs::remove_file(&target)?;
-        }
-        fs::rename(&found, &target)?;
-    }
+    place_executable(&found, &target)?;
 
     /* a concurrent run may have stored this version while we downloaded.
     its copy of the same release is just as good, and possibly already
     executing, in which case deleting it would fail on windows anyway */
     if stored.exists() {
-        let _ = fs::remove_dir_all(&staging);
         return Ok((stored, true));
     }
 
@@ -168,7 +165,7 @@ pub fn store_release(
         fs::remove_dir_all(&storage)?;
     }
     fs::create_dir_all(storage.parent().expect("storage dir has a parent"))?;
-    fs::rename(&staging, &storage)?;
+    fs::rename(&staging.0, &storage)?;
 
     let stored = storage.join(executable_name(repo));
     make_executable(&stored)?;
@@ -267,6 +264,43 @@ fn stamped_version(stamp: &Path) -> Option<String> {
 }
 
 /// the "repo" half of "owner/repo", names the stored binary.
+/** the extraction staging dir, removed on the way out.
+
+on success it has already been renamed into storage and there is nothing
+left to remove. on failure -- and every step between creating it and that
+rename can fail -- it would otherwise stay behind forever, one
+`<version>.<pid>.tmp` per attempt, which is how a tool that cannot
+install quietly fills its own storage folder. */
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/** puts the executable the archive actually shipped under the name lpm
+stores it by.
+
+the two are compared through the filesystem rather than as text, because
+on windows and macOS they can be one file under two spellings:
+JohnnyMorganz/StyLua ships `stylua.exe` while the repo's short name makes
+the target `StyLua.exe`. Comparing paths as strings called those
+different, so `target.exists()` -- true, being the very file just
+extracted -- deleted it, and the rename then failed with a bare "the
+system cannot find the file specified". Tools whose archive name matches
+their repo, like rojo, never hit it. */
+fn place_executable(found: &Path, target: &Path) -> Result<(), Error> {
+    if paths::same_file(found, target) {
+        return Ok(());
+    }
+    if target.exists() {
+        fs::remove_file(target)?;
+    }
+    fs::rename(found, target)?;
+    Ok(())
+}
+
 fn repo_short_name(repository: &str) -> &str {
     repository
         .split_once('/')
@@ -300,6 +334,61 @@ mod tests {
         let dir = storage_dir("rojo-rbx/rojo", "7.4.4").unwrap();
         assert!(dir.starts_with(paths::tools_dir().unwrap()));
         assert!(dir.ends_with(Path::new("tools").join("rojo-rbx_rojo").join("7.4.4")));
+    }
+
+    /** regression. JohnnyMorganz/StyLua ships `stylua.exe`, and the repo's
+    short name makes lpm want `StyLua.exe`. On a case-insensitive
+    filesystem those are one file, and comparing the paths as text treated
+    them as two: the target "already existed", so it was deleted -- it was
+    the extracted binary -- and the rename then failed with os error 2.
+    Every attempt also left its staging folder behind. */
+    #[test]
+    fn an_archive_naming_its_binary_in_another_case_still_installs() {
+        let staging = std::env::temp_dir().join("lpm-test-place-executable");
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).unwrap();
+
+        // what the archive shipped, and what lpm wants to store it as
+        let found = staging.join("stylua.exe");
+        let target = staging.join("StyLua.exe");
+        fs::write(&found, b"the real binary").unwrap();
+
+        place_executable(&found, &target).unwrap();
+
+        // readable under the name lpm stores by, whichever spelling won
+        assert_eq!(fs::read(&target).unwrap(), b"the real binary");
+        // and exactly one binary, never a deleted one or a duplicate
+        let left: Vec<_> = fs::read_dir(&staging).unwrap().flatten().collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "{:?}",
+            left.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+
+        // a genuinely different name is still moved into place
+        let other = staging.join("stylua-linux");
+        fs::write(&other, b"another").unwrap();
+        place_executable(&other, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"another");
+        assert!(!other.exists());
+
+        let _ = fs::remove_dir_all(&staging);
+    }
+
+    /// a failed install must not leave its `<version>.<pid>.tmp` folder behind.
+    #[test]
+    fn staging_is_removed_however_the_install_ends() {
+        let dir = std::env::temp_dir().join("lpm-test-staging-guard");
+        let _ = fs::remove_dir_all(&dir);
+
+        {
+            let staging = Staging(dir.clone());
+            fs::create_dir_all(&staging.0).unwrap();
+            fs::write(staging.0.join("half-extracted"), b"x").unwrap();
+            assert!(dir.is_dir());
+        }
+        assert!(!dir.exists(), "staging outlived the install");
     }
 
     #[test]
