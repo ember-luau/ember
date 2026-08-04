@@ -39,12 +39,156 @@ pub fn rewrite_escape_requires(
     rewrite_requires(package_dir, entry, Some(aliases))
 }
 
-fn rewrite_requires(
+/** what the `roblox` environment's folder was called before the rename,
+see [`Environment::Roblox`]. a package published back then spells it in
+its own source, and no republish will ever reach the versions already
+out. */
+const LEGACY_ROBLOX_DIR: &str = "shared";
+
+/** retargets string requires that still spell a dependency's nested link
+under the pre-rename folder name.
+
+a package's own dependencies are linked at `packages/<env>/<alias>`, so a
+package published before `shared` became `roblox` has
+`require('../packages/shared/core')` compiled into it while lpm now
+writes `packages/roblox/core.luau`. chief/lifecycles, chief/traits and
+chief/dependencies are all in that state today; rewriting the stored copy
+fixes every such package without anyone republishing anything, and does
+nothing at all to a package published since.
+
+`aliases` is what the nested-link pass just linked, alias -> environment
+folder, so only a dependency lpm itself put in the roblox folder can be
+retargeted -- a package vendoring its own `packages/shared` directory is
+left alone. only the path inside a `require(...)` is considered, so the
+same words in a comment stay as they are. */
+pub fn rewrite_legacy_environment_requires(
     package_dir: &Path,
     entry: &str,
-    aliases: Option<&BTreeMap<String, String>>,
+    aliases: &BTreeMap<String, String>,
 ) -> Result<usize, Error> {
-    // where the mounted tree starts, files outside it have no instance position
+    let replacements: Vec<(String, String)> = aliases
+        .iter()
+        .filter(|(_, environment)| environment.as_str() != LEGACY_ROBLOX_DIR)
+        .map(|(alias, environment)| {
+            (
+                format!("{PACKAGES_DIR}/{LEGACY_ROBLOX_DIR}/{alias}"),
+                format!("{PACKAGES_DIR}/{environment}/{alias}"),
+            )
+        })
+        .collect();
+    if replacements.is_empty() {
+        return Ok(0);
+    }
+
+    let (_, files) = module_tree(package_dir, entry)?;
+    let mut rewritten = 0;
+    for file in files {
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue; // binary or non-utf8, not ours to touch
+        };
+        if let Some((updated, count)) = retarget_string_requires(&source, &replacements) {
+            fs::write(&file, updated)?;
+            rewritten += count;
+        }
+    }
+    Ok(rewritten)
+}
+
+/** rewrites the path inside every string require that names one of
+`replacements`. None = nothing matched, and that path allocates nothing,
+which matters because this runs over every file of every package. */
+fn retarget_string_requires(
+    source: &str,
+    replacements: &[(String, String)],
+) -> Option<(String, usize)> {
+    // the overwhelming majority of files mention neither
+    if !source.contains(LEGACY_ROBLOX_DIR) || !source.contains("require") {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let mut spliced: Vec<(usize, usize, String)> = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        /* strings and comments are skipped wholesale, exactly as the
+        instance-require scan does, so only a real require argument is
+        ever reached */
+        match bytes[position] {
+            b'-' if bytes.get(position + 1) == Some(&b'-') => {
+                position = skip_comment(bytes, position);
+            }
+            b'"' | b'\'' => position = skip_short_string(bytes, position),
+            b'[' if long_bracket_level(bytes, position).is_some() => {
+                position = skip_long_string(bytes, position);
+            }
+            _ => {
+                if at_word(bytes, position, b"require")
+                    && let Some((start, end)) = string_argument(bytes, position + "require".len())
+                {
+                    let path = &source[start..end];
+                    if let Some((from, to)) = replacements
+                        .iter()
+                        .find(|(from, _)| path.contains(from.as_str()))
+                    {
+                        spliced.push((start, end, path.replace(from, to)));
+                    }
+                    position = end;
+                    continue;
+                }
+                // step whole identifiers so "myrequire" can't half-match
+                if is_ident_byte(bytes[position]) {
+                    while position < bytes.len() && is_ident_byte(bytes[position]) {
+                        position += 1;
+                    }
+                } else {
+                    position += 1;
+                }
+            }
+        }
+    }
+    if spliced.is_empty() {
+        return None;
+    }
+
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, path) in &spliced {
+        output.push_str(&source[cursor..*start]);
+        output.push_str(path);
+        cursor = *end;
+    }
+    output.push_str(&source[cursor..]);
+    Some((output, spliced.len()))
+}
+
+/** the byte range of the string literal a require was called with, from
+just past the `require` word. None for any other argument shape, and for
+a literal carrying escapes, whose bytes are not ours to reinterpret. */
+fn string_argument(bytes: &[u8], mut position: usize) -> Option<(usize, usize)> {
+    position = skip_ws(bytes, position);
+    if bytes.get(position) != Some(&b'(') {
+        return None;
+    }
+    position = skip_ws(bytes, position + 1);
+    let quote = *bytes.get(position)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let start = position + 1;
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != quote {
+        if bytes[end] == b'\\' || bytes[end] == b'\n' {
+            return None;
+        }
+        end += 1;
+    }
+    (end < bytes.len()).then_some((start, end))
+}
+
+/** the module root and the files under it, the ones a rewrite may touch.
+files outside the mounted tree have no instance position and are not
+ours. */
+fn module_tree(package_dir: &Path, entry: &str) -> Result<(PathBuf, Vec<PathBuf>), Error> {
     let (module_root, single_file) = if entry.is_empty() {
         (PathBuf::new(), None)
     } else if package_dir.join(format!("{entry}.luau")).is_file()
@@ -72,6 +216,15 @@ fn rewrite_requires(
             .collect(),
         None => luau_files(&package_dir.join(&module_root))?,
     };
+    Ok((module_root, files))
+}
+
+fn rewrite_requires(
+    package_dir: &Path,
+    entry: &str,
+    aliases: Option<&BTreeMap<String, String>>,
+) -> Result<usize, Error> {
+    let (module_root, files) = module_tree(package_dir, entry)?;
 
     let mut rewritten = 0;
     for file in files {
@@ -586,6 +739,153 @@ mod tests {
         assert_eq!(count, 1);
         assert!(out.contains("require(\"./packages/shared/Signal\")"));
         assert!(out.contains("require(script.Parent.Mystery)"));
+    }
+
+    /// alias -> environment folder, the map the nested-link pass hands over.
+    fn linked(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(alias, environment)| (alias.to_string(), environment.to_string()))
+            .collect()
+    }
+
+    /** chief/lifecycles@0.3.0, verbatim. published before the rename, so it
+    requires its dependency through `packages/shared`, while lpm now links
+    it under `packages/roblox` -- the require resolves to nothing until
+    this pass retargets it. */
+    #[test]
+    fn retargets_a_require_left_on_the_pre_rename_folder() {
+        let aliases = linked(&[("core", "roblox")]);
+        let (out, count) = retarget_string_requires(
+            "local Chief = require('../packages/shared/core')\n",
+            &replacements(&aliases),
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(out, "local Chief = require('../packages/roblox/core')\n");
+    }
+
+    #[test]
+    fn retargeting_leaves_everything_it_was_not_asked_about() {
+        let aliases = linked(&[("core", "roblox"), ("net", "server")]);
+        let replacements = replacements(&aliases);
+
+        // an alias lpm never linked, and a dependency that really is elsewhere
+        let source = "\
+            local Chief = require('../packages/shared/core')\n\
+            local Other = require('../packages/shared/mystery')\n\
+            local Net = require('../packages/server/net')\n\
+            local Deep = require('@self/packages/shared/core')\n";
+        let (out, count) = retarget_string_requires(source, &replacements).unwrap();
+        assert_eq!(count, 2, "{out}");
+        assert!(out.contains("require('../packages/roblox/core')"), "{out}");
+        assert!(
+            out.contains("require('@self/packages/roblox/core')"),
+            "{out}"
+        );
+        // untouched: not a linked alias, and already where it belongs
+        assert!(
+            out.contains("require('../packages/shared/mystery')"),
+            "{out}"
+        );
+        assert!(out.contains("require('../packages/server/net')"), "{out}");
+
+        /* a package published SINCE the rename says roblox already, and a
+        mention outside a require is prose, not a path */
+        assert_eq!(
+            retarget_string_requires(
+                "local Chief = require('../packages/roblox/core')\n\
+                 -- moved from ../packages/shared/core\n\
+                 local note = \"../packages/shared/core\"\n",
+                &replacements
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_vendored_folder_of_the_same_name_is_never_retargeted() {
+        /* the guard that matters: `aliases` is what lpm itself linked, so a
+        package shipping its own packages/shared directory keeps it */
+        let aliases = linked(&[("core", "roblox")]);
+        assert_eq!(
+            retarget_string_requires(
+                "local Vendored = require('./packages/shared/vendored')\n",
+                &replacements(&aliases)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn retargeting_skips_requires_it_cannot_read() {
+        let aliases = linked(&[("core", "roblox")]);
+        let replacements = replacements(&aliases);
+        // a computed path, and a literal carrying escapes, are not ours
+        for source in [
+            "local Chief = require(base .. '/packages/shared/core')\n",
+            "local Chief = require('..\\\\packages/shared/core')\n",
+        ] {
+            assert_eq!(
+                retarget_string_requires(source, &replacements),
+                None,
+                "{source}"
+            );
+        }
+    }
+
+    /// the replacement pairs `rewrite_legacy_environment_requires` derives.
+    fn replacements(aliases: &BTreeMap<String, String>) -> Vec<(String, String)> {
+        aliases
+            .iter()
+            .filter(|(_, environment)| environment.as_str() != LEGACY_ROBLOX_DIR)
+            .map(|(alias, environment)| {
+                (
+                    format!("{PACKAGES_DIR}/{LEGACY_ROBLOX_DIR}/{alias}"),
+                    format!("{PACKAGES_DIR}/{environment}/{alias}"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retargets_on_disk_under_the_module_root() {
+        let base = std::env::temp_dir().join("lpm-test-legacy-requires");
+        let _ = fs::remove_dir_all(&base);
+        let write = |file: &str, contents: &str| {
+            let path = base.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        };
+        write("lpm.toml", "[target]\nmain = \"out/lpm\"\n");
+        write(
+            "out/lpm/init.luau",
+            "local Chief = require('../packages/shared/core')\n",
+        );
+        // outside the module root, not mounted, not ours
+        write("tests/spec.luau", "require('../packages/shared/core')\n");
+
+        let aliases = linked(&[("core", "roblox")]);
+        let rewritten = rewrite_legacy_environment_requires(&base, "out/lpm", &aliases).unwrap();
+
+        assert_eq!(rewritten, 1);
+        assert_eq!(
+            fs::read_to_string(base.join("out/lpm/init.luau")).unwrap(),
+            "local Chief = require('../packages/roblox/core')\n"
+        );
+        assert_eq!(
+            fs::read_to_string(base.join("tests/spec.luau")).unwrap(),
+            "require('../packages/shared/core')\n"
+        );
+
+        // and it settles: a second install over a warm tree changes nothing
+        assert_eq!(
+            rewrite_legacy_environment_requires(&base, "out/lpm", &aliases).unwrap(),
+            0
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

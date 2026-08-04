@@ -1347,18 +1347,32 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             continue;
         }
 
-        /* second half of the instance require rewrite. escape chains
-        couldn't map on the workers since dependency environments weren't
-        known yet, now the nested links are decided so retarget them at
-        packages/<env>/<alias> */
-        if let Some(entry) = package::entry_point(&package.storage)
-            && let Err(error) =
+        if let Some(entry) = package::entry_point(&package.storage) {
+            /* second half of the instance require rewrite. escape chains
+            couldn't map on the workers since dependency environments weren't
+            known yet, now the nested links are decided so retarget them at
+            packages/<env>/<alias> */
+            if let Err(error) =
                 requires::rewrite_escape_requires(&package.storage, &entry, &escape_aliases)
-        {
-            warn(format!(
-                "warning: could not rewrite requires in {} ({error})",
-                package.name
-            ));
+            {
+                warn(format!(
+                    "warning: could not rewrite requires in {} ({error})",
+                    package.name
+                ));
+            }
+
+            /* and the same folder under the name it had before the roblox
+            rename, which anything published back then still requires by */
+            if let Err(error) = requires::rewrite_legacy_environment_requires(
+                &package.storage,
+                &entry,
+                &escape_aliases,
+            ) {
+                warn(format!(
+                    "warning: could not retarget the pre-rename requires in {} ({error})",
+                    package.name
+                ));
+            }
         }
 
         /* the links exist now, so a project file this package ships can
