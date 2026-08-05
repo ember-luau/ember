@@ -62,14 +62,85 @@ Printed for every script lpm runs, hooks included, because the whole point
 is that output arriving next has an attributable source -- doubly so for a
 hook, which nobody typed. `package` is "scope/name@version", or None in a
 project that declares no [package] and so has no such name. */
-pub fn print_script_notice(package: Option<&str>, name: &str, command: &str) {
+pub fn print_script_notice(package: Option<&str>, name: &str, commands: &[String]) {
     match package {
         Some(package) => println!("{}", format!("> {package} {name}").dark_grey()),
         None => println!("{}", format!("> {name}").dark_grey()),
     }
-    println!("{}", format!("> {command}").dark_grey());
+    match commands {
+        [single] => println!("{}", format!("> {single}").dark_grey()),
+        /* several, so the banner doubles as the legend for the [n] tags
+        their output arrives under */
+        many => {
+            for (index, command) in many.iter().enumerate() {
+                println!("{}", format!("> [{}] {command}", index + 1).dark_grey());
+            }
+        }
+    }
     // separates the banner from whatever the script itself prints
     println!();
+}
+
+/** One line of output from a concurrent script, under its `[n]` tag.
+
+Goes back to the stream it came from, so a script's stderr stays stderr and
+redirecting one without the other still works. The tag takes the accent; the
+line itself is passed through byte for byte, so whatever colour the program
+emitted is the colour you see.
+
+`separate` puts a blank line first, and the caller sets it whenever this line
+comes from a different command than the one before, so a switch between two
+processes reads as a break rather than a wall. */
+pub fn print_tagged(tag: usize, line: &str, is_stderr: bool, separate: bool) {
+    /* a line that opened a colour and never closed it would bleed into the
+    next tag, which belongs to a different process. closing again costs
+    nothing on a line that already did. */
+    let reset = if line.contains('\u{1b}') {
+        "\u{1b}[0m"
+    } else {
+        ""
+    };
+    let tag = format!("[{tag}]").with(accent());
+    let gap = if separate { "\n" } else { "" };
+
+    if is_stderr {
+        eprintln!("{gap}{tag} {line}{reset}");
+    } else {
+        println!("{gap}{tag} {line}{reset}");
+    }
+}
+
+/// a concurrent script's command failing, reported under its own `[n]` tag.
+pub fn print_tagged_exit(tag: usize, code: i32, separate: bool) {
+    let tag = format!("[{tag}]").with(accent());
+    let gap = if separate { "\n" } else { "" };
+    eprintln!(
+        "{gap}{tag} {}",
+        format!("exited with code {code}").dark_grey()
+    );
+}
+
+/** Section heading for a list with more than one kind of thing in it. `hint`
+is dimmed and follows the name, so the category reads first and how to act on
+it is still there without a second line. */
+pub fn print_heading(heading: &str, hint: &str) {
+    println!("\n{heading} {}", hint.dark_grey());
+}
+
+/** One `<name>` and what it runs, how `lpm run` lists a script. The name is
+what you type, so it takes the accent; the commands are reference material
+and stay out of the way. A parallel script shows every command under the
+`[n]` tag its output will carry. */
+pub fn print_script_entry(name: &str, commands: &[String]) {
+    println!("  {}", name.with(accent()));
+    match commands {
+        [single] => println!("    {}", single.as_str().dark_grey()),
+        many => {
+            for (index, command) in many.iter().enumerate() {
+                println!("    {}", format!("[{}] {command}", index + 1).dark_grey());
+            }
+        }
+    }
 }
 
 /** Prints a line to stdout while `bar` is live. `ProgressBar::println` goes

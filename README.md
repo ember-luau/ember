@@ -26,7 +26,7 @@ project's tools, and run its scripts — one manifest, one lockfile, one binary.
 ## Install
 
 Grab the binary for your platform from the
-[latest release](https://github.com/luaupm/cli/releases/latest), then let lpm
+[latest release](https://github.com/luaupm/lpm/releases/latest), then let lpm
 install itself:
 
 ```sh

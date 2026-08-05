@@ -1,6 +1,9 @@
 use crate::{
     error::Error,
-    project::{hooks::Lifecycle, manifest::Manifest},
+    project::{
+        hooks::{self, Lifecycle},
+        manifest::Manifest,
+    },
     sys::process,
     ui,
 };
@@ -35,6 +38,9 @@ pub fn shortcut_list() -> String {
 
 #[derive(Args, Debug)]
 #[command(after_long_help = "\
+With no script name, `lpm run` lists every [scripts] entry under three \
+headings: Scripts, which need `lpm run`; Lifecycle Scripts, whose names are \
+subcommands too; and Hooks, the pre/post entries lpm runs by itself.\n\n\
 A script hooks its own name: `lpm run build` runs `prebuild`, then `build`, \
 then `postbuild`, using whichever of the three [scripts] defines. Hooks do \
 not nest, so `prebuild` is run as-is and no `preprebuild` is looked for.\n\n\
@@ -44,8 +50,8 @@ with an optional `--` separator: `lpm run build -- --watch` and `lpm build \
 build, test, start, serve and fmt are also subcommands, so `run` is optional \
 for those five. Every other script needs it.")]
 pub struct RunArgs {
-    /// Name of the script under [scripts] in lpm.toml
-    pub name: String,
+    /// Name of the script under [scripts] in lpm.toml; omit to list them all
+    pub name: Option<String>,
 
     /// Extra arguments appended to the script's command line
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -77,13 +83,111 @@ pub fn shortcut(names: &[&str], args: ShortcutArgs) -> Result<(), Error> {
 
 pub fn run(args: RunArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
-    script(&manifest, &args.name, &args.args)
+    match &args.name {
+        Some(name) => script(&manifest, name, &args.args),
+        // bare `lpm run` is a question, not a mistake. npm answers it the same way
+        None => {
+            list(&manifest);
+            Ok(())
+        }
+    }
+}
+
+/** How a `[scripts]` entry is reached, which is the only distinction worth
+drawing between them when listing.
+
+⚠ "Lifecycle" here means a script lpm gave a subcommand to, npm's sense of
+the word in `npm run`'s output. That is NOT `hooks::Lifecycle`, which is one
+event's `pre`/`post` pair -- those land in [`Kind::Hook`]. */
+#[derive(Debug, PartialEq)]
+enum Kind {
+    /// reachable only as `lpm run <name>`.
+    Script,
+    /// its name is also a subcommand, so `run` is optional.
+    Lifecycle,
+    /// a `pre`/`post` hook: lpm runs it, nobody types it.
+    Hook,
+}
+
+/** Classifies one script by how you get at it.
+
+The `pre`/`post` test is deliberately not "starts with pre" -- a script
+named `prelude` or `postmortem` is a script, not a hook. What makes a name
+a hook is that something else answers to the rest of it: a command event,
+or another entry in this same table. That also means a `prebuild` with no
+`build` reads as plain, which is exactly right, since `lpm run prebuild` is
+then the only way it ever runs. */
+fn kind(manifest: &Manifest, name: &str) -> Kind {
+    let base = name
+        .strip_prefix("pre")
+        .or_else(|| name.strip_prefix("post"));
+    match base {
+        Some(base)
+            if !base.is_empty()
+                && (hooks::EVENTS.contains(&base) || manifest.scripts.contains_key(base)) =>
+        {
+            Kind::Hook
+        }
+        _ if SHORTCUTS.contains(&name) || FMT_NAMES.contains(&name) => Kind::Lifecycle,
+        _ => Kind::Script,
+    }
+}
+
+/// prints every `[scripts]` entry, grouped by how it is reached.
+fn list(manifest: &Manifest) {
+    if manifest.scripts.is_empty() {
+        println!("No scripts in lpm.toml. Add some under [scripts]:");
+        ui::print_script_entry("build", &["rojo build -o game.rbxl".to_string()]);
+        return;
+    }
+
+    match manifest.id() {
+        Some(id) => println!("Scripts in {id}"),
+        // a consuming-only project has no [package] to name
+        None => println!("Scripts in lpm.toml"),
+    }
+
+    let mut scripts = Vec::new();
+    let mut lifecycle = Vec::new();
+    let mut hooks = Vec::new();
+    for (name, command) in &manifest.scripts {
+        match kind(manifest, name) {
+            Kind::Script => scripts.push((name, command)),
+            Kind::Lifecycle => lifecycle.push((name, command)),
+            Kind::Hook => hooks.push((name, command)),
+        }
+    }
+
+    /* an empty group prints nothing rather than an empty heading, so a
+    project with only ordinary scripts gets one list and no taxonomy it
+    never asked for. the dimmed hint carries what the heading alone can't,
+    which is how you actually run the things underneath it */
+    for (heading, hint, group) in [
+        ("Scripts", "lpm run <name>", scripts),
+        ("Lifecycle Scripts", "lpm <name>", lifecycle),
+        ("Hooks", "run by lpm", hooks),
+    ] {
+        if group.is_empty() {
+            continue;
+        }
+        ui::print_heading(heading, hint);
+        for (name, script) in group {
+            ui::print_script_entry(name, script.commands());
+        }
+    }
 }
 
 /// runs `name` with its hooks around it, the one path every entry point takes.
 fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error> {
-    // resolved before anything runs, so a typo'd name never fires `pre<name>`
-    let command = append_args(manifest.script(name)?, extra);
+    /* resolved before anything runs, so a typo'd name never fires `pre<name>`.
+    extra arguments go on every command of a parallel script: dropping them
+    silently would be worse, and there is no way to tell which one they meant */
+    let commands: Vec<String> = manifest
+        .script(name)?
+        .commands()
+        .iter()
+        .map(|command| append_args(command, extra))
+        .collect();
     let lifecycle = Lifecycle::of(manifest, name);
 
     lifecycle.before()?;
@@ -91,12 +195,12 @@ fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error
     /* the banner names the package as well as the script. in a workspace
     the same script name means different things in different directories,
     and the output below it is otherwise unattributable */
-    ui::print_script_notice(manifest.id().as_deref(), name, &command);
+    ui::print_script_notice(manifest.id().as_deref(), name, &commands);
 
     /* wait rather than exec. a failing script should exit with its own
     code since CI reads it, and a successful one still gets lpm's "Done
     in" line -- and, now, its `post<name>` hook. */
-    let code = process::wait(process::shell(&command))?;
+    let code = process::script(&commands)?;
     if code != 0 {
         std::process::exit(code);
     }
@@ -198,10 +302,64 @@ fn quote(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::append_args;
+    use super::{Kind, Manifest, append_args, kind};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    fn manifest(scripts: &str) -> Manifest {
+        toml::from_str(&format!(
+            "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n[scripts]\n{scripts}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn hooks_are_named_after_something_that_answers() {
+        let manifest = manifest(
+            "build = \"a\"\nprebuild = \"b\"\npostbuild = \"c\"\n\
+             preinstall = \"d\"\npostpublish = \"e\"\n",
+        );
+
+        // a hook over another script in the table
+        assert_eq!(kind(&manifest, "prebuild"), Kind::Hook);
+        assert_eq!(kind(&manifest, "postbuild"), Kind::Hook);
+        // a hook over a command event, which needs no script of its own
+        assert_eq!(kind(&manifest, "preinstall"), Kind::Hook);
+        assert_eq!(kind(&manifest, "postpublish"), Kind::Hook);
+    }
+
+    #[test]
+    fn a_word_starting_with_pre_is_not_a_hook() {
+        /* the whole reason kind() looks past the prefix: nothing answers to
+        "lude" or "mortem", so these are ordinary scripts */
+        let manifest = manifest("prelude = \"a\"\npostmortem = \"b\"\npre = \"c\"\npost = \"d\"\n");
+        for name in ["prelude", "postmortem", "pre", "post"] {
+            assert_eq!(kind(&manifest, name), Kind::Script, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_hook_with_nothing_to_hook_is_just_a_script() {
+        /* `prebuild` without `build` never fires, so listing it as lifecycle
+        would promise a run that cannot happen. `lpm run prebuild` is the
+        only way it goes, which is exactly what Plain says */
+        let manifest = manifest("prebuild = \"a\"\n");
+        assert_eq!(kind(&manifest, "prebuild"), Kind::Script);
+    }
+
+    #[test]
+    fn shortcut_names_are_lifecycle_scripts_both_spellings_of_fmt_included() {
+        let manifest = manifest(
+            "build = \"a\"\ntest = \"b\"\nstart = \"c\"\nserve = \"d\"\n\
+             fmt = \"e\"\nformat = \"f\"\nlint = \"g\"\n",
+        );
+        for name in ["build", "test", "start", "serve", "fmt", "format"] {
+            assert_eq!(kind(&manifest, name), Kind::Lifecycle, "{name}");
+        }
+        // everything else needs `run`
+        assert_eq!(kind(&manifest, "lint"), Kind::Script);
     }
 
     #[test]

@@ -756,6 +756,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "jsonc-parser",
+ "libc",
  "self-replace",
  "semver",
  "serde",

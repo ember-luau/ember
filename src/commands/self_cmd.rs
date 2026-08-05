@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// github repo `self update` pulls releases from
-const REPO: &str = "luaupm/cli";
+const REPO: &str = "luaupm/lpm";
 
 #[derive(Subcommand, Debug)]
 pub enum SelfCommand {
@@ -41,7 +41,7 @@ fn install() -> Result<(), Error> {
     if target.exists() && paths::same_file(&current, &target) {
         println!("lpm is already installed at {}", target.display());
     } else {
-        fs::copy(&current, &target)?;
+        replace_binary(&current, &target)?;
         println!(
             "Installed lpm v{} to {}",
             env!("CARGO_PKG_VERSION"),
@@ -98,14 +98,59 @@ fn lpx_name() -> String {
     format!("lpx{}", env::consts::EXE_SUFFIX)
 }
 
-/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning. on
+/** Puts `source` at `target`, replacing whatever is there, even while that
+file is running.
+
+A plain copy opens the destination for writing, and on unix writing a file
+some process is currently executing fails with ETXTBSY -- "Text file busy".
+~/.lpm/bin/lpm is exactly that whenever another lpm is alive: a second
+terminal, a long `lpm run`, an lpx, a tool shim. Installing should not
+require hunting those down first.
+
+So the new bytes land beside the target and a rename swaps the directory
+entry. Anything already running keeps the old inode and finishes on it
+undisturbed; the next run picks up the new one. fs::copy carries the
+executable bit over on unix, and rename preserves it. */
+fn replace_binary(source: &Path, target: &Path) -> Result<(), Error> {
+    let staged = paths::with_suffix(target, ".new");
+    // a leftover from an interrupted install would fail the copy below
+    let _ = fs::remove_file(&staged);
+    fs::copy(source, &staged)?;
+
+    let Err(error) = fs::rename(&staged, target) else {
+        return Ok(());
+    };
+
+    /* windows refuses to replace a file that is open for execution, but it
+    does allow renaming that file away -- the running image follows the
+    inode, not the name. unix never reaches here, the rename above works. */
+    let retired = paths::with_suffix(target, ".old");
+    let _ = fs::remove_file(&retired);
+    if fs::rename(target, &retired).is_err() {
+        let _ = fs::remove_file(&staged);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&staged, target) {
+        // put back what was working rather than leave nothing installed
+        let _ = fs::rename(&retired, target);
+        let _ = fs::remove_file(&staged);
+        return Err(error.into());
+    }
+    // still locked until it exits; swept by the next install either way
+    let _ = fs::remove_file(&retired);
+    Ok(())
+}
+
+/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning: on
 windows the launcher stays locked for as long as anything it started is
 still running, and that must never sink the install or update this rides
-along with. fs::copy carries the executable bit over on unix. */
+along with. */
 fn write_lpx_launcher(bin_dir: &Path, source: &Path) -> bool {
     let lpx = bin_dir.join(lpx_name());
-    match fs::copy(source, &lpx) {
-        Ok(_) => true,
+    /* the same running-binary problem as lpm itself, and more likely here:
+    an `lpx` in another terminal is a whole separate process holding it */
+    match replace_binary(source, &lpx) {
+        Ok(()) => true,
         Err(error) => {
             eprintln!(
                 "warning: could not write the lpx launcher {}: {error}",

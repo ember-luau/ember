@@ -56,11 +56,14 @@ jobs:
           # and every failed publish would look like a success
           set -o pipefail
           version="${GITHUB_REF_NAME#v}"
-          if cargo publish --locked 2>&1 | tee publish.log; then
+          # outside the checkout: cargo publish refuses to run at all with an
+          # uncommitted file in the working tree, and the log is one
+          log="$RUNNER_TEMP/publish.log"
+          if cargo publish --locked 2>&1 | tee "$log"; then
             echo "Published luaupm $version"
             exit 0
           fi
-          if grep -qE "already (uploaded|exists)" publish.log; then
+          if grep -qE "already (uploaded|exists)" "$log"; then
             echo "luaupm $version is already on crates.io, nothing to do"
             exit 0
           fi

@@ -14,7 +14,7 @@ Hooks never nest. Running `prebuild` does not look for `preprebuild`, so a
 hook is free to call `lpm run` without lpm walking into itself. */
 
 use crate::error::Error;
-use crate::project::manifest::Manifest;
+use crate::project::manifest::{Manifest, Script};
 use crate::sys::process;
 use crate::ui;
 
@@ -24,6 +24,12 @@ pub const INSTALL: &str = "install";
 pub const ADD: &str = "add";
 /// hooked by `lpm publish`, as `prepublish` / `postpublish`.
 pub const PUBLISH: &str = "publish";
+
+/** Every event a command hooks. Scripts hook their own names on top of
+these, so this is not the set of hookable names, just the ones that come
+from a command rather than from [scripts] itself. `lpm run` reads it to
+tell a real hook from a script that merely starts with "pre". */
+pub const EVENTS: [&str; 3] = [INSTALL, ADD, PUBLISH];
 
 /** The two hooks one event has in one manifest, resolved up front.
 
@@ -35,8 +41,8 @@ pub struct Lifecycle {
     /// "scope/name@version" for the banner each hook prints, absent in a project with no [package].
     package: Option<String>,
     event: String,
-    pre: Option<String>,
-    post: Option<String>,
+    pre: Option<Script>,
+    post: Option<Script>,
 }
 
 impl Lifecycle {
@@ -52,14 +58,14 @@ impl Lifecycle {
 
     /// runs `pre<event>`, before the command does any work.
     pub fn before(&self) -> Result<(), Error> {
-        self.hook(&format!("pre{}", self.event), self.pre.as_deref())
+        self.hook(&format!("pre{}", self.event), self.pre.as_ref())
     }
 
     /** runs `post<event>`, after the command succeeded. call sites reach
     this through `?` on the work itself, so a failed command never gets a
     post hook -- "postpublish" should mean the publish happened. */
     pub fn after(&self) -> Result<(), Error> {
-        self.hook(&format!("post{}", self.event), self.post.as_deref())
+        self.hook(&format!("post{}", self.event), self.post.as_ref())
     }
 
     /** Runs one hook, or nothing when the manifest never defined it.
@@ -69,13 +75,19 @@ impl Lifecycle {
     matters more here than anywhere. A non-zero exit becomes an error
     naming the hook rather than the silent exit an explicitly typed script
     gets; the child's code still survives, see `Error::exit_code`. */
-    fn hook(&self, name: &str, script: Option<&str>) -> Result<(), Error> {
+    fn hook(&self, name: &str, script: Option<&Script>) -> Result<(), Error> {
         let Some(script) = script else {
             return Ok(());
         };
+        /* an empty list is caught by `Manifest::script` for a named run, but
+        a hook is never looked up that way. nothing to run means nothing ran */
+        let commands = script.commands();
+        if commands.is_empty() {
+            return Ok(());
+        }
 
-        ui::print_script_notice(self.package.as_deref(), name, script);
-        match process::wait(process::shell(script))? {
+        ui::print_script_notice(self.package.as_deref(), name, commands);
+        match process::script(commands)? {
             0 => Ok(()),
             code => Err(Error::HookFailed {
                 hook: name.to_string(),
@@ -88,6 +100,13 @@ impl Lifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// the command lines a hook would run, for comparing against a literal list.
+    fn commands(script: Option<&Script>) -> Vec<&str> {
+        script
+            .map(|script| script.commands().iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
 
     fn manifest(scripts: &str) -> Manifest {
         toml::from_str(&format!(
@@ -102,8 +121,8 @@ mod tests {
             "prebuild = \"echo before\"\nbuild = \"echo main\"\npostbuild = \"echo after\"\n",
         );
         let lifecycle = Lifecycle::of(&manifest, "build");
-        assert_eq!(lifecycle.pre.as_deref(), Some("echo before"));
-        assert_eq!(lifecycle.post.as_deref(), Some("echo after"));
+        assert_eq!(commands(lifecycle.pre.as_ref()), ["echo before"]);
+        assert_eq!(commands(lifecycle.post.as_ref()), ["echo after"]);
     }
 
     #[test]
@@ -111,12 +130,12 @@ mod tests {
         let manifest = manifest("preinstall = \"a\"\npostpublish = \"b\"\n");
 
         let install = Lifecycle::of(&manifest, INSTALL);
-        assert_eq!(install.pre.as_deref(), Some("a"));
+        assert_eq!(commands(install.pre.as_ref()), ["a"]);
         assert!(install.post.is_none());
 
         let publish = Lifecycle::of(&manifest, PUBLISH);
         assert!(publish.pre.is_none());
-        assert_eq!(publish.post.as_deref(), Some("b"));
+        assert_eq!(commands(publish.post.as_ref()), ["b"]);
 
         // an event nobody hooked is two absent scripts, not an error
         let add = Lifecycle::of(&manifest, ADD);
@@ -130,10 +149,10 @@ mod tests {
         let manifest = manifest("preprebuild = \"never\"\nprebuild = \"echo before\"\n");
         let lifecycle = Lifecycle::of(&manifest, "prebuild");
         // only reachable by typing `lpm run prebuild` yourself
-        assert_eq!(lifecycle.pre.as_deref(), Some("never"));
+        assert_eq!(commands(lifecycle.pre.as_ref()), ["never"]);
 
         let build = Lifecycle::of(&manifest, "build");
-        assert_eq!(build.pre.as_deref(), Some("echo before"));
+        assert_eq!(commands(build.pre.as_ref()), ["echo before"]);
     }
 
     #[test]
