@@ -105,8 +105,20 @@ pub fn extract(
             archive.extract(dest)?;
         }
         Kind::TarGz => {
-            let decoder = flate2::read::GzDecoder::new(bytes);
-            tar::Archive::new(decoder).unpack(dest)?;
+            let mut decoded = Vec::new();
+            std::io::copy(&mut flate2::read::GzDecoder::new(bytes), &mut decoded)?;
+            unpack_tar_or_raw(&decoded, dest, raw_target)?;
+        }
+        Kind::TarXz => {
+            let mut decoded = Vec::new();
+            lzma_rs::xz_decompress(&mut std::io::BufReader::new(bytes), &mut decoded).map_err(
+                |error| Error::AssetUnpackFailed {
+                    asset: asset_name.to_string(),
+                    format: "xz",
+                    reason: error.to_string(),
+                },
+            )?;
+            unpack_tar_or_raw(&decoded, dest, raw_target)?;
         }
         Kind::Tar => {
             tar::Archive::new(bytes).unpack(dest)?;
@@ -114,8 +126,38 @@ pub fn extract(
         Kind::Raw => {
             fs::write(raw_target, bytes)?;
         }
+        /* refusing beats the alternative. writing compressed bytes to the
+        executable's path "succeeds", and the tool then fails at every run
+        with "cannot execute binary file", which says nothing about why. */
+        Kind::Unsupported(format) => {
+            return Err(Error::AssetCompression {
+                asset: asset_name.to_string(),
+                format,
+            });
+        }
     }
     Ok(())
+}
+
+/** Unpacks decompressed bytes, as a tar when they are one and as the
+executable itself when they aren't.
+
+A `.tar.xz` holds a tar, but a plain `.xz` is just the binary squeezed, and
+both arrive here having been through the same decompressor. Asking the bytes
+is the only way to tell, and getting it wrong either drops the tool's whole
+directory or writes a tar where a binary belongs. */
+fn unpack_tar_or_raw(bytes: &[u8], dest: &Path, raw_target: &Path) -> Result<(), Error> {
+    if looks_like_tar(bytes) {
+        tar::Archive::new(bytes).unpack(dest)?;
+    } else {
+        fs::write(raw_target, bytes)?;
+    }
+    Ok(())
+}
+
+/// whether `bytes` open a tar, by the ustar magic every tar since the 80s writes at offset 257.
+fn looks_like_tar(bytes: &[u8]) -> bool {
+    bytes.len() >= 262 && &bytes[257..262] == b"ustar"
 }
 
 /// how a release asset's bytes get unpacked.
@@ -123,20 +165,37 @@ pub fn extract(
 enum Kind {
     Zip,
     TarGz,
+    TarXz,
     Tar,
     /// not an archive, the asset is the executable itself.
     Raw,
+    /// compressed with something lpm has no decompressor for. named, so the error can say which.
+    Unsupported(&'static str),
 }
 
 /** Decides how to unpack an asset. content is magic-byte sniffed rather
 than trusted from the file name because ureq transparently decodes
 Content-Encoding: gzip, see index::download. only plain tar, which has
-no leading magic, falls back to the name. */
+no leading magic, falls back to the name.
+
+The compressed formats lpm cannot unpack are sniffed too, rather than left
+to fall through to `Raw`. `Raw` means "these bytes are the executable", so
+anything compressed landing there installs a tool that cannot run.  */
 fn kind(name: &str, bytes: &[u8]) -> Kind {
     if bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
         Kind::Zip
     } else if bytes.starts_with(&[0x1f, 0x8b]) {
         Kind::TarGz
+    } else if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
+        Kind::TarXz
+    } else if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        Kind::Unsupported("zstd")
+    } else if bytes.starts_with(b"BZh") {
+        Kind::Unsupported("bzip2")
+    } else if bytes.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
+        Kind::Unsupported("7z")
+    } else if bytes.starts_with(&[0x52, 0x61, 0x72, 0x21]) {
+        Kind::Unsupported("rar")
     } else if name.to_ascii_lowercase().ends_with(".tar") {
         Kind::Tar
     } else {
@@ -326,6 +385,109 @@ mod tests {
             kind("tool-linux-x86_64", &[0x7f, b'E', b'L', b'F']),
             Kind::Raw
         );
+
+        /* 1axen/blink ships .tar.xz for macos and linux. this used to fall
+        through to Raw, so the xz bytes were written as the executable and
+        every run said "cannot execute binary file". */
+        assert_eq!(
+            kind(
+                "blink-macos-aarch64.tar.xz",
+                &[0xfd, b'7', b'z', b'X', b'Z', 0x00, 0x00, 0x04]
+            ),
+            Kind::TarXz
+        );
+    }
+
+    #[test]
+    fn compression_lpm_cannot_unpack_is_refused_not_installed() {
+        /* the same trap as the xz one: anything compressed reaching Raw
+        installs a "binary" that is really an archive. these say so instead. */
+        for (name, magic, format) in [
+            ("tool.tar.zst", &[0x28, 0xb5, 0x2f, 0xfd][..], "zstd"),
+            ("tool.tar.bz2", b"BZh9", "bzip2"),
+            ("tool.7z", &[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c][..], "7z"),
+            ("tool.rar", b"Rar!", "rar"),
+        ] {
+            assert_eq!(kind(name, magic), Kind::Unsupported(format), "{name}");
+
+            let base = std::env::temp_dir().join("lpm-test-archive-unsupported");
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            let target = base.join("tool");
+            assert!(
+                matches!(
+                    extract(name, magic, &base, &target),
+                    Err(Error::AssetCompression { format: got, .. }) if got == format
+                ),
+                "{name} should be refused"
+            );
+            // and nothing was left behind pretending to be the tool
+            assert!(!target.exists(), "{name} should not write an executable");
+            let _ = fs::remove_dir_all(&base);
+        }
+    }
+
+    #[test]
+    fn recognizes_tar_content_under_a_compressor() {
+        /* what tells a .tar.xz from a bare .xz of the binary itself, since
+        both arrive as plain bytes out of the same decompressor. */
+        let mut tar = vec![0u8; 512];
+        tar[257..262].copy_from_slice(b"ustar");
+        assert!(looks_like_tar(&tar));
+
+        assert!(!looks_like_tar(&[0x7f, b'E', b'L', b'F']));
+        assert!(!looks_like_tar(&[0u8; 512]));
+        // too short to hold the magic at all
+        assert!(!looks_like_tar(&[0u8; 100]));
+    }
+
+    #[test]
+    fn xz_assets_are_decompressed_and_unpacked() {
+        let base = std::env::temp_dir().join("lpm-test-archive-xz");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        // a one-file tar, xz'd, which is exactly the shape blink ships
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"\x7fELF pretend binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "blink", &payload[..])
+            .unwrap();
+        let tarball = builder.into_inner().unwrap();
+
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut tarball.as_slice(), &mut compressed).unwrap();
+        assert_eq!(kind("blink.tar.xz", &compressed), Kind::TarXz);
+
+        let raw_target = base.join("should-not-be-written");
+        extract("blink.tar.xz", &compressed, &base, &raw_target).unwrap();
+
+        assert_eq!(fs::read(base.join("blink")).unwrap(), payload);
+        assert!(!raw_target.exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_bare_compressed_binary_becomes_the_executable() {
+        // no tar inside, so the decompressed bytes are the tool themselves
+        let base = std::env::temp_dir().join("lpm-test-archive-bare-xz");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        let payload = b"\x7fELF a lone binary, no tar around it";
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut &payload[..], &mut compressed).unwrap();
+
+        let target = base.join("tool");
+        extract("tool-macos-aarch64.xz", &compressed, &base, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), payload);
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

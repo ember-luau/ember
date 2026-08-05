@@ -157,6 +157,18 @@ pub enum Error {
     NoExecutableInAsset(String),
 
     #[error(
+        "Release asset {asset} is {format} compressed, which lpm can't unpack; ask the tool's authors for a .zip, .tar.gz or .tar.xz build"
+    )]
+    AssetCompression { asset: String, format: &'static str },
+
+    #[error("Could not decompress the {format} release asset {asset}: {reason}")]
+    AssetUnpackFailed {
+        asset: String,
+        format: &'static str,
+        reason: String,
+    },
+
+    #[error(
         "Tool '{0}' is not managed in this directory; run `lpm tool add {0}` here or add it globally with --global"
     )]
     ToolNotManaged(String),
