@@ -226,7 +226,14 @@ fn spawn_tagged(command: &str, terminal: bool) -> Result<Tagged, Error> {
     /* the child inherits this as its terminal size, so anything that wraps
     or draws a bar lines up with the real window rather than an 80x24 guess */
     let (columns, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let size = libc::winsize {
+    /* mut, and taken as a raw *mut below, only because the two libcs
+    disagree about the signature. glibc declares the termios and winsize
+    *const, apple's declares them *mut. a *mut coerces to a *const and not
+    the other way round, so this is the spelling that compiles on both.
+    `&raw mut` rather than `&mut` because clippy sees the glibc signature
+    and would otherwise call the mutable borrow unnecessary, which it is
+    on linux and is not on macos. openpty only reads it either way. */
+    let mut size = libc::winsize {
         ws_row: rows,
         ws_col: columns,
         ws_xpixel: 0,
@@ -234,14 +241,14 @@ fn spawn_tagged(command: &str, terminal: bool) -> Result<Tagged, Error> {
     };
 
     let (mut controller, mut device): (RawFd, RawFd) = (-1, -1);
-    // SAFETY: both fds are out params, and the two pointers below are read-only
+    // SAFETY: the fds and the winsize are ours, and the name/termios are null
     let opened = unsafe {
         libc::openpty(
             &mut controller,
             &mut device,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
+            std::ptr::null_mut(),
+            &raw mut size,
         )
     };
     if opened != 0 {
