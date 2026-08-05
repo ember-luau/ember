@@ -44,6 +44,10 @@ indicatif = "0.18.6"
 full_moon = { version = "2.2.0", features = ["luau"] }
 globset = "0.4.19"
 jsonc-parser = { version = "0.33.1", features = ["cst"] }
+# .tar.xz release assets, which several tools ship. Pure Rust on purpose: the
+# liblzma bindings would put a C build script in front of every cross target
+# in the release matrix, and decompression happens once per tool install.
+lzma-rs = "0.3"
 
 # openpty, so the commands of a concurrent script run on real terminals and
 # keep their colour. Already in the tree under crossterm and console, so it
