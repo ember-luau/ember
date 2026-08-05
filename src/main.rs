@@ -22,7 +22,7 @@ enum Commands {
     /// Create an lpm.toml manifest in the current directory
     Init,
 
-    /// Runs a script from lpm.toml
+    /// Runs a script from lpm.toml, or lists them all when given no name
     Run(commands::run::RunArgs),
 
     /* the four [scripts] names that double as subcommands, npm's

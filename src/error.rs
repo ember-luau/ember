@@ -268,6 +268,9 @@ pub enum Error {
     #[error("No script named '{0}' under [scripts] in lpm.toml")]
     ScriptMissing(String),
 
+    #[error("Script '{0}' in lpm.toml is an empty list; give it at least one command to run")]
+    ScriptEmpty(String),
+
     /** a `pre<event>`/`post<event>` script exited non-zero. only hooks land
     here. a script named on the command line exits with its own code and no
     message of ours, since the user already knows which one they ran. */

@@ -47,10 +47,47 @@ pub struct Manifest {
     pub tools: BTreeMap<String, Tool>,
     /// shell commands runnable with `lpm run <name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub scripts: BTreeMap<String, String>,
+    pub scripts: BTreeMap<String, Script>,
     /// what `lpm studio open` opens in Roblox Studio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub studio: Option<Studio>,
+}
+
+/** A `[scripts]` entry: one shell command, or several to run at once.
+
+```toml
+[scripts]
+build = "rojo build -o game.rbxl"
+serve = ["larvae process -w", "rojo serve .larvae/build.project.json"]
+```
+
+The array form is what the `concurrently` npm package exists to provide, and
+it earns its place here for the same reason: a dev loop is usually two or
+three long-running processes that have to come up together, and expressing
+that as `a & b & wait` is neither portable to Windows nor able to tag whose
+output is whose.
+
+The two forms are not the same execution model, which is the thing to know
+about them. One command inherits lpm's stdio outright, so a TTY stays a TTY
+and interactive programs work. Several have their output read through pipes
+so each line can be tagged, which costs them that. See `sys::process`. */
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Script {
+    /// one shell command.
+    Single(String),
+    /// several shell commands, all started at once.
+    Parallel(Vec<String>),
+}
+
+impl Script {
+    /// the command lines this entry runs, in order. one for [`Script::Single`].
+    pub fn commands(&self) -> &[String] {
+        match self {
+            Script::Single(command) => std::slice::from_ref(command),
+            Script::Parallel(commands) => commands,
+        }
+    }
 }
 
 /// per-environment install locations, each defaults to "packages/<env>".
@@ -627,12 +664,21 @@ impl Manifest {
             .map(|package| format!("{}@{}", package.name, package.version))
     }
 
-    /// the command a `[scripts]` entry runs. read side only, used by `lpm run`. edits go through `edit::ManifestDoc`.
-    pub fn script(&self, name: &str) -> Result<&str, Error> {
-        self.scripts
+    /** the `[scripts]` entry named `name`. read side only, used by `lpm run`.
+    edits go through `edit::ManifestDoc`.
+
+    An entry with nothing in it, `serve = []`, is refused rather than run as a
+    no-op: it can only be a half-finished edit, and succeeding silently is the
+    one outcome that would hide that. */
+    pub fn script(&self, name: &str) -> Result<&Script, Error> {
+        let script = self
+            .scripts
             .get(name)
-            .map(String::as_str)
-            .ok_or_else(|| Error::ScriptMissing(name.to_string()))
+            .ok_or_else(|| Error::ScriptMissing(name.to_string()))?;
+        if script.commands().is_empty() {
+            return Err(Error::ScriptEmpty(name.to_string()));
+        }
+        Ok(script)
     }
 }
 
@@ -728,11 +774,58 @@ mod tests {
         assert_eq!(manifest.tools["stylua"].version, "2.0.0");
         assert_eq!(manifest.tools["StyLua"].repository, "JohnnyMorganz/StyLua");
         assert_eq!(manifest.tools["StyLua"].version, "2.1.0");
-        assert_eq!(manifest.script("build").unwrap(), "rojo build -o game.rbxl");
+        assert_eq!(
+            manifest.script("build").unwrap().commands(),
+            ["rojo build -o game.rbxl"]
+        );
         assert!(matches!(
             manifest.script("test"),
             Err(Error::ScriptMissing(_))
         ));
+    }
+
+    #[test]
+    fn scripts_take_a_string_or_a_list() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "scope/name"
+            version = "0.1.0"
+
+            [scripts]
+            build = "rojo build -o game.rbxl"
+            serve = ["larvae process -w", "rojo serve .larvae/build.project.json"]
+            empty = []
+            "#,
+        )
+        .unwrap();
+
+        // one command either way, so callers never special-case the shape
+        assert_eq!(
+            manifest.script("build").unwrap().commands(),
+            ["rojo build -o game.rbxl"]
+        );
+        assert_eq!(
+            manifest.script("serve").unwrap().commands(),
+            ["larvae process -w", "rojo serve .larvae/build.project.json"]
+        );
+
+        // an empty list is an unfinished edit, not a script that does nothing
+        assert!(matches!(
+            manifest.script("empty"),
+            Err(Error::ScriptEmpty(name)) if name == "empty"
+        ));
+        assert!(matches!(
+            manifest.script("absent"),
+            Err(Error::ScriptMissing(_))
+        ));
+
+        // both forms survive a write, each keeping the shape it was written in
+        let serialized = toml::to_string(&manifest).unwrap();
+        let reparsed: Manifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.scripts, manifest.scripts);
+        assert!(matches!(reparsed.scripts["build"], Script::Single(_)));
+        assert!(matches!(reparsed.scripts["serve"], Script::Parallel(_)));
     }
 
     #[test]

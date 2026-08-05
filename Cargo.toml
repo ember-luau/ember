@@ -45,6 +45,12 @@ full_moon = { version = "2.2.0", features = ["luau"] }
 globset = "0.4.19"
 jsonc-parser = { version = "0.33.1", features = ["cst"] }
 
+# openpty, so the commands of a concurrent script run on real terminals and
+# keep their colour. Already in the tree under crossterm and console, so it
+# costs the binary nothing new. See sys::process.
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
