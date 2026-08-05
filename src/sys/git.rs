@@ -123,16 +123,16 @@ mod tests {
     #[test]
     fn normalizes_remote_urls_to_https() {
         assert_eq!(
-            remote_https_url("https://github.com/luaupm/cli.git").as_deref(),
-            Some("https://github.com/luaupm/cli")
+            remote_https_url("https://github.com/luaupm/lpm.git").as_deref(),
+            Some("https://github.com/luaupm/lpm")
         );
         assert_eq!(
-            remote_https_url("git@github.com:luaupm/cli.git").as_deref(),
-            Some("https://github.com/luaupm/cli")
+            remote_https_url("git@github.com:luaupm/lpm.git").as_deref(),
+            Some("https://github.com/luaupm/lpm")
         );
         assert_eq!(
-            remote_https_url("ssh://git@github.com/luaupm/cli").as_deref(),
-            Some("https://github.com/luaupm/cli")
+            remote_https_url("ssh://git@github.com/luaupm/lpm").as_deref(),
+            Some("https://github.com/luaupm/lpm")
         );
         assert_eq!(remote_https_url("ftp://example.com/a/b"), None);
     }

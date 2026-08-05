@@ -433,8 +433,8 @@ mod tests {
     #[test]
     fn derives_scoped_name_from_remote_url() {
         assert_eq!(
-            owner_repo_from_url("https://github.com/luaupm/cli").as_deref(),
-            Some("luaupm/cli")
+            owner_repo_from_url("https://github.com/luaupm/lpm").as_deref(),
+            Some("luaupm/lpm")
         );
         assert_eq!(
             owner_repo_from_url("https://github.com/Luau-PM/My_Repo").as_deref(),

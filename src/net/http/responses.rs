@@ -45,8 +45,8 @@ mod tests {
     #[test]
     fn deserializes_github_release() {
         let json = r#"{
-            "url": "https://api.github.com/repos/luaupm/cli/releases/213371337213",
-            "html_url": "https://github.com/luaupm/cli/releases/tag/v0.1.0",
+            "url": "https://api.github.com/repos/luaupm/lpm/releases/213371337213",
+            "html_url": "https://github.com/luaupm/lpm/releases/tag/v0.1.0",
             "id": 213371337213,
             "node_id": "RE_kwDOLxAmM84MK9bd",
             "tag_name": "v0.1.0",
@@ -59,16 +59,16 @@ mod tests {
             "body": "Release notes here",
             "assets": [
                 {
-                    "url": "https://api.github.com/repos/luaupm/cli/releases/assets/1",
+                    "url": "https://api.github.com/repos/luaupm/lpm/releases/assets/1",
                     "id": 1,
                     "name": "lpm-windows-x86_64.exe",
                     "content_type": "application/octet-stream",
                     "size": 4200000,
-                    "browser_download_url": "https://github.com/luaupm/cli/releases/download/v0.1.0/lpm-windows-x86_64.exe"
+                    "browser_download_url": "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-windows-x86_64.exe"
                 },
                 {
                     "name": "lpm-linux-x86_64",
-                    "browser_download_url": "https://github.com/luaupm/cli/releases/download/v0.1.0/lpm-linux-x86_64"
+                    "browser_download_url": "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-linux-x86_64"
                 }
             ]
         }"#;
@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(release.assets[0].name, "lpm-windows-x86_64.exe");
         assert_eq!(
             release.assets[0].browser_download_url,
-            "https://github.com/luaupm/cli/releases/download/v0.1.0/lpm-windows-x86_64.exe"
+            "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-windows-x86_64.exe"
         );
         assert_eq!(release.assets[1].name, "lpm-linux-x86_64");
     }
