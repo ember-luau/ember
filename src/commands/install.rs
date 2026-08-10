@@ -1029,7 +1029,7 @@ struct Extracted {
     environment: Environment,
     /// None means no entry point found, warned already at link time
     entry: Option<String>,
-    types: Vec<String>,
+    types: package::Exports,
 }
 
 /** one registry package, end to end except the link file. download or
@@ -1099,7 +1099,7 @@ fn install_one(
             let types = link_types(&storage, &entry, &job.name, &mut bar_warn(bar));
             (Some(entry), types)
         }
-        None => (None, Vec::new()),
+        None => (None, package::Exports::default()),
     };
 
     // suspend so a timings line can't tear the live bar from a worker thread
@@ -1167,16 +1167,16 @@ fn link_workspace_member(
 
     match (&job.link, package::entry_point(member_dir)) {
         (Some(link), Some(entry)) => {
-            let mut require = workspace::relative_path(&out, member_dir);
-            if !entry.is_empty() {
-                require = format!("{require}/{entry}");
+            let mut root = workspace::relative_path(&out, member_dir);
+            if !root.starts_with("..") {
+                root = format!("./{root}");
             }
-            if !require.starts_with("..") {
-                require = format!("./{require}");
-            }
-            let types = link_types(member_dir, &entry, &job.name, &mut bar_warn(bar));
+            let exports = link_types(member_dir, &entry, &job.name, &mut bar_warn(bar));
             let link_path = out.join(format!("{link}.luau"));
-            fs::write(&link_path, package::link_contents_at(&require, &types))?;
+            fs::write(
+                &link_path,
+                package::link_contents_at(&root, &entry, &exports),
+            )?;
         }
         (_, None) => warn_no_entry(&job.name, bar),
         // a transitively pulled member, link targets exist, no link written
@@ -1247,7 +1247,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
         .collect();
     /* exported types depend on the dependency AND its context, the same
     name can resolve to different targets, different archives, per tree */
-    let mut types_cache: HashMap<(String, Environment), Vec<String>> = HashMap::new();
+    let mut types_cache: HashMap<(String, Environment), package::Exports> = HashMap::new();
 
     for package in packages.iter().filter(|package| !package.in_place) {
         /* alias -> environment folder, for the escape require rewrite
@@ -1305,15 +1305,12 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             measure from */
             let from = std::path::absolute(&link_dir).unwrap_or_else(|_| link_dir.clone());
             let to = std::path::absolute(&dep.storage).unwrap_or_else(|_| dep.storage.clone());
-            let mut require = workspace::relative_path(&from, &to);
-            if !entry.is_empty() {
-                require = format!("{require}/{entry}");
-            }
-            if !require.starts_with("..") {
-                require = format!("./{require}");
+            let mut root = workspace::relative_path(&from, &to);
+            if !root.starts_with("..") {
+                root = format!("./{root}");
             }
 
-            let types = types_cache
+            let exports = types_cache
                 .entry((dependency.clone(), package.context))
                 .or_insert_with(|| {
                     /* install_packages already parsed and complained about
@@ -1321,12 +1318,18 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                     just say the same thing twice */
                     package::entry_source(&dep.storage, &entry)
                         .and_then(|path| fs::read_to_string(path).ok())
-                        .and_then(|source| package::exported_types(&source))
+                        .and_then(|source| {
+                            let frame = package::RequireFrame::of(&dep.storage, &entry);
+                            package::exported_types(&source, &frame)
+                        })
                         .unwrap_or_default()
                 })
                 .clone();
             let link_path = link_dir.join(format!("{alias}.luau"));
-            match fs::write(&link_path, package::link_contents_at(&require, &types)) {
+            match fs::write(
+                &link_path,
+                package::link_contents_at(&root, &entry, &exports),
+            ) {
                 /* only now is the alias safe to retarget escape requires
                 at. rewriting toward a link that failed to write would
                 turn a maybe working chain into a certainly broken one */
@@ -1398,17 +1401,18 @@ fn link_types(
     entry: &str,
     name: &str,
     warn: &mut impl FnMut(String),
-) -> Vec<String> {
+) -> package::Exports {
     let Some(source) =
         package::entry_source(package_dir, entry).and_then(|path| fs::read_to_string(path).ok())
     else {
-        return Vec::new();
+        return package::Exports::default();
     };
-    package::exported_types(&source).unwrap_or_else(|| {
+    let frame = package::RequireFrame::of(package_dir, entry);
+    package::exported_types(&source, &frame).unwrap_or_else(|| {
         warn(format!(
             "warning: could not parse the entry point of {name}; its types are not re-exported"
         ));
-        Vec::new()
+        package::Exports::default()
     })
 }
 
@@ -1934,7 +1938,7 @@ mod tests {
         let extracted = |entry: Option<&str>| Extracted {
             environment: Environment::Roblox,
             entry: entry.map(str::to_string),
-            types: Vec::new(),
+            types: package::Exports::default(),
         };
         let bar = ProgressBar::hidden();
 

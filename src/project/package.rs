@@ -11,42 +11,153 @@ use full_moon::visitors::Visitor;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// what the link file calls the package it wraps. a package binding of the same name loses its imports rather than shadow this.
+const MODULE_BINDING: &str = "module";
+
+/** what a link file has to restate about one module: its exported types, the
+modules those types reach through, and the aliases that make the reaching
+legal. */
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Exports {
+    /// `export type X<T> = module.X<T>` lines, in source order.
+    pub types: Vec<String>,
+    /// `(binding, package-root-relative module path)` for each module the lines name, first use first.
+    pub imports: Vec<(String, String)>,
+    /// `type __lpm_X_T = Types.Default` lines, one per generic default that had to be hoisted.
+    pub aliases: Vec<String>,
+}
+
 /** body of a generated link file. requires the stored package and restates its
 exported types, e.g.
 
 ```luau
 local module = require("./.lpm/scope_pkg/lib")
-export type Result<T, E = string> = module.Result<T, E>
+local Types = require("./.lpm/scope_pkg/lib/Types")
+type __lpm_Result_E = Types.Default
+export type Result<T, E = __lpm_Result_E> = module.Result<T, E>
 return module
 ```
 
-no exported types = the compact `return require(...)` form. */
-pub fn link_contents(folder: &str, entry: &str, types: &[String]) -> String {
-    // empty entry = the package root itself is the module, a root init file
-    let path = if entry.is_empty() {
-        format!("./.lpm/{folder}")
-    } else {
-        format!("./.lpm/{folder}/{entry}")
-    };
-    link_contents_at(&path, types)
+the require and the alias only appear when a default needs them, see
+[`exported_types`]. no exported types at all = the compact
+`return require(...)` form. */
+pub fn link_contents(folder: &str, entry: &str, exports: &Exports) -> String {
+    link_contents_at(&format!("./.lpm/{folder}"), entry, exports)
 }
 
-/** like [`link_contents`] but for an arbitrary require path. workspace members
-link straight to their source, like `../../packages/core/src`, instead of an
-extracted copy under `.lpm/`. */
-pub fn link_contents_at(path: &str, types: &[String]) -> String {
-    let path = format!("\"{path}\"");
-    if types.is_empty() {
-        return format!("return require({path})\n");
+/** like [`link_contents`] but rooted anywhere. workspace members link straight
+to their source, like `../../packages/core` + `src`, instead of an extracted
+copy under `.lpm/`. `root` is the package, `entry` the module inside it, kept
+apart because imports are relative to the package, not to the module. */
+pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
+    // empty entry = the package root itself is the module, a root init file
+    let module_path = if entry.is_empty() {
+        root.to_string()
+    } else {
+        format!("{root}/{entry}")
+    };
+    if exports.types.is_empty() {
+        return format!("return require(\"{module_path}\")\n");
     }
 
-    let mut contents = format!("local module = require({path})\n");
-    for line in types {
+    let mut contents = format!("local {MODULE_BINDING} = require(\"{module_path}\")\n");
+    /* the aliases below name these the way the source did, so the bindings
+    have to exist here too, pointing at the same modules through the link
+    file's own path */
+    for (name, path) in &exports.imports {
+        contents.push_str(&format!("local {name} = require(\"{root}/{path}\")\n"));
+    }
+    for line in &exports.aliases {
+        contents.push_str(line);
+        contents.push('\n');
+    }
+    for line in &exports.types {
         contents.push_str(line);
         contents.push('\n');
     }
     contents.push_str("return module\n");
     contents
+}
+
+/** the two frames Luau's require-by-string gives a module, so a require in the
+entry source can be pointed at from somewhere else.
+
+an init file IS its folder: `./` from `src/init.luau` means a sibling of `src`,
+which is the package root, while `@self/` means one of its children, `src/X`.
+a plain `lib.luau` has both frames at the folder it sits in. same rule
+`requires::parse_chain` renders instance chains with, read the other way. */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequireFrame {
+    /// what `@self/` resolves against, package-root-relative.
+    own: String,
+    /// what `./` and `../` resolve against. None when that frame sits above the package, where nothing is ours to point at.
+    siblings: Option<String>,
+}
+
+impl RequireFrame {
+    /// the frames of `entry` in the package at `dir`, read from which file the entry actually resolves to.
+    pub fn of(dir: &Path, entry: &str) -> Self {
+        let is_init = entry_source(dir, entry)
+            .and_then(|path| Some(path.file_stem()?.to_str()? == "init"))
+            .unwrap_or(false);
+        if is_init {
+            Self::init(entry)
+        } else {
+            Self::file(&parent_dir(entry))
+        }
+    }
+
+    /// frames of an `init` file, which stands for the folder it sits in: `src` for `src/init.luau`.
+    pub fn init(folder: &str) -> Self {
+        RequireFrame {
+            own: folder.to_string(),
+            // a root init's siblings are outside the package
+            siblings: (!folder.is_empty()).then(|| parent_dir(folder)),
+        }
+    }
+
+    /// frames of a plain file, both the folder it sits in.
+    pub fn file(folder: &str) -> Self {
+        RequireFrame {
+            own: folder.to_string(),
+            siblings: Some(folder.to_string()),
+        }
+    }
+}
+
+/// the folder part of a package-root-relative path, empty at the root.
+fn parent_dir(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default()
+}
+
+/** where a require in the entry source points, as a package-root-relative
+module path.
+
+None for everything the link file can't reach: a named `@alias/` needs the
+package's own .luaurc, an instance require isn't a path at all, and a `../`
+chain that climbs out of the package has nothing on the other side. */
+fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> {
+    let (base, rest) = if let Some(rest) = raw.strip_prefix("@self/") {
+        (frame.own.as_str(), rest)
+    } else if raw.starts_with("./") || raw.starts_with("../") {
+        (frame.siblings.as_deref()?, raw)
+    } else {
+        return None;
+    };
+
+    let mut parts: Vec<&str> = base.split('/').filter(|part| !part.is_empty()).collect();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
@@ -80,18 +191,28 @@ they don't flow through `return require(...)`, so the link file must restate eac
 one as `export type X<T> = module.X<T>`, same scheme as pesde's linker. the
 declaration side keeps generic defaults, the use side drops them. exported type
 functions re-export the same way with their parameters as generics, parameterless
-ones have no type-declaration equivalent and get skipped. None = source couldn't
-be parsed, invalid, absurdly nested, or a parser panic. caller decides how loudly
-to say so. */
-pub fn exported_types(source: &str) -> Option<Vec<String>> {
+ones have no type-declaration equivalent and get skipped.
+
+a kept default is copied verbatim, so whatever it names has to exist in the link
+file too. a package that keeps its types in a second module, `export type
+Signal<S = Types.Default>` over `local Types = require("@self/Types")`, needs
+that require restated as well, which is what `frame` is for and what
+[`Exports::imports`] carries. defaults naming something the link file can't
+reach are dropped instead, leaving the parameter, since a type that needs its
+argument spelled out beats one whose default is undefined.
+
+None = source couldn't be parsed, invalid, absurdly nested, or a parser panic.
+caller decides how loudly to say so. */
+pub fn exported_types(source: &str, frame: &RequireFrame) -> Option<Exports> {
     if bracket_depth(source) > MAX_NESTING_DEPTH {
         return None;
     }
     let source = source.to_string();
+    let frame = frame.clone();
     std::thread::Builder::new()
         .name("luau-parse".to_string())
         .stack_size(PARSE_STACK_BYTES)
-        .spawn(move || extract_types(&source))
+        .spawn(move || extract_types(&source, &frame))
         .ok()?
         .join()
         .ok()? // full_moon panic reads as "couldn't parse"
@@ -116,51 +237,305 @@ fn bracket_depth(source: &str) -> usize {
     deepest
 }
 
-fn extract_types(source: &str) -> Option<Vec<String>> {
-    struct TypeVisitor {
-        types: Vec<String>,
+fn extract_types(source: &str, frame: &RequireFrame) -> Option<Exports> {
+    let ast = full_moon::parse(source).ok()?;
+    let mut visitor = SourceVisitor::default();
+    visitor.visit_ast(&ast);
+    Some(visitor.into_exports(frame))
+}
+
+/// one exported type, kept whole until the whole source has been read: whether a default survives depends on declarations further down.
+struct Export {
+    name: String,
+    generics: Vec<Generic>,
+}
+
+struct Generic {
+    /// `T`, or `T...` for a pack. what the use side spells either way.
+    parameter: String,
+    default: Option<Default>,
+}
+
+/// a generic's `= <type>`, with what that type reaches for.
+struct Default {
+    /// the type itself, right of the `=`.
+    body: String,
+    /// modules indexed for a type, `Types` in `Types.Default`.
+    modules: Vec<String>,
+    /// type names used bare, `Default` in `type X = Default`.
+    names: Vec<String>,
+}
+
+/// everything one source says that bears on its re-export lines.
+#[derive(Default)]
+struct SourceVisitor {
+    /// `local X = require("...")` and its `const` twin, in source order.
+    requires: Vec<(String, String)>,
+    /// every type the source declares, exported or not.
+    declared: Vec<String>,
+    /// the exported subset, the ones the link file restates.
+    exported: Vec<String>,
+    exports: Vec<Export>,
+}
+
+impl Visitor for SourceVisitor {
+    fn visit_local_assignment(&mut self, node: &full_moon::ast::LocalAssignment) {
+        self.bind(node.names(), node.expressions());
     }
 
-    impl Visitor for TypeVisitor {
-        fn visit_exported_type_declaration(&mut self, node: &ExportedTypeDeclaration) {
-            let declaration = node.type_declaration();
-            let name = declaration.type_name().token().to_string();
+    fn visit_const_assignment(&mut self, node: &full_moon::ast::luau::ConstAssignment) {
+        self.bind(node.names(), node.expressions());
+    }
 
+    /// fires for exported declarations too, so this sees every type the source declares.
+    fn visit_type_declaration(&mut self, node: &full_moon::ast::luau::TypeDeclaration) {
+        self.declared.push(trimmed(node.type_name()));
+    }
+
+    fn visit_type_function(&mut self, node: &full_moon::ast::luau::TypeFunction) {
+        self.declared.push(trimmed(node.function_name()));
+    }
+
+    fn visit_exported_type_declaration(&mut self, node: &ExportedTypeDeclaration) {
+        let declaration = node.type_declaration();
+        let name = trimmed(declaration.type_name());
+        self.exported.push(name.clone());
+
+        let mut generics = Vec::new();
+        if let Some(declared) = declaration.generics() {
+            for generic in declared.generics() {
+                generics.push(Generic {
+                    parameter: trimmed(generic.parameter()),
+                    default: generic.default_type().map(|default| Default {
+                        body: trimmed(default),
+                        modules: referenced_modules(default),
+                        names: referenced_names(default),
+                    }),
+                });
+            }
+        }
+        self.exports.push(Export { name, generics });
+    }
+
+    fn visit_exported_type_function(&mut self, node: &ExportedTypeFunction) {
+        let function = node.type_function();
+        let name = trimmed(function.function_name());
+        self.exported.push(name.clone());
+
+        /* parameters are values here, `ty: type`, not type expressions, so
+        they carry nothing that could need a module of its own */
+        let generics = function
+            .function_body()
+            .parameters()
+            .iter()
+            .map(|parameter| Generic {
+                parameter: trimmed(parameter),
+                default: None,
+            })
+            .collect::<Vec<_>>();
+        if generics.is_empty() {
+            return; // no parameters, no type-declaration equivalent
+        }
+        self.exports.push(Export { name, generics });
+    }
+}
+
+impl SourceVisitor {
+    /// records `X = require("path")` pairs, positionally, ignoring every other binding.
+    fn bind(
+        &mut self,
+        names: &full_moon::ast::punctuated::Punctuated<full_moon::tokenizer::TokenReference>,
+        expressions: &full_moon::ast::punctuated::Punctuated<full_moon::ast::Expression>,
+    ) {
+        for (name, expression) in names.iter().zip(expressions.iter()) {
+            if let Some(path) = required_path(expression) {
+                self.requires.push((trimmed(name), path));
+            }
+        }
+    }
+
+    fn into_exports(self, frame: &RequireFrame) -> Exports {
+        let mut exports = Exports::default();
+        for export in &self.exports {
             let mut declared = Vec::new();
             let mut used = Vec::new();
-            if let Some(generics) = declaration.generics() {
-                for generic in generics.generics() {
-                    declared.push(trimmed(generic));
-                    used.push(if generic.default_type().is_some() {
-                        trimmed(generic.parameter())
-                    } else {
-                        trimmed(generic)
-                    });
-                }
+            for generic in &export.generics {
+                used.push(generic.parameter.clone());
+                declared.push(self.restate(export, generic, frame, &mut exports));
             }
-            self.types.push(reexport(&name, &declared, &used));
+            exports.types.push(reexport(&export.name, &declared, &used));
+        }
+        exports
+    }
+
+    /** how one generic parameter is declared in the link file: `T`, `T = string`,
+    or `T = <alias>` with the alias and its import recorded in `exports`. */
+    fn restate(
+        &self,
+        export: &Export,
+        generic: &Generic,
+        frame: &RequireFrame,
+        exports: &mut Exports,
+    ) -> String {
+        let parameter = &generic.parameter;
+        let Some(default) = &generic.default else {
+            return parameter.clone();
+        };
+        let Some(imports) = self.reachable(default, frame) else {
+            // nothing here can point at what the default names, keep the parameter alone
+            return parameter.clone();
+        };
+        if imports.is_empty() {
+            return format!("{parameter} = {}", default.body);
         }
 
-        fn visit_exported_type_function(&mut self, node: &ExportedTypeFunction) {
-            let function = node.type_function();
-            let name = function.function_name().token().to_string();
-            let parameters: Vec<String> = function
-                .function_body()
-                .parameters()
-                .iter()
-                .map(trimmed)
-                .collect();
-            if parameters.is_empty() {
-                return;
+        /* Luau rejects a dotted type in default position outright, `<S =
+        Types.Default>` is "Unknown type 'Types.Default'" however the module is
+        bound, while a plain alias in the same spot resolves. so a default that
+        goes through a module gets hoisted into one and named instead. */
+        if hoisting_would_escape(export, generic, default) {
+            return parameter.clone();
+        }
+        let alias = format!("__lpm_{}_{}", export.name, parameter);
+        exports
+            .aliases
+            .push(format!("type {alias} = {}", default.body));
+        for import in imports {
+            if !exports.imports.contains(&import) {
+                exports.imports.push(import);
             }
-            self.types.push(reexport(&name, &parameters, &parameters));
+        }
+        format!("{parameter} = {alias}")
+    }
+
+    /** the imports a default needs before the link file can restate it, or
+    None when something it names can't be reached from there at all. */
+    fn reachable(&self, default: &Default, frame: &RequireFrame) -> Option<Vec<(String, String)>> {
+        /* a name the source declares privately exists nowhere else. one it
+        exports is restated in the link file, and anything it never declared
+        is a built-in or one of this declaration's own parameters */
+        if default
+            .names
+            .iter()
+            .any(|name| self.declared.contains(name) && !self.exported.contains(name))
+        {
+            return None;
+        }
+
+        default
+            .modules
+            .iter()
+            .map(|module| {
+                if module == MODULE_BINDING {
+                    return None; // would shadow the link file's own binding
+                }
+                let (_, raw) = self.requires.iter().find(|(name, _)| name == module)?;
+                Some((module.clone(), resolve_import(raw, frame)?))
+            })
+            .collect()
+    }
+}
+
+/** whether hoisting a default out of its declaration would leave something
+behind. an alias sits at file scope, so one naming the declaration's own
+parameters, `<T, U = Types.Of<T>>`, can't go there, and a pack default like
+`...any` isn't a type an alias can hold at all. */
+fn hoisting_would_escape(export: &Export, generic: &Generic, default: &Default) -> bool {
+    generic.parameter.ends_with("...")
+        || export.generics.iter().any(|other| {
+            // a pack reads as `T` where it's used, `T...` where it's declared
+            default
+                .names
+                .iter()
+                .any(|name| name == other.parameter.trim_end_matches("..."))
+        })
+}
+
+/// the string a `require("path")` call was given, for the plain call shapes. None for anything else, including instance requires.
+fn required_path(expression: &full_moon::ast::Expression) -> Option<String> {
+    use full_moon::ast::{Call, Expression, FunctionArgs, Prefix, Suffix};
+
+    let Expression::FunctionCall(call) = expression else {
+        return None;
+    };
+    let Prefix::Name(name) = call.prefix() else {
+        return None;
+    };
+    if trimmed(name) != "require" {
+        return None;
+    }
+
+    let mut suffixes = call.suffixes();
+    let Some(Suffix::Call(Call::AnonymousCall(arguments))) = suffixes.next() else {
+        return None;
+    };
+    // require("x").y is a value, not the module
+    if suffixes.next().is_some() {
+        return None;
+    }
+
+    let literal = match arguments {
+        FunctionArgs::String(literal) => literal,
+        FunctionArgs::Parentheses { arguments, .. } => {
+            match arguments.iter().collect::<Vec<_>>()[..] {
+                [Expression::String(literal)] => literal,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    string_value(literal)
+}
+
+/// the contents of a Luau string token, quotes off. None for the long-bracket and escaped forms, which no require path needs.
+fn string_value(token: &full_moon::tokenizer::TokenReference) -> Option<String> {
+    let text = trimmed(token);
+    let unquoted = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            text.strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })?;
+    (!unquoted.contains('\\')).then(|| unquoted.to_string())
+}
+
+/// modules a type expression indexes, `Types` in `Types.Default`.
+fn referenced_modules(node: &full_moon::ast::luau::TypeInfo) -> Vec<String> {
+    references(node).0
+}
+
+/// type names a type expression uses bare, `Default` in `type X = Default`.
+fn referenced_names(node: &full_moon::ast::luau::TypeInfo) -> Vec<String> {
+    references(node).1
+}
+
+fn references(node: &full_moon::ast::luau::TypeInfo) -> (Vec<String>, Vec<String>) {
+    use full_moon::ast::luau::TypeInfo;
+    use full_moon::visitors::Visit;
+
+    #[derive(Default)]
+    struct RefVisitor {
+        modules: Vec<String>,
+        names: Vec<String>,
+    }
+
+    impl Visitor for RefVisitor {
+        fn visit_type_info(&mut self, node: &TypeInfo) {
+            match node {
+                TypeInfo::Module { module, .. } => self.modules.push(trimmed(module)),
+                TypeInfo::Basic(name) => self.names.push(trimmed(name)),
+                // the `map` of `map<K, V>`, the parameters visit on their own
+                TypeInfo::Generic { base, .. } => self.names.push(trimmed(base)),
+                TypeInfo::GenericPack { name, .. } => self.names.push(trimmed(name)),
+                _ => {}
+            }
         }
     }
 
-    let ast = full_moon::parse(source).ok()?;
-    let mut visitor = TypeVisitor { types: Vec::new() };
-    visitor.visit_ast(&ast);
-    Some(visitor.types)
+    let mut visitor = RefVisitor::default();
+    node.visit(&mut visitor);
+    (visitor.modules, visitor.names)
 }
 
 /// AST nodes print with surrounding trivia, whitespace and comments. trim so re-exports stay on one line.
@@ -390,6 +765,14 @@ mod tests {
     fn write_package(dir: &Path, file: &str, contents: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join(file), contents).unwrap();
+    }
+
+    /// exports that need no imports of their own, which most sources are.
+    fn type_lines<const N: usize>(lines: [&str; N]) -> Exports {
+        Exports {
+            types: lines.iter().map(|line| line.to_string()).collect(),
+            ..Exports::default()
+        }
     }
 
     #[test]
@@ -712,14 +1095,14 @@ mod tests {
     #[test]
     fn link_files_require_the_stored_package() {
         assert_eq!(
-            link_contents("evaera_promise", "lib", &[]),
+            link_contents("evaera_promise", "lib", &Exports::default()),
             "return require(\"./.lpm/evaera_promise/lib\")\n"
         );
         assert_eq!(
             link_contents(
                 "evaera_promise",
                 "lib",
-                &["export type Status = module.Status".to_string()]
+                &type_lines(["export type Status = module.Status"])
             ),
             "local module = require(\"./.lpm/evaera_promise/lib\")\n\
              export type Status = module.Status\n\
@@ -741,7 +1124,7 @@ mod tests {
             "{ a: ".repeat(depth),
             " }".repeat(depth)
         );
-        assert_eq!(exported_types(&deep), None);
+        assert_eq!(exported_types(&deep, &RequireFrame::init("")), None);
 
         // deep-but-sane nesting still parses on the roomy parser thread.
         let sane = format!(
@@ -750,7 +1133,9 @@ mod tests {
             " }".repeat(100)
         );
         assert_eq!(
-            exported_types(&sane).unwrap(),
+            exported_types(&sane, &RequireFrame::init(""))
+                .unwrap()
+                .types,
             ["export type Deep = module.Deep"]
         );
 
@@ -802,12 +1187,12 @@ mod tests {
         let deep = worst_case_source();
         let outcome = std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
-            .spawn(move || extract_types(&deep))
+            .spawn(move || extract_types(&deep, &RequireFrame::init("")))
             .expect("probe thread")
             .join();
         assert_eq!(
             outcome.expect("parser overflowed a 16 MiB stack"),
-            Some(vec!["export type Deep = module.Deep".to_string()])
+            Some(type_lines(["export type Deep = module.Deep"]))
         );
     }
 
@@ -841,7 +1226,9 @@ mod tests {
         gets through and is the most expensive input lpm will ever parse */
         assert_eq!(bracket_depth(&deep), MAX_NESTING_DEPTH);
         assert_eq!(
-            exported_types(&deep).unwrap(),
+            exported_types(&deep, &RequireFrame::init(""))
+                .unwrap()
+                .types,
             ["export type Deep = module.Deep"]
         );
     }
@@ -859,7 +1246,9 @@ mod tests {
         "#;
 
         assert_eq!(
-            exported_types(source).unwrap(),
+            exported_types(source, &RequireFrame::init(""))
+                .unwrap()
+                .types,
             [
                 "export type Status = module.Status",
                 "export type Promise<T> = module.Promise<T>",
@@ -869,9 +1258,160 @@ mod tests {
             ]
         );
 
-        assert_eq!(exported_types("return {}").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            exported_types("return {}", &RequireFrame::init("")).unwrap(),
+            Exports::default()
+        );
         // non-Luau input parses to nothing, not bad re-exports.
-        assert_eq!(exported_types("local = = ="), None);
+        assert_eq!(exported_types("local = = =", &RequireFrame::init("")), None);
+    }
+
+    /** the shape issue #39 reported: a package whose types live in a second
+    module, reached through a require the entry point makes.
+
+    two things have to happen for `Signal` to mean anything in a consumer.
+    the module the default comes from has to be required here too, and the
+    default itself has to be hoisted into an alias, because Luau rejects a
+    dotted type in default position however the module is bound. */
+    #[test]
+    fn defaults_reaching_into_another_module_bring_it_along() {
+        let source = r#"
+            local Types = require("@self/Types")
+            export type Signal<Signature = Types.DefaultSignature> = Types.Signal<Signature>
+            export type Wrap<Other> = Types.Wrap<Other>
+            return {}
+        "#;
+
+        // the entry is src/init.luau, so `@self/` is its own folder
+        let exports = exported_types(source, &RequireFrame::init("src")).unwrap();
+        assert_eq!(
+            exports.imports,
+            [("Types".to_string(), "src/Types".to_string())]
+        );
+        assert_eq!(
+            exports.aliases,
+            ["type __lpm_Signal_Signature = Types.DefaultSignature"]
+        );
+        assert_eq!(
+            exports.types,
+            [
+                "export type Signal<Signature = __lpm_Signal_Signature> = module.Signal<Signature>",
+                // no default, nothing to hoist, and no second import either
+                "export type Wrap<Other> = module.Wrap<Other>",
+            ]
+        );
+
+        assert_eq!(
+            link_contents("nowoshire_namedsignal", "src", &exports),
+            "local module = require(\"./.lpm/nowoshire_namedsignal/src\")\n\
+             local Types = require(\"./.lpm/nowoshire_namedsignal/src/Types\")\n\
+             type __lpm_Signal_Signature = Types.DefaultSignature\n\
+             export type Signal<Signature = __lpm_Signal_Signature> = module.Signal<Signature>\n\
+             export type Wrap<Other> = module.Wrap<Other>\n\
+             return module\n"
+        );
+    }
+
+    /** a default the link file can't point at costs its default, not the type.
+    `Signal<T>` still checks; only the bare `Signal` stops resolving, which
+    beats a link file naming something that isn't there. */
+    #[test]
+    fn unreachable_defaults_leave_the_parameter_alone() {
+        let cases = [
+            // a type the source keeps to itself
+            (
+                r#"
+                type Private = () -> ()
+                export type Signal<S = Private> = { fire: S }
+                return {}
+                "#,
+                "export type Signal<S> = module.Signal<S>",
+            ),
+            // a module lpm can't resolve to a path of its own
+            (
+                r#"
+                local Task = require("@lune/task")
+                export type Handle<S = Task.Handle> = S
+                return {}
+                "#,
+                "export type Handle<S> = module.Handle<S>",
+            ),
+            // an alias would have to hold `T`, which only exists inside the declaration
+            (
+                r#"
+                local Types = require("@self/Types")
+                export type Of<T, U = Types.Wrap<T>> = { value: U }
+                return {}
+                "#,
+                "export type Of<T, U> = module.Of<T, U>",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let exports = exported_types(source, &RequireFrame::init("src")).unwrap();
+            assert_eq!(exports.types, [expected]);
+            // a dropped default drags in nothing
+            assert!(exports.imports.is_empty(), "{source}");
+            assert!(exports.aliases.is_empty(), "{source}");
+        }
+    }
+
+    /** which folder a require resolves against, the rule
+    `requires::parse_chain` writes chains with, read backwards. */
+    #[test]
+    fn require_frames_follow_the_init_file_rule() {
+        let init = RequireFrame::init("src");
+        // an init file IS its folder: its children need @self, its siblings sit above it
+        assert_eq!(
+            resolve_import("@self/Types", &init).as_deref(),
+            Some("src/Types")
+        );
+        assert_eq!(resolve_import("./Types", &init).as_deref(), Some("Types"));
+        assert_eq!(resolve_import("../Types", &init), None); // out of the package
+
+        // a plain file has both frames where it sits
+        let file = RequireFrame::file("src");
+        assert_eq!(
+            resolve_import("./Types", &file).as_deref(),
+            Some("src/Types")
+        );
+        assert_eq!(
+            resolve_import("@self/Types", &file).as_deref(),
+            Some("src/Types")
+        );
+        assert_eq!(resolve_import("../Types", &file).as_deref(), Some("Types"));
+
+        // a root init has no siblings inside the package at all
+        assert_eq!(resolve_import("./Types", &RequireFrame::init("")), None);
+        assert_eq!(
+            resolve_import("@self/lib/Types", &RequireFrame::init("")).as_deref(),
+            Some("lib/Types")
+        );
+
+        // nothing else is a path this side can follow
+        assert_eq!(resolve_import("@lune/task", &init), None);
+        assert_eq!(resolve_import("Types", &init), None);
+        assert_eq!(resolve_import("@self/../../escape", &init), None);
+    }
+
+    /// which frames a package's entry actually gets, read off the file it resolves to.
+    #[test]
+    fn frames_come_from_the_resolved_entry_file() {
+        let base = std::env::temp_dir().join("lpm-test-require-frames");
+        let _ = fs::remove_dir_all(&base);
+
+        let init = base.join("init-style");
+        write_package(&init.join("src"), "init.luau", "return {}");
+        assert_eq!(RequireFrame::of(&init, "src"), RequireFrame::init("src"));
+
+        let flat = base.join("file-style");
+        write_package(&flat.join("src"), "lib.luau", "return {}");
+        assert_eq!(
+            RequireFrame::of(&flat, "src/lib"),
+            RequireFrame::file("src")
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -888,7 +1428,9 @@ mod tests {
 
         // parameterless type functions can't be restated as a declaration.
         assert_eq!(
-            exported_types(source).unwrap(),
+            exported_types(source, &RequireFrame::init(""))
+                .unwrap()
+                .types,
             ["export type Partial<ty> = module.Partial<ty>"]
         );
     }
