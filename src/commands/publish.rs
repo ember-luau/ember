@@ -233,6 +233,7 @@ fn convert_workspace_dependencies(
             workspace: name,
             version,
             target,
+            entry,
         } = dependency
         else {
             continue;
@@ -263,6 +264,9 @@ fn convert_workspace_dependencies(
                 .cloned(),
             // the specifier's `target` is the consumer's choice either way
             target: target.clone(),
+            /* and so is `entry`: it says which module of the member to link,
+            which is the same module once it publishes */
+            entry: entry.clone(),
         };
     }
     Ok(())
@@ -381,6 +385,7 @@ mod tests {
                 workspace: "acme/core".to_string(),
                 version: "^".to_string(),
                 target: None,
+                entry: None,
             },
         );
         assert!(matches!(

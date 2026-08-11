@@ -289,29 +289,33 @@ fn install_project(
     each stored package for the dependencies it declares */
     let stored: Vec<StoredPackage> = locked
         .iter()
-        .map(|package| match &package.source {
+        .map(|package| {
+            let name = package.name.to_lowercase();
             /* members link in place, so they're link targets like anything
             else but never get written into, that would dirty a source tree
             the user edits */
-            index::DownloadSource::Workspace { path } => StoredPackage {
-                name: package.name.to_lowercase(),
-                storage: PathBuf::from(path),
+            let (storage, in_place) = match &package.source {
+                index::DownloadSource::Workspace { path } => (PathBuf::from(path), true),
+                _ => (
+                    manifest
+                        .packages_out(package.context())
+                        .join(".lpm")
+                        .join(package.name.replace('/', "_")),
+                    false,
+                ),
+            };
+            StoredPackage {
+                /* resolved once here rather than per nested link, and
+                silently: whoever installed this package already said out
+                loud if its entry had to be guessed */
+                entry: entry_for(manifest, &name, &storage, &mut |_| {}),
+                name,
+                storage,
                 environment: package.environment,
                 context: package.context(),
-                in_place: true,
+                in_place,
                 redirects: package.redirects.clone(),
-            },
-            _ => StoredPackage {
-                name: package.name.to_lowercase(),
-                storage: manifest
-                    .packages_out(package.context())
-                    .join(".lpm")
-                    .join(package.name.replace('/', "_")),
-                environment: package.environment,
-                context: package.context(),
-                in_place: false,
-                redirects: package.redirects.clone(),
-            },
+            }
         })
         .collect();
     let nested_started = Instant::now();
@@ -1085,7 +1089,7 @@ fn install_one(
     name and tree, which our link files and the package's own relative
     requires don't spell. make it mirror the disk instead. after
     entry_point, so the entry is read from what the package shipped */
-    let entry = package::entry_point(&storage);
+    let entry = entry_for(manifest, &job.name, &storage, &mut bar_warn(bar));
     rojo::mirror_disk_layout(&storage, &mut bar_warn(bar));
 
     let (entry, types) = match entry {
@@ -1165,7 +1169,10 @@ fn link_workspace_member(
     let out = manifest.packages_out(job.context);
     fs::create_dir_all(&out)?;
 
-    match (&job.link, package::entry_point(member_dir)) {
+    match (
+        &job.link,
+        entry_for(manifest, &job.name, member_dir, &mut bar_warn(bar)),
+    ) {
         (Some(link), Some(entry)) => {
             let mut root = workspace::relative_path(&out, member_dir);
             if !root.starts_with("..") {
@@ -1224,6 +1231,8 @@ struct StoredPackage {
     name. the manifest on disk still declares the original, so link
     generation must consult this before trusting what it reads back. */
     redirects: BTreeMap<String, String>,
+    /// the module a link to this package points at, see [`entry_for`]. None = nothing here to link.
+    entry: Option<String>,
 }
 
 /** link files inside a stored package for its own declared dependencies,
@@ -1278,7 +1287,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 ));
                 continue;
             };
-            let Some(entry) = package::entry_point(&dep.storage) else {
+            let Some(entry) = dep.entry.clone() else {
                 warn(format!(
                     "warning: could not find an entry point for {dependency}; no nested link generated in {}",
                     package.name
@@ -1350,7 +1359,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             continue;
         }
 
-        if let Some(entry) = package::entry_point(&package.storage) {
+        if let Some(entry) = package.entry.clone() {
             /* second half of the instance require rewrite. escape chains
             couldn't map on the workers since dependency environments weren't
             known yet, now the nested links are decided so retarget them at
@@ -1414,6 +1423,40 @@ fn link_types(
         ));
         package::Exports::default()
     })
+}
+
+/** which module inside `dir` a link to `name` should point at.
+
+three sources, in order. the `entry` its [dependencies] entry states, then
+what the package declares itself, then a guess from what it ships. the guess
+is announced, since a link file built on one is otherwise a mystery to
+whoever hits it, and the message names the way to correct it. */
+fn entry_for(
+    manifest: &Manifest,
+    name: &str,
+    dir: &Path,
+    warn: &mut impl FnMut(String),
+) -> Option<String> {
+    if let Some(stated) = manifest.entry_override(name) {
+        let entry = package::normalize_entry(stated);
+        if package::entry_source(dir, &entry).is_some() {
+            return Some(entry);
+        }
+        /* a typo would otherwise write a link file pointing at nothing, and
+        read as the package being broken rather than the manifest */
+        warn(format!(
+            "warning: {name} has no {stated} to point at; ignoring the entry stated for it"
+        ));
+    }
+    if let Some(declared) = package::entry_point(dir) {
+        return Some(declared);
+    }
+
+    let guessed = package::guess_entry(dir)?;
+    warn(format!(
+        "warning: {name} names no entry point; guessed {guessed} (set `entry` on the dependency to choose another)"
+    ));
+    Some(guessed)
 }
 
 /// routes a warning line around the live progress bar.
@@ -2109,6 +2152,83 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /** the three sources an entry can come from, in the order they win.
+
+    the guess is what gets `synttx/vow` a link file at all, and the stated
+    `entry` is both the way to correct a guess and the way to point at a
+    module in a package that ships several. a stated one that isn't there
+    says so rather than writing a link file pointing at nothing. */
+    #[test]
+    fn entries_come_from_the_manifest_then_the_package_then_a_guess() {
+        let base = std::env::temp_dir().join("lpm-test-entry-sources");
+        let _ = fs::remove_dir_all(&base);
+
+        // ships one file and declares nothing, so only a guess finds it
+        let vow = base.join("vow");
+        write(&vow, "wally.toml", "[package]\nname = \"synttx/vow\"\n");
+        write(&vow, "src/vow.luau", "return {}");
+
+        let bare: Manifest = toml::from_str("").unwrap();
+        let mut warnings = Vec::new();
+        let mut warn = |message: String| warnings.push(message);
+        assert_eq!(
+            entry_for(&bare, "synttx/vow", &vow, &mut warn).as_deref(),
+            Some("src/vow")
+        );
+        assert_eq!(warnings.len(), 1, "a guess announces itself");
+        assert!(warnings[0].contains("guessed src/vow"), "{:?}", warnings[0]);
+
+        // a stated entry beats the guess, silently, and takes an extension
+        let stated: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Vow = { name = "synttx/vow", version = "^", entry = "src/vow.luau" }
+            "#,
+        )
+        .unwrap();
+        warnings.clear();
+        let mut warn = |message: String| warnings.push(message);
+        assert_eq!(
+            entry_for(&stated, "synttx/vow", &vow, &mut warn).as_deref(),
+            Some("src/vow")
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // what the package declares beats the guess too
+        let declared = base.join("declared");
+        write(&declared, "lpm.toml", "[target]\nmain = \"lib.luau\"\n");
+        write(&declared, "lib.luau", "return {}");
+        write(&declared, "extra.luau", "return {}");
+        warnings.clear();
+        let mut warn = |message: String| warnings.push(message);
+        assert_eq!(
+            entry_for(&bare, "acme/declared", &declared, &mut warn).as_deref(),
+            Some("lib")
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // and a stated entry that isn't there falls back, saying so
+        let missing: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Vow = { name = "synttx/vow", version = "^", entry = "src/nope" }
+            "#,
+        )
+        .unwrap();
+        warnings.clear();
+        let mut warn = |message: String| warnings.push(message);
+        assert_eq!(
+            entry_for(&missing, "synttx/vow", &vow, &mut warn).as_deref(),
+            Some("src/vow")
+        );
+        assert!(
+            warnings.iter().any(|line| line.contains("no src/nope")),
+            "{warnings:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
     fn stored(name: &str, storage: PathBuf, environment: Environment) -> StoredPackage {
         stored_in(name, storage, environment, environment)
     }
@@ -2122,6 +2242,8 @@ mod tests {
         StoredPackage {
             // production lowercases here, mirror that so the tests exercise it
             name: name.to_lowercase(),
+            // detection only, no manifest in reach and none of these state an entry
+            entry: package::entry_point(&storage),
             storage,
             environment,
             context,
@@ -2517,6 +2639,7 @@ mod tests {
         let packages = [
             StoredPackage {
                 name: "acme/core".to_string(),
+                entry: package::entry_point(&member),
                 storage: member.clone(),
                 environment: Environment::Roblox,
                 context: Environment::Roblox,

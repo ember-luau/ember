@@ -635,6 +635,98 @@ fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
     }
 }
 
+/** folders a guess never looks in. output roots lpm or the package itself
+wrote, and the places a repo keeps code that isn't the library. */
+const GUESS_SKIPS: &[&str] = &[
+    ".git",
+    ".lpm",
+    PACKAGES_DIR,
+    "node_modules",
+    "test",
+    "tests",
+    "spec",
+    "specs",
+    "example",
+    "examples",
+    "docs",
+];
+
+/** last resort for a package that names no entry point anywhere, `synttx/vow`
+being one: a single `src/vow.luau` with no lpm.toml, pesde.toml, project file
+or init file to say so.
+
+two things are worth guessing from. a package that ships exactly one Luau
+file means that file, whatever it's called. one that ships several, but one
+named after the package, means that one, which is the same convention Rojo
+users get from mounting a folder. anything less clear stays None: a wrong
+link file is worse than none, and `[dependencies]` can state an `entry`
+outright, see [`Dependency::entry`].
+
+test and example folders are skipped, so a library with a `tests/` beside it
+still reads as the one file it is. */
+pub fn guess_entry(dir: &Path) -> Option<String> {
+    let mut files = Vec::new();
+    collect_sources(dir, dir, &mut files).ok()?;
+
+    if let [only] = files.as_slice() {
+        return Some(normalize_entry(only));
+    }
+
+    let package = package_name(dir)?;
+    let short = package
+        .rsplit_once('/')
+        .map_or(package.as_str(), |(_, s)| s);
+    let mut named = files.iter().filter(|path| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.eq_ignore_ascii_case(short))
+    });
+    let first = named.next()?;
+    // two files answering to the same name is not a guess, it's a coin flip
+    named.next().is_none().then(|| normalize_entry(first))
+}
+
+/// every Luau file under `dir`, package-relative with forward slashes, skipping [`GUESS_SKIPS`].
+fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if GUESS_SKIPS
+            .iter()
+            .any(|skip| name.eq_ignore_ascii_case(skip))
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_sources(root, &path, found)?;
+        } else if matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("luau" | "lua")
+        ) {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            found.push(
+                relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// what a package calls itself, from whichever manifest it shipped.
+fn package_name(dir: &Path) -> Option<String> {
+    ["lpm.toml", "pesde.toml", "wally.toml"]
+        .into_iter()
+        .find_map(|file| toml_string(dir, file, &["package", "name"]))
+}
+
 /** reads an extracted package's own manifest for its environment. lpm.toml
 `[target].environment` first, then pesde.toml's, then wally.toml
 `[package].realm`, the last two translated. */
@@ -934,6 +1026,69 @@ mod tests {
         assert!(base.join("init.luau").exists());
         assert!(base.join("src").exists());
         assert!(!base.join("pkg-1.0.0").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** synttx/vow's shape: one `src/vow.luau` and nothing that names it, no
+    lpm.toml, no pesde.toml, no project file, no init file. detection has
+    nothing to go on, so the guess is all that stands between it and no link
+    file at all. */
+    #[test]
+    fn guesses_an_entry_from_what_a_package_ships() {
+        let base = std::env::temp_dir().join("lpm-test-guess-entry");
+        let _ = fs::remove_dir_all(&base);
+
+        // the only Luau file it ships, whatever it happens to be called
+        let vow = base.join("vow");
+        write_package(&vow, "wally.toml", "[package]\nname = \"synttx/vow\"\n");
+        write_package(&vow.join("src"), "vow.luau", "return {}");
+        assert_eq!(entry_point(&vow), None, "nothing declares it");
+        assert_eq!(guess_entry(&vow).as_deref(), Some("src/vow"));
+
+        // several files, but one carries the package's own name
+        let named = base.join("named");
+        write_package(&named, "wally.toml", "[package]\nname = \"synttx/vow\"\n");
+        write_package(&named.join("src"), "Vow.luau", "return {}");
+        write_package(&named.join("src"), "types.luau", "return {}");
+        assert_eq!(
+            guess_entry(&named).as_deref(),
+            Some("src/Vow"),
+            "matched case-insensitively, Roblox code capitalizes"
+        );
+
+        // a test folder beside the library still leaves one file
+        let tested = base.join("tested");
+        write_package(&tested.join("src"), "vow.luau", "return {}");
+        write_package(&tested.join("tests"), "vow.spec.luau", "return {}");
+        assert_eq!(guess_entry(&tested).as_deref(), Some("src/vow"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn refuses_to_guess_when_the_answer_is_a_coin_flip() {
+        let base = std::env::temp_dir().join("lpm-test-guess-refuses");
+        let _ = fs::remove_dir_all(&base);
+
+        // two files, neither named for the package
+        let unclear = base.join("unclear");
+        write_package(&unclear, "wally.toml", "[package]\nname = \"acme/thing\"\n");
+        write_package(&unclear.join("src"), "one.luau", "return {}");
+        write_package(&unclear.join("src"), "two.luau", "return {}");
+        assert_eq!(guess_entry(&unclear), None);
+
+        // two that answer to the same name
+        let twice = base.join("twice");
+        write_package(&twice, "wally.toml", "[package]\nname = \"acme/thing\"\n");
+        write_package(&twice, "thing.luau", "return {}");
+        write_package(&twice.join("src"), "thing.luau", "return {}");
+        assert_eq!(guess_entry(&twice), None);
+
+        // and nothing to guess from at all
+        let empty = base.join("empty");
+        write_package(&empty, "README.md", "no code here");
+        assert_eq!(guess_entry(&empty), None);
 
         let _ = fs::remove_dir_all(&base);
     }

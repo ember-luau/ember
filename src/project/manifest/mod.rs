@@ -335,6 +335,9 @@ pub enum Dependency {
         /// instead of failing the untagged match with "no variant".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// see [`Dependency::entry`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -348,6 +351,9 @@ pub enum Dependency {
         /// see [`Dependency::target`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// see [`Dependency::entry`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
     },
 }
 
@@ -378,6 +384,33 @@ impl Dependency {
             Dependency::Registry { target, .. } | Dependency::Workspace { target, .. } => {
                 target.as_deref()
             }
+        }
+    }
+
+    /** the `entry` an entry states, e.g.
+    `Vow = { name = "synttx/vow", version = "^", entry = "src/vow" }`.
+
+    which module inside the package its link file points at, for packages
+    that name none themselves and ship nothing lpm can guess from. it beats
+    both what the package declares and the guess, so it is also the way out
+    of a guess that picked the wrong file.
+
+    keyed by package, not by alias, so it reaches the same package wherever
+    it turns up: state it on a direct dependency and a dependent's nested
+    link to that package uses it too. */
+    pub fn entry(&self) -> Option<&str> {
+        match self {
+            Dependency::Registry { entry, .. } | Dependency::Workspace { entry, .. } => {
+                entry.as_deref()
+            }
+        }
+    }
+
+    /// the package this entry names, whichever shape it takes.
+    pub fn package(&self) -> &str {
+        match self {
+            Dependency::Registry { name, .. } => name,
+            Dependency::Workspace { workspace, .. } => workspace,
         }
     }
 }
@@ -633,6 +666,16 @@ impl Manifest {
             Some(dir) => std::path::PathBuf::from(dir),
             None => std::path::Path::new("packages").join(environment.dir_name()),
         }
+    }
+
+    /** the `entry` this manifest states for the package `name`, see
+    [`Dependency::entry`]. matched case-insensitively, the way package names
+    resolve everywhere else. */
+    pub fn entry_override(&self, name: &str) -> Option<&str> {
+        self.dependencies
+            .values()
+            .find(|dependency| dependency.package().eq_ignore_ascii_case(name))
+            .and_then(Dependency::entry)
     }
 
     /** resolves a dependency's `index` key to an index URL. no key = the `default`
@@ -999,6 +1042,38 @@ mod tests {
         // ...and an entirely empty manifest is a valid project too
         let empty: Manifest = toml::from_str("").unwrap();
         assert!(empty.package.is_none() && empty.dependencies.is_empty());
+    }
+
+    /** an `entry` states which module of a package its link points at, for the
+    ones that name none themselves, `synttx/vow` being the case that asked for
+    it. keyed by package rather than alias, so it reaches that package wherever
+    it turns up, including a dependent's nested link to it. */
+    #[test]
+    fn entries_are_stated_per_package() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Vow = { name = "synttx/vow", version = "^", entry = "src/vow" }
+            Plain = { name = "acme/plain", version = "^" }
+            Member = { workspace = "acme/member", entry = "src" }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.entry_override("synttx/vow"), Some("src/vow"));
+        // package names resolve case-insensitively everywhere else too
+        assert_eq!(manifest.entry_override("Synttx/Vow"), Some("src/vow"));
+        assert_eq!(manifest.entry_override("acme/member"), Some("src"));
+        // an entry nobody stated, and a package this manifest never mentions
+        assert_eq!(manifest.entry_override("acme/plain"), None);
+        assert_eq!(manifest.entry_override("acme/absent"), None);
+
+        // survives a write, and stays absent for the entries that stated none
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(serialized.contains(r#"entry = "src/vow""#), "{serialized}");
+        let reparsed: Manifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.entry_override("synttx/vow"), Some("src/vow"));
+        assert_eq!(reparsed.entry_override("acme/plain"), None);
     }
 
     #[test]
