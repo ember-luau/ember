@@ -1,7 +1,12 @@
-/*! turns roblox instance requires in wally packages into string requires.
-wally-era code says require(script.Parent.Foo), but there's no instance tree
-in our layout, so that has to become a "./Foo" style path. anything we can't
-map safely just stays as it was. */
+/*! points a wally package's requires at where lpm actually put things.
+
+two shapes arrive needing it. wally-era code says require(script.Parent.Foo),
+and there's no instance tree in our layout, so that has to become a "./Foo"
+style path. code that already used strings was still written for wally's
+layout, where a dependency sits beside the package folder, so it says
+require("../Charm") and lands on nothing once lpm links dependencies under the
+package. both end up at the same place through the same arithmetic. anything
+we can't map safely just stays as it was. */
 
 use crate::error::Error;
 use crate::project::rojo::PACKAGES_DIR;
@@ -102,7 +107,26 @@ fn retarget_string_requires(
     replacements: &[(String, String)],
 ) -> Option<(String, usize)> {
     // the overwhelming majority of files mention neither
-    if !source.contains(LEGACY_ROBLOX_DIR) || !source.contains("require") {
+    if !source.contains(LEGACY_ROBLOX_DIR) {
+        return None;
+    }
+    map_string_requires(source, |path| {
+        let (from, to) = replacements
+            .iter()
+            .find(|(from, _)| path.contains(from.as_str()))?;
+        Some(path.replace(from, to))
+    })
+}
+
+/** rewrites the path inside every string require `map` accepts, leaving the
+rest of the file byte for byte. None = nothing matched, and that path
+allocates nothing, which matters because this runs over every file of every
+package. */
+fn map_string_requires(
+    source: &str,
+    map: impl Fn(&str) -> Option<String>,
+) -> Option<(String, usize)> {
+    if !source.contains("require") {
         return None;
     }
 
@@ -125,12 +149,8 @@ fn retarget_string_requires(
                 if at_word(bytes, position, b"require")
                     && let Some((start, end)) = string_argument(bytes, position + "require".len())
                 {
-                    let path = &source[start..end];
-                    if let Some((from, to)) = replacements
-                        .iter()
-                        .find(|(from, _)| path.contains(from.as_str()))
-                    {
-                        spliced.push((start, end, path.replace(from, to)));
+                    if let Some(path) = map(&source[start..end]) {
+                        spliced.push((start, end, path));
                     }
                     position = end;
                     continue;
@@ -228,7 +248,7 @@ fn rewrite_requires(
 
     let mut rewritten = 0;
     for file in files {
-        let source = match fs::read_to_string(&file) {
+        let mut source = match fs::read_to_string(&file) {
             Ok(source) => source,
             Err(_) => continue, // binary or non-utf8, not ours to touch
         };
@@ -255,9 +275,21 @@ fn rewrite_requires(
             depth_in_package: dir_in_package,
             aliases,
         };
+        let mut found = 0;
         if let Some((updated, count)) = rewrite_source(&source, &context) {
-            fs::write(&file, updated)?;
-            rewritten += count;
+            source = updated;
+            found += count;
+        }
+        /* second, and over the result of the first, so a chain that just
+        became `../Charm` gets the same treatment a package that shipped
+        that string does */
+        if let Some((updated, count)) = rewrite_string_escapes(&source, &context) {
+            source = updated;
+            found += count;
+        }
+        if found > 0 {
+            fs::write(&file, source)?;
+            rewritten += found;
         }
     }
     Ok(rewritten)
@@ -479,32 +511,82 @@ fn parse_chain(
             }
         }
     } else if ups == context.depth_in_module + 1 && names.len() == 1 {
-        /* one level above the module root is wally's alias zone, the
-        package's own nested link for that alias, packages/<env>/<alias>.
-        the env folder is only known once dependencies are resolved, so
-        pass one, aliases = None, leaves these chains for
-        `rewrite_escape_requires` to come back for */
-        let environment = context.aliases?.get(&names[0])?;
-        if context.depth_in_package + 1 == init_shift {
-            // a root init, the packages folder is among its own children
-            format!("@self/{PACKAGES_DIR}/{environment}/{}", names[0])
-        } else {
-            let string_ups = context.depth_in_package - init_shift;
-            let mut parts = vec![".."; string_ups];
-            parts.push(PACKAGES_DIR);
-            parts.push(environment);
-            parts.push(names[0].as_str());
-            if string_ups == 0 {
-                format!("./{}", parts.join("/"))
-            } else {
-                parts.join("/")
-            }
-        }
+        /* one level above the module root is wally's alias zone. the env
+        folder is only known once dependencies are resolved, so pass one,
+        aliases = None, leaves these chains for `rewrite_escape_requires` */
+        escape_target(context, &names[0])?
     } else {
         return None; // climbing past the alias zone, nowhere to map that
     };
 
     Some((position, path))
+}
+
+/** the package's own nested link for `alias`, `packages/<env>/<alias>`,
+written from the file `context` describes. None when this package never
+linked that alias, which is any name that isn't one of its dependencies. */
+fn escape_target(context: &FileContext, alias: &str) -> Option<String> {
+    let environment = context.aliases?.get(alias)?;
+    let init_shift = usize::from(context.is_init);
+
+    if context.depth_in_package + 1 == init_shift {
+        // a root init, the packages folder is among its own children
+        return Some(format!("@self/{PACKAGES_DIR}/{environment}/{alias}"));
+    }
+    let string_ups = context.depth_in_package - init_shift;
+    let mut parts = vec![".."; string_ups];
+    parts.push(PACKAGES_DIR);
+    parts.push(environment);
+    parts.push(alias);
+    Some(if string_ups == 0 {
+        format!("./{}", parts.join("/"))
+    } else {
+        parts.join("/")
+    })
+}
+
+/** retargets string requires that already spelled wally's alias zone.
+
+a wally package's dependencies sit beside the package folder, so source
+written for that layout says `require("../Charm")` from inside `src/`, one
+level above the module root. lpm links dependencies under the package
+instead, at `packages/<env>/<alias>`, so as written those paths point at
+nothing. same mapping `parse_chain` gives an instance chain, for the packages
+that arrived with strings already.
+
+only a name this package actually depends on is touched, so `../utils`
+alongside the module stays exactly as it is. */
+fn rewrite_string_escapes(source: &str, context: &FileContext) -> Option<(String, usize)> {
+    map_string_requires(source, |path| escaped_alias(path, context))
+}
+
+/// where a written require path lands when it lands in the alias zone, None everywhere else.
+fn escaped_alias(written: &str, context: &FileContext) -> Option<String> {
+    // a bare name is an alias require, `@self/` points inside the module
+    if !written.starts_with("./") && !written.starts_with("../") {
+        return None;
+    }
+
+    let mut climb = 0;
+    let mut names: Vec<&str> = Vec::new();
+    for part in written.split('/') {
+        match part {
+            "." if names.is_empty() => {}
+            ".." if names.is_empty() => climb += 1,
+            // a `..` past the first name, or an empty segment, is not ours to follow
+            "" => return None,
+            name => names.push(name),
+        }
+    }
+
+    /* the same arithmetic parse_chain renders with, run backwards: a written
+    `../` is one hop above the file's folder, and an init file's own frame
+    already sits a level up */
+    let ups = climb + usize::from(context.is_init);
+    if names.len() != 1 || ups != context.depth_in_module + 1 {
+        return None;
+    }
+    escape_target(context, names[0])
 }
 
 fn is_ident_byte(byte: u8) -> bool {
@@ -739,6 +821,93 @@ mod tests {
         assert_eq!(count, 1);
         assert!(out.contains("require(\"./packages/shared/Signal\")"));
         assert!(out.contains("require(script.Parent.Mystery)"));
+    }
+
+    /** littensy/charm-sync@0.4.0, verbatim. it was written for wally's layout,
+    where a dependency sits beside the package folder, so `src/client.luau`
+    reaches for it as `../Charm` -- one level above the module root, pointing
+    at nothing once lpm links dependencies under the package instead. */
+    #[test]
+    fn string_escapes_land_on_the_nested_link() {
+        let aliases = linked(&[("Charm", "roblox")]);
+        let mut context = dir_module(0, false); // src/client.luau
+        context.aliases = Some(&aliases);
+
+        let (out, count) = rewrite_string_escapes(
+            "local Charm = require(\"../Charm\")\n\
+             local patch = require(\"./patch\")\n",
+            &context,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            out,
+            "local Charm = require(\"../packages/roblox/Charm\")\n\
+             local patch = require(\"./patch\")\n"
+        );
+    }
+
+    #[test]
+    fn string_escapes_read_the_frame_the_file_sits_in() {
+        let aliases = linked(&[("Charm", "roblox")]);
+
+        /* src/init.luau: the file IS the module, so its "./" frame is already
+        the package root, both for reading the escape and for writing it back */
+        let mut init = dir_module(0, true);
+        init.aliases = Some(&aliases);
+        assert_eq!(
+            escaped_alias("./Charm", &init).as_deref(),
+            Some("./packages/roblox/Charm")
+        );
+        // and "../" from there climbs past the alias zone
+        assert_eq!(escaped_alias("../Charm", &init), None);
+
+        // src/deep/x.luau, two folders down, needs two hops back
+        let mut deep = dir_module(1, false);
+        deep.aliases = Some(&aliases);
+        assert_eq!(
+            escaped_alias("../../Charm", &deep).as_deref(),
+            Some("../../packages/roblox/Charm")
+        );
+
+        // a root init keeps its packages folder among its own children
+        let root_init = FileContext {
+            is_init: true,
+            depth_in_module: 0,
+            depth_in_package: 0,
+            aliases: Some(&aliases),
+        };
+        assert_eq!(
+            escaped_alias("./Charm", &root_init).as_deref(),
+            Some("@self/packages/roblox/Charm")
+        );
+    }
+
+    #[test]
+    fn string_requires_that_are_not_escapes_stay_put() {
+        let aliases = linked(&[("Charm", "roblox")]);
+        let mut context = dir_module(0, false);
+        context.aliases = Some(&aliases);
+
+        for path in [
+            "./patch",                  // a sibling inside the module
+            "@self/patch",              // a child, never the alias zone
+            "../Mystery",               // not a dependency of this package
+            "../a/Charm",               // deeper than the alias zone
+            "../../Charm",              // past it
+            "@lune/task",               // an alias require, not a path
+            "../packages/roblox/Charm", // already retargeted, left alone
+        ] {
+            assert_eq!(escaped_alias(path, &context), None, "{path}");
+        }
+
+        // and with no alias map at all, pass one, nothing is touched
+        let untouched = dir_module(0, false);
+        assert_eq!(escaped_alias("../Charm", &untouched), None);
+        assert_eq!(
+            rewrite_string_escapes("require(\"../Charm\")\n", &untouched),
+            None
+        );
     }
 
     /// alias -> environment folder, the map the nested-link pass hands over.
