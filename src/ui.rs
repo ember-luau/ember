@@ -34,6 +34,70 @@ pub fn help_styles() -> styling::Styles {
         .invalid(dimmed)
 }
 
+/// ends a colour run, back to the terminal's own foreground.
+pub const RESET: &str = "\x1b[0m";
+
+/// truecolor foreground escape for an rgb triple.
+pub fn fg((r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+/// whether stdout is a terminal, so output is for a person rather than a pipe.
+pub fn is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
+/** whether stdout should carry colour: a real terminal, and NO_COLOR unset.
+same rule `sys::process` applies to the commands scripts run. */
+pub fn want_color() -> bool {
+    is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+}
+
+/// terminal width. COLUMNS wins, then the tty, then a sane default.
+pub fn term_width() -> usize {
+    if let Some(columns) = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return columns;
+    }
+    crossterm::terminal::size().map_or(100, |(columns, _)| columns as usize)
+}
+
+/// visible width of a line, ansi escapes discounted.
+pub fn visible_width(line: &str) -> usize {
+    let mut width = 0;
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character == '\x1b' {
+            // skip to the end of the escape, they all finish at 'm' here
+            for escape in characters.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/** clap styling that only bolds. for help text something else paints, where
+clap's own colours would fight the gradient. */
+pub fn bold_styles() -> styling::Styles {
+    let bold = styling::Style::new().bold();
+    styling::Styles::styled()
+        .header(bold)
+        .usage(bold)
+        .literal(bold)
+        .placeholder(styling::Style::new())
+        .error(bold)
+        .valid(bold)
+        .invalid(styling::Style::new())
+}
+
 /// accent "✗ message" line to stderr.
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("✗ {message}").with(accent()));
@@ -266,7 +330,7 @@ pub fn render_config() -> RenderConfig<'static> {
 mod tests {
     use std::time::Duration;
 
-    use super::format_duration;
+    use super::{ACCENT, RESET, fg, format_duration, visible_width};
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {
@@ -293,5 +357,14 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(60)), "1m 0s");
         assert_eq!(format_duration(Duration::from_secs(72)), "1m 12s");
         assert_eq!(format_duration(Duration::from_secs(3_599)), "59m 59s");
+    }
+
+    #[test]
+    fn width_is_measured_in_visible_characters() {
+        assert_eq!(visible_width("abc"), 3);
+        assert_eq!(visible_width(""), 0);
+        // a painted line measures as what the terminal shows, not what it stores
+        assert_eq!(visible_width("\x1b[38;2;230;16;72mab\x1b[0mc"), 3);
+        assert_eq!(visible_width(&format!("{}x{RESET}", fg(ACCENT))), 1);
     }
 }

@@ -1,3 +1,4 @@
+mod art;
 mod commands;
 mod error;
 mod net;
@@ -7,14 +8,16 @@ mod sys;
 mod tools;
 mod ui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use commands::self_cmd::SelfCommand;
 
 #[derive(Parser, Debug)]
 #[command(name = "lpm", bin_name = "lpm", version, about, styles = ui::help_styles())]
 struct Cli {
+    /** None is bare `lpm`, which prints the same help `-h` does rather than
+    a usage error: it is what someone types when they want to see the tool. */
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -25,25 +28,37 @@ enum Commands {
     /// Runs a script from lpm.toml, or lists them all when given no name
     Run(commands::run::RunArgs),
 
-    /* the four [scripts] names that double as subcommands, npm's
+    /* the [scripts] names that double as subcommands, npm's
     test/start/stop/restart idea. real variants rather than a fallback for
-    unrecognized commands, so they appear in --help, error like any other
-    command, and the set stays a decision instead of "whatever the manifest
-    happens to define". the list lives in commands::run::SHORTCUTS. */
+    unrecognized commands, so they error like any other command and the set
+    stays a decision instead of "whatever the manifest happens to define".
+    the list lives in commands::run::SHORTCUTS.
+
+    hidden, npm's way: `npm start` works everywhere and is nobody's idea of a
+    command to look up. they belong to a project's [scripts], not to lpm's own
+    surface, and listing five of them would say otherwise while telling a
+    project that defines none of them about commands it cannot run. `lpm run`
+    lists what this project actually has, and `script_hint` points at these
+    from the one place they get typed by mistake. */
     /// Runs the `build` script from lpm.toml
+    #[command(hide = true)]
     Build(commands::run::ShortcutArgs),
 
     /// Runs the `test` script from lpm.toml
+    #[command(hide = true)]
     Test(commands::run::ShortcutArgs),
 
     /// Runs the `start` script from lpm.toml
+    #[command(hide = true)]
     Start(commands::run::ShortcutArgs),
 
     /// Runs the `serve` script from lpm.toml
+    #[command(hide = true)]
     Serve(commands::run::ShortcutArgs),
 
     /// Runs the `fmt` (or `format`) script from lpm.toml
-    #[command(visible_alias = "format")]
+    // plain alias, not visible_alias: nothing of this command is on display
+    #[command(hide = true, alias = "format")]
     Fmt(commands::run::ShortcutArgs),
 
     /// Download (if needed) and run a GitHub-released executable
@@ -102,17 +117,39 @@ fn main() {
         }
     }
 
-    /* lpx is `lpm execute` under its own name, a copy `self install`
-    drops beside lpm, so every argument belongs to execute. */
-    let cli = if tools::shim::invoked_as_lpx() {
+    let args: Vec<std::ffi::OsString> = if tools::shim::invoked_as_lpx() {
+        /* lpx is `lpm execute` under its own name, a copy `self install`
+        drops beside lpm, so every argument belongs to execute */
         let prefix: [std::ffi::OsString; 2] = ["lpm".into(), "execute".into()];
-        parse_cli(prefix.into_iter().chain(std::env::args_os().skip(1)))
+        prefix
+            .into_iter()
+            .chain(std::env::args_os().skip(1))
+            .collect()
     } else {
-        parse_cli(std::env::args_os())
+        std::env::args_os().collect()
+    };
+
+    /* the three ways to ask lpm itself for help, caught before clap so they
+    get the logo layout instead of the plain one. anything longer is a
+    question about a subcommand, and clap answers those as it always has:
+    `lpm add -h`, `lpm help tool`, `lpm tool add --help`. */
+    if matches!(
+        args.get(1).and_then(|arg| arg.to_str()),
+        Some("-h" | "--help" | "help")
+    ) && args.len() == 2
+    {
+        print_root_help();
+        return;
+    }
+
+    let cli = parse_cli(args);
+    let Some(command) = cli.command else {
+        print_root_help();
+        return;
     };
 
     let started = std::time::Instant::now();
-    let result = match cli.command {
+    let result = match command {
         Commands::Init => commands::init::run(),
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
@@ -146,8 +183,119 @@ fn main() {
     }
 }
 
+/// parses, reporting a failure in lpm's own style rather than clap's.
 fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
     Cli::try_parse_from(args).unwrap_or_else(|err| report_parse_error(err))
+}
+
+/** fastfetch's layout: the logo on the left, the help beside it, both painted
+with one gradient so they read as a single object. stacks when the terminal is
+too narrow to hold them side by side. */
+fn print_root_help() {
+    use std::io::Write;
+
+    /// columns between the logo and the help text.
+    const GAP: usize = 3;
+    /// narrower than this beside the logo and the help wraps into soup, so stack instead.
+    const HELP_MIN: usize = 50;
+
+    /* the art is for a person looking at a terminal. redirected, `lpm --help`
+    is being read by something -- a pager, a grep, scripts/golden-cli.ps1 --
+    and a logo down the left of every line is in its way. colour is gated
+    separately, so NO_COLOR in a terminal still gets the layout, unpainted. */
+    let color = ui::want_color();
+    let logo = art::logo(color);
+    let logo_lines: Vec<&str> = logo.lines().collect();
+    let logo_width = logo_lines
+        .iter()
+        .map(|line| ui::visible_width(line))
+        .max()
+        .unwrap_or(0);
+
+    let width = ui::term_width();
+    let side_by_side = ui::is_terminal() && width >= logo_width + GAP + HELP_MIN;
+    let help_width = if side_by_side {
+        (width - logo_width - GAP).min(80)
+    } else {
+        width.min(100)
+    };
+
+    /* bold only: the gradient below paints every line, and clap's own accent
+    colours would fight it */
+    let rendered = Cli::command()
+        .styles(ui::bold_styles())
+        .term_width(help_width)
+        .render_help();
+    let help = if color {
+        rendered.ansi().to_string()
+    } else {
+        rendered.to_string()
+    };
+    let help_lines: Vec<&str> = help.lines().collect();
+
+    let mut out = String::new();
+    if side_by_side {
+        let rows = logo_lines.len().max(help_lines.len());
+        // centre the shorter column against the taller one
+        let logo_top = (rows - logo_lines.len()) / 2;
+        let help_top = (rows - help_lines.len()) / 2;
+
+        for row in 0..rows {
+            let logo_line = row
+                .checked_sub(logo_top)
+                .and_then(|index| logo_lines.get(index).copied())
+                .unwrap_or("");
+            let help_line = row
+                .checked_sub(help_top)
+                .and_then(|index| help_lines.get(index).copied())
+                .unwrap_or("");
+
+            out.push_str(logo_line);
+            for _ in 0..logo_width - ui::visible_width(logo_line) + GAP {
+                out.push(' ');
+            }
+            push_help_line(&mut out, help_line, row, rows, color);
+            // no trailing whitespace on rows the help doesn't reach
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+        }
+    } else {
+        // a narrow terminal still gets the logo, stacked above its help
+        if ui::is_terminal() {
+            out.push_str(&logo);
+            out.push_str("\n\n");
+        }
+        let rows = help_lines.len();
+        for (row, line) in help_lines.iter().enumerate() {
+            push_help_line(&mut out, line, row, rows, color);
+            out.push('\n');
+        }
+    }
+
+    // a closed pipe (`lpm | head`) is not an error
+    if let Err(err) = std::io::stdout().write_all(out.as_bytes())
+        && err.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        ui::print_error(&err.to_string());
+        std::process::exit(1);
+    }
+}
+
+/** appends one help line in its row's gradient colour. clap's bold markers
+reset the colour as they close, so the colour is reapplied after each one or
+the rest of the line would fall back to the terminal's own. */
+fn push_help_line(out: &mut String, line: &str, row: usize, rows: usize, color: bool) {
+    if !color || line.is_empty() {
+        out.push_str(line);
+        return;
+    }
+    let paint = ui::fg(art::row_color(row, rows));
+    let repainted = line.replace(ui::RESET, &format!("{}{paint}", ui::RESET));
+    out.push_str(&paint);
+    out.push_str(&repainted);
+    out.push_str(ui::RESET);
 }
 
 /** Points at `lpm run <name>` when the unrecognized subcommand turns out to
