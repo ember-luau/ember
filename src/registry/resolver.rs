@@ -157,7 +157,9 @@ fn resolve_once(
             }
         }
     }
+
     let mut overrides_matched: HashSet<Vec<String>> = HashSet::new();
+
     /* enough breadcrumbs to say WHY an override never fired. every queued
     edge path and its package, the one path each package was walked under
     per context since children are enumerated once per context, and each

@@ -190,14 +190,17 @@ fn report_parse_error(err: clap::Error) -> ! {
     // clap starts messages lowercase, capitalize to match our own errors.
     let message = rest.lines().next().unwrap_or(rest);
     let mut chars = message.chars();
+
     let capitalized = match chars.next() {
         Some(first) => first.to_uppercase().to_string() + chars.as_str(),
         None => String::new(),
     };
+
     ui::print_error(&capitalized);
     if let Some(hint) = script_hint(&err) {
         eprintln!("{hint}");
     }
+
     let styled = err.render().ansi().to_string();
     if let Some((_error_line, extra)) = styled.split_once('\n') {
         /* clap renders suggestions as "tip: a similar subcommand
