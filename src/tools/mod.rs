@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 const SHORTHANDS: &[(&str, &str)] = &[
     ("create-chief-project", "ryancundiff/create-chief-project"),
     ("darklua", "seaofvoices/darklua"),
-    ("lest", "luau-lest/lest"),
+    ("lest", "lest-luau/lest"),
+    ("larvae", "larvae-luau/larvae"),
     ("luau-lsp", "johnnymorganz/luau-lsp"),
     ("luaux", "luau-xml/luaux"),
     ("rojo", "rojo-rbx/rojo"),
