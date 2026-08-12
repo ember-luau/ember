@@ -28,25 +28,37 @@ enum Commands {
     /// Runs a script from lpm.toml, or lists them all when given no name
     Run(commands::run::RunArgs),
 
-    /* the four [scripts] names that double as subcommands, npm's
+    /* the [scripts] names that double as subcommands, npm's
     test/start/stop/restart idea. real variants rather than a fallback for
-    unrecognized commands, so they appear in --help, error like any other
-    command, and the set stays a decision instead of "whatever the manifest
-    happens to define". the list lives in commands::run::SHORTCUTS. */
+    unrecognized commands, so they error like any other command and the set
+    stays a decision instead of "whatever the manifest happens to define".
+    the list lives in commands::run::SHORTCUTS.
+
+    hidden, npm's way: `npm start` works everywhere and is nobody's idea of a
+    command to look up. they belong to a project's [scripts], not to lpm's own
+    surface, and listing five of them would say otherwise while telling a
+    project that defines none of them about commands it cannot run. `lpm run`
+    lists what this project actually has, and `script_hint` points at these
+    from the one place they get typed by mistake. */
     /// Runs the `build` script from lpm.toml
+    #[command(hide = true)]
     Build(commands::run::ShortcutArgs),
 
     /// Runs the `test` script from lpm.toml
+    #[command(hide = true)]
     Test(commands::run::ShortcutArgs),
 
     /// Runs the `start` script from lpm.toml
+    #[command(hide = true)]
     Start(commands::run::ShortcutArgs),
 
     /// Runs the `serve` script from lpm.toml
+    #[command(hide = true)]
     Serve(commands::run::ShortcutArgs),
 
     /// Runs the `fmt` (or `format`) script from lpm.toml
-    #[command(visible_alias = "format")]
+    // plain alias, not visible_alias: nothing of this command is on display
+    #[command(hide = true, alias = "format")]
     Fmt(commands::run::ShortcutArgs),
 
     /// Download (if needed) and run a GitHub-released executable
