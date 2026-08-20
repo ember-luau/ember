@@ -6,7 +6,7 @@
 
 # lpm
 
-**The package manager for Luau.**
+**A package manager built for Luau.**
 
 <a href="https://luaupm.com"><img src="https://img.shields.io/badge/luaupm.com-e61048?style=flat-square&logoColor=white" alt="Website" /></a>
 <a href="https://luaupm.com/search"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.packages&label=packages&color=e61048&style=flat-square" alt="Packages" /></a>
@@ -88,3 +88,5 @@ Commands, the manifest, workspaces, publishing — everything lives at
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed [MIT](LICENSE).
+
+<small>LPM/lpm-luau is not in any way affiliated with or endorsed by the Luau team or Roblox Corporation/any of its subsidaries.</small>
