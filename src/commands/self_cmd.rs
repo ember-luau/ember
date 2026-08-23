@@ -298,7 +298,7 @@ fn uninstall() -> Result<(), Error> {
 }
 
 /// canonical schema URL, served from the embr website
-const SCHEMA_URL: &str = "https://luaupm.com/ember.schema.json";
+const SCHEMA_URL: &str = "https://luaupm.com/lpm.schema.json";
 /** the file-path pattern the schema is associated with. Even Better TOML
 keys its associations by regex over the absolute document URI, which uses
 forward slashes on every platform, so this matches ember.toml after a path

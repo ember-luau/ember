@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://luaupm.com">
-  <img src="https://luaupm.com/ember-logo.png" alt="ember logo" width="110" />
+  <img src="https://luaupm.com/lpm-logo.png" alt="ember logo" width="110" />
 </a>
 
 # ember
@@ -26,7 +26,7 @@ project's tools, and run its scripts — one manifest, one lockfile, one binary.
 ## Install
 
 Grab the binary for your platform from the
-[latest release](https://github.com/luaupm/cli/releases/latest), then let embr
+[latest release](https://github.com/ember-luau/ember/releases/latest), then let embr
 install itself:
 
 ```sh
@@ -63,7 +63,7 @@ embr self code    # ember.toml autocomplete + validation via Even Better TOML
 ```
 
 Points your VS Code (or Insiders / VSCodium / Cursor) settings at the
-[ember.toml schema](https://luaupm.com/ember.schema.json). Comments and existing
+[ember.toml schema](https://luaupm.com/lpm.schema.json). Comments and existing
 entries in `settings.json` survive the edit.
 
 ## `embx`: run without installing

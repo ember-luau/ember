@@ -10,9 +10,9 @@ description = "A package manager built for Luau: dependencies, tools and scripts
 authors = ["savruun"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/luaupm/cli"
-homepage = "https://github.com/luaupm"
-documentation = "https://github.com/luaupm/cli#readme"
+repository = "https://github.com/ember-luau/ember"
+homepage = "https://github.com/ember-luau"
+documentation = "https://github.com/ember-luau/ember#readme"
 keywords = ["luau", "roblox", "package-manager", "wally", "pesde"]
 categories = ["command-line-utilities", "development-tools"]
 # Repo furniture that does not belong in the published crate. src/, the

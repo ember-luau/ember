@@ -41,7 +41,7 @@ pub const DEFAULT_INDEX_NAME: &str = "default";
 the project defines no `default` one. pesde-format entries whose `download` URLs
 point at the registry CDN. written only by the ember API at publish time, read by
 the CLI like any other git index. */
-pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
+pub const DEFAULT_INDEX_URL: &str = "https://github.com/ember-luau/index";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
