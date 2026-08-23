@@ -1,4 +1,4 @@
-/*! Handing off to other programs, tool shims, `lpm run` scripts, Studio.
+/*! Handing off to other programs, tool shims, `embr run` scripts, Studio.
 the platform differences like exec vs wait and sh vs cmd live here
 instead of being cfg-gated at every call site. */
 
@@ -33,8 +33,8 @@ pub fn shell(script: &str) -> Command {
     command
 }
 
-/** Hands the terminal over to `command`. on unix this replaces the lpm
-process outright, so it only ever returns on failure. elsewhere lpm
+/** Hands the terminal over to `command`. on unix this replaces the embr
+process outright, so it only ever returns on failure. elsewhere embr
 waits and passes the exit code back up. */
 #[cfg(unix)]
 pub fn exec(mut command: Command) -> Result<i32, Error> {
@@ -55,9 +55,9 @@ pub fn wait(mut command: Command) -> Result<i32, Error> {
 
 /** Runs a `[scripts]` entry and reports the exit code to answer with.
 
-One command runs straight through on lpm's own stdio, which is what keeps a
+One command runs straight through on embr's own stdio, which is what keeps a
 TTY a TTY. Several run at once with their output tagged, which cannot. The
-split is here rather than at the call sites so `lpm run`, the shortcuts and
+split is here rather than at the call sites so `embr run`, the shortcuts and
 the hooks all get the same behavior from the same place. */
 pub fn script(commands: &[String]) -> Result<i32, Error> {
     match commands {
@@ -72,7 +72,7 @@ const POLL: Duration = Duration::from_millis(40);
 /** Runs every command at once, tagging each line of output with the
 command's 1-based position in the list.
 
-Tagging means lpm has to read the output rather than let it through, and
+Tagging means embr has to read the output rather than let it through, and
 what the children are given to write to is the whole design question. See
 `spawn_tagged`: a pseudo-terminal on unix, so they behave exactly as they
 would alone and keep their colour, at the price of stdout and stderr
@@ -86,16 +86,16 @@ writer goes through one lock. Between commands they arrive as they are
 produced, which is the useful order for watching two servers come up.
 
 Every command runs to its own end; one failing does not stop the others,
-which is `concurrently`'s default and the only thing lpm can promise
+which is `concurrently`'s default and the only thing embr can promise
 honestly. Killing the survivors would have to kill process *groups* -- a
 shell running `a; b` does not exec-replace itself, so signalling the child
-lpm spawned leaves the actual program orphaned and still holding the pipe.
+embr spawned leaves the actual program orphaned and still holding the pipe.
 Ctrl+C is unaffected and does stop everything, since the whole tree is in
-lpm's own process group. The code reported is the first non-zero one. */
+embr's own process group. The code reported is the first non-zero one. */
 fn concurrent(commands: &[String]) -> Result<i32, Error> {
     /* whether the children should be told to colour at all. the unix path
     hands them a terminal, which is signal enough on its own, but this still
-    gates it: with lpm's own output redirected, `lpm serve > log` should get
+    gates it: with embr's own output redirected, `embr serve > log` should get
     clean text rather than a file full of escapes. NO_COLOR wins outright. */
     let force_colour = std::io::stdout().is_terminal()
         && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
@@ -203,16 +203,16 @@ decide by asking `isatty` and nothing else. No environment variable reaches
 those -- FORCE_COLOR and CLICOLOR_FORCE are conventions each tool opts into,
 and a tool that never looks at them stays grey. A pty is the only answer
 that works without the tool's cooperation: the child gets a real terminal,
-behaves exactly as it would run alone, and lpm reads the other end.
+behaves exactly as it would run alone, and embr reads the other end.
 
 The cost is that a terminal has one stream. stdout and stderr arrive
 merged, the same way they would on your screen, so a concurrent script
 cannot redirect one without the other. That is why a single-command script
 still takes the inherit path and never comes through here.
 
-`terminal` is false when lpm's own output is not one, and then this falls
+`terminal` is false when embr's own output is not one, and then this falls
 back to pipes -- deliberately. A pty would make every tool colour into a
-redirect that nobody is watching, so `lpm serve > log` would fill the file
+redirect that nobody is watching, so `embr serve > log` would fill the file
 with escapes. Pipes give that case what it wants: clean text, and stdout
 and stderr kept apart. */
 #[cfg(unix)]

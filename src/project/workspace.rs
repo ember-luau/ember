@@ -1,10 +1,10 @@
-/*! workspaces, pesde-style. root lpm.toml lists member dirs as globs under
+/*! workspaces, pesde-style. root ember.toml lists member dirs as globs under
 [target] workspace, members depend on each other via { workspace = "scope/name" },
 and publish/install at the root run for every member. no nested workspaces,
 a member's own globs are never iterated from the outer root, same as pesde. */
 
 use crate::error::Error;
-use crate::project::manifest::{MANIFEST_FILE, Manifest};
+use crate::project::manifest::{Manifest, manifest_in};
 use globset::{GlobBuilder, GlobSetBuilder};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,13 +41,13 @@ pub struct Workspace {
 
 impl Workspace {
     /** opens the workspace rooted at `root`. its manifest must define member globs.
-    a matched dir without lpm.toml is an error, same as pesde. */
+    a matched dir without ember.toml is an error, same as pesde. */
     pub fn open(root: &Path) -> Result<Self, Error> {
         let root = absolute(root)?;
-        let manifest = Manifest::load_from(&root.join(MANIFEST_FILE))?;
+        let manifest = Manifest::load_from(&manifest_in(&root))?;
         let mut members = Vec::new();
         for dir in member_dirs(&root, manifest.workspace_members())? {
-            let manifest_path = dir.join(MANIFEST_FILE);
+            let manifest_path = manifest_in(&dir);
             if !manifest_path.exists() {
                 return Err(Error::WorkspaceMemberMissingManifest(dir));
             }
@@ -75,7 +75,7 @@ pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
     let mut current = project_dir.parent();
     while let Some(dir) = current {
         current = dir.parent();
-        let manifest_path = dir.join(MANIFEST_FILE);
+        let manifest_path = manifest_in(dir);
         if !manifest_path.exists() {
             continue;
         }
@@ -135,7 +135,7 @@ fn member_dirs(root: &Path, globs: &[String]) -> Result<Vec<PathBuf>, Error> {
             let path = entry.path();
             if matches!(
                 path.file_name().and_then(|name| name.to_str()),
-                Some(".git" | ".lpm-staging")
+                Some(".git" | ".ember-staging")
             ) {
                 continue;
             }
@@ -211,25 +211,25 @@ mod tests {
              workspace = [\"packages/*\", \"!packages/skipped\"]\n",
             manifest("acme/root", "0.0.0")
         );
-        write(base, "lpm.toml", &root);
+        write(base, "ember.toml", &root);
         write(
             &base.join("packages/core"),
-            "lpm.toml",
+            "ember.toml",
             &manifest("acme/core", "1.2.0"),
         );
         write(
             &base.join("packages/extra"),
-            "lpm.toml",
+            "ember.toml",
             &manifest("acme/extra", "0.3.0"),
         );
-        write(&base.join("packages/skipped"), "lpm.toml", "");
+        write(&base.join("packages/skipped"), "ember.toml", "");
         // stray file under packages/ must not count as a member.
         write(base, "packages/README.md", "not a member");
     }
 
     #[test]
     fn discovers_members_from_globs() {
-        let base = std::env::temp_dir().join("lpm-test-workspace-globs");
+        let base = std::env::temp_dir().join("embr-test-workspace-globs");
         let _ = fs::remove_dir_all(&base);
         write_workspace(&base);
 
@@ -246,7 +246,7 @@ mod tests {
         /* a member that is a plain project, no [package] at all, is still a
         member -- it just publishes under no name, so nothing resolves a
         workspace dependency to it, and commands call it by its directory */
-        write(&base.join("packages/app"), "lpm.toml", "[dependencies]\n");
+        write(&base.join("packages/app"), "ember.toml", "[dependencies]\n");
         let workspace = Workspace::open(&base).unwrap();
         let app = workspace
             .members
@@ -263,11 +263,11 @@ mod tests {
 
     #[test]
     fn members_without_manifests_are_an_error() {
-        let base = std::env::temp_dir().join("lpm-test-workspace-missing");
+        let base = std::env::temp_dir().join("embr-test-workspace-missing");
         let _ = fs::remove_dir_all(&base);
         write(
             &base,
-            "lpm.toml",
+            "ember.toml",
             &format!(
                 "{}\n[target]\nenvironment = \"shared\"\nworkspace = [\"packages/*\"]\n",
                 manifest("acme/root", "0.0.0")
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn containing_walks_up_to_the_claiming_root() {
-        let base = std::env::temp_dir().join("lpm-test-workspace-containing");
+        let base = std::env::temp_dir().join("embr-test-workspace-containing");
         let _ = fs::remove_dir_all(&base);
         write_workspace(&base);
 
@@ -298,7 +298,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let outside = std::env::temp_dir().join("lpm-test-workspace-outside");
+        let outside = std::env::temp_dir().join("embr-test-workspace-outside");
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&outside).unwrap();
         assert!(containing(&outside).unwrap().is_none());

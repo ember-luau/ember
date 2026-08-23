@@ -1,18 +1,18 @@
 [package]
-# `lpm` is taken on crates.io (by a LaTeX package manager), so the crate ships
-# as luaupm while the binary stays `lpm`: cargo install luaupm, then run lpm.
-name = "luaupm"
+# The crate and the binary share one name: cargo install embr, then run embr.
+# `ember` itself is not used, to stay clear of the ember.js CLI on PATH.
+name = "embr"
 version = "0.5.4"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
-description = "The Luau package manager: dependencies, tools and scripts for Luau and Roblox projects"
+description = "A package manager built for Luau: dependencies, tools and scripts for Luau and Roblox projects"
 authors = ["savruun"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/luaupm/lpm"
-homepage = "https://github.com/luaupm"
-documentation = "https://github.com/luaupm/lpm#readme"
+repository = "https://github.com/ember-luau/ember"
+homepage = "https://github.com/ember-luau"
+documentation = "https://github.com/ember-luau/ember#readme"
 keywords = ["luau", "roblox", "package-manager", "wally", "pesde"]
 categories = ["command-line-utilities", "development-tools"]
 # Repo furniture that does not belong in the published crate. src/, the
@@ -21,7 +21,7 @@ categories = ["command-line-utilities", "development-tools"]
 exclude = [".github/", "scripts/", "CLAUDE.md"]
 
 [[bin]]
-name = "lpm"
+name = "embr"
 path = "src/main.rs"
 
 [dependencies]
@@ -79,7 +79,7 @@ winreg = "0.56.0"
 # medians all landed at or below the opt-level = 3 numbers, but pesde and wally
 # (unchanged control binaries in the same interleaved run) drifted ~10% between
 # runs, so that measurement cannot resolve a regression smaller than ~10%. What
-# it rules out is a large one. Plausible reason there is nothing to find: lpm's
+# it rules out is a large one. Plausible reason there is nothing to find: embr's
 # install path waits on syscalls, the network, and archive extraction.
 #
 # Semantics are held by scripts/golden-cli.ps1 (94 captures, both colour
@@ -96,7 +96,7 @@ winreg = "0.56.0"
 # has a release-profile job so they still run. An unoptimized build needs ~48
 # MiB for the same parse -- five times the release figure, and only ~1.3x under
 # the budget -- so running them in the dev profile produced aborted test
-# binaries rather than signal. Users run release builds; a debug lpm is the one
+# binaries rather than signal. Users run release builds; a debug embr is the one
 # with thin margin (see src/project/package.rs).
 #
 # Not added deliberately: /OPT:REF,ICF, which rustc already passes for MSVC

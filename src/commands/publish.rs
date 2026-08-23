@@ -92,7 +92,7 @@ fn publish_project(
     oidc_token: Option<&str>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
-    metadata, and nothing else in lpm reads it. a workspace root without one
+    metadata, and nothing else in embr reads it. a workspace root without one
     is the same pure container as a private or main-less root, so it steps
     aside for its members rather than failing the whole publish */
     let Some(package) = &manifest.package else {
@@ -147,7 +147,7 @@ fn publish_project(
     validate_description(package.description.as_deref())?;
 
     /* workspace deps become registry ones in the archive's manifest,
-    the on-disk lpm.toml is never touched */
+    the on-disk ember.toml is never touched */
     convert_workspace_dependencies(&mut manifest, Path::new("."))?;
     strip_local_tables(&mut manifest);
 
@@ -201,7 +201,7 @@ fn publish_project(
     ui::print_success(&format!(
         "Published {package_name}@{version} ({environment})"
     ));
-    println!("Install it with `lpm add {package_name}`");
+    println!("Install it with `embr add {package_name}`");
     Ok(())
 }
 
@@ -209,7 +209,7 @@ fn publish_project(
 the requirement is the specifier's version type applied to the member's
 current on-disk version, `^` + `1.2.3` -> `^1.2.3`, and a full requirement
 passes through. the member's `default` index url gets baked in when
-it points somewhere other than lpm's own registry. */
+it points somewhere other than embr's own registry. */
 fn convert_workspace_dependencies(
     manifest: &mut Manifest,
     project_dir: &Path,
@@ -303,7 +303,7 @@ fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), E
     })
 }
 
-/** OAuth app client id for the device flow. lives in the lpm index's
+/** OAuth app client id for the device flow. lives in the embr index's
 config.toml, not in the binary, so it can rotate without a CLI release. */
 fn oauth_client_id() -> Result<String, Error> {
     /* a stale oauth id is harmless, it rotates roughly never, so any
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn workspace_dependencies_convert_to_registry_specs() {
-        let base = std::env::temp_dir().join("lpm-test-publish-convert");
+        let base = std::env::temp_dir().join("embr-test-publish-convert");
         let _ = fs::remove_dir_all(&base);
 
         let write = |path: &str, contents: &str| {
@@ -344,26 +344,26 @@ mod tests {
             fs::write(path, contents).unwrap();
         };
         write(
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
              [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
-            "packages/core/lpm.toml",
+            "packages/core/ember.toml",
             "[package]\nname = \"acme/core\"\nversion = \"1.2.3\"\n\n[target]\nenvironment = \"roblox\"\n",
         );
         write(
-            "packages/extra/lpm.toml",
+            "packages/extra/ember.toml",
             "[package]\nname = \"acme/extra\"\nversion = \"0.2.0\"\n\n[target]\nenvironment = \"roblox\"\n\n\
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"~\" }\n",
         );
 
         let member_dir = base.join("packages/extra");
-        let mut manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
+        let mut manifest = Manifest::load_from(&member_dir.join("ember.toml")).unwrap();
         convert_workspace_dependencies(&mut manifest, &member_dir).unwrap();
 
         /* "~" + the member's on-disk 1.2.3 -> "~1.2.3", no index written
-        since the member publishes to lpm's own registry */
+        since the member publishes to embr's own registry */
         assert!(matches!(
             &manifest.dependencies["core"],
             Dependency::Registry { name, version, index: None, .. }

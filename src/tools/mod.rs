@@ -15,7 +15,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// tools addable and `lpm execute`-runnable by bare name. anything else
+/// tools addable and `embr execute`-runnable by bare name. anything else
 /// must be "owner/repo".
 const SHORTHANDS: &[(&str, &str)] = &[
     ("create-chief-project", "ryancundiff/create-chief-project"),
@@ -43,19 +43,19 @@ pub fn shorthand_repository(name: &str) -> Option<&'static str> {
         .map(|(_, full)| *full)
 }
 
-/** alias names lpm's own binaries occupy in ~/.lpm/bin. a tool shim under
-one of these would shadow the CLI or the lpx launcher. case-insensitive,
+/** alias names embr's own binaries occupy in ~/.ember/bin. a tool shim under
+one of these would shadow the CLI or the embx launcher. case-insensitive,
 matching how windows resolves commands. */
-const RESERVED_ALIASES: &[&str] = &["lpm", "lpx"];
+const RESERVED_ALIASES: &[&str] = &["embr", "embx"];
 
-/// whether an alias would shadow lpm's own binaries as a bin shim.
+/// whether an alias would shadow embr's own binaries as a bin shim.
 pub fn is_reserved_alias(alias: &str) -> bool {
     RESERVED_ALIASES
         .iter()
         .any(|reserved| alias.eq_ignore_ascii_case(reserved))
 }
 
-/** ~/.lpm/tools/{owner}_{repo}/{version}. GitHub owner names can't contain
+/** ~/.ember/tools/{owner}_{repo}/{version}. GitHub owner names can't contain
 '_', so the first '_' always marks the owner/repo split when reading the
 folder name back. */
 pub fn storage_dir(repository: &str, version: &str) -> Result<PathBuf, Error> {
@@ -108,7 +108,7 @@ pub fn install_release(alias: &str, repository: &str, release: &Release) -> Resu
 
 /** the storage half of `install_release`. downloads the platform asset of
 a fetched release, extracts it, and stores the executable, no bin shim,
-no manifest, which is what `lpm execute` runs on. returns the stored
+no manifest, which is what `embr execute` runs on. returns the stored
 executable and whether a download happened. `name_hint` is an extra
 candidate name when picking the executable out of a multi-file asset. */
 pub fn store_release(
@@ -134,7 +134,7 @@ pub fn store_release(
 
     /* extract into a staging sibling first so a failed install never
     leaves a half-written storage dir behind, same dance as install.rs.
-    pid-suffixed because concurrent `lpx` runs of one cold tool are
+    pid-suffixed because concurrent `embx` runs of one cold tool are
     routine and must not tear down each other's staging mid-extraction. */
     let staging = Staging(paths::with_suffix(
         &storage,
@@ -174,7 +174,7 @@ pub fn store_release(
 }
 
 /** the stored executable for an exact version of a repo, downloading that
-release when storage is missing. the `lpm execute <spec>@version` path,
+release when storage is missing. the `embr execute <spec>@version` path,
 no shim, no manifest entry. */
 pub fn ensure_stored(
     repository: &str,
@@ -192,7 +192,7 @@ pub fn ensure_stored(
 /** the stored executable for a repo's latest release, asking GitHub at
 most once per TTL. the last answer is stamped under the repo's storage
 dir, and a fresh stamp whose version is still stored means zero network.
-anonymous GitHub API calls are capped at 60/hour, so `lpx stylua` in a
+anonymous GitHub API calls are capped at 60/hour, so `embx stylua` in a
 loop must coast on the stamp. `refresh` forces the question. */
 pub fn ensure_latest(
     repository: &str,
@@ -247,7 +247,7 @@ fn latest_stamp(repository: &str) -> Result<PathBuf, Error> {
 }
 
 /** the stamped version if the stamp is younger than the TTL, None
-otherwise. deliberately shares the index TTL knob `LPM_INDEX_TTL_SECS`,
+otherwise. deliberately shares the index TTL knob `EMBER_INDEX_TTL_SECS`,
 0 = never fresh, one dial for how stale cached answers may be. */
 fn fresh_latest_version(stamp: &Path) -> Option<String> {
     use crate::registry::index;
@@ -280,7 +280,7 @@ impl Drop for Staging {
     }
 }
 
-/** puts the executable the archive actually shipped under the name lpm
+/** puts the executable the archive actually shipped under the name embr
 stores it by.
 
 the two are compared through the filesystem rather than as text, because
@@ -338,25 +338,25 @@ mod tests {
     }
 
     /** regression. JohnnyMorganz/StyLua ships `stylua.exe`, and the repo's
-    short name makes lpm want `StyLua.exe`. On a case-insensitive
+    short name makes embr want `StyLua.exe`. On a case-insensitive
     filesystem those are one file, and comparing the paths as text treated
     them as two: the target "already existed", so it was deleted -- it was
     the extracted binary -- and the rename then failed with os error 2.
     Every attempt also left its staging folder behind. */
     #[test]
     fn an_archive_naming_its_binary_in_another_case_still_installs() {
-        let staging = std::env::temp_dir().join("lpm-test-place-executable");
+        let staging = std::env::temp_dir().join("embr-test-place-executable");
         let _ = fs::remove_dir_all(&staging);
         fs::create_dir_all(&staging).unwrap();
 
-        // what the archive shipped, and what lpm wants to store it as
+        // what the archive shipped, and what embr wants to store it as
         let found = staging.join("stylua.exe");
         let target = staging.join("StyLua.exe");
         fs::write(&found, b"the real binary").unwrap();
 
         place_executable(&found, &target).unwrap();
 
-        // readable under the name lpm stores by, whichever spelling won
+        // readable under the name embr stores by, whichever spelling won
         assert_eq!(fs::read(&target).unwrap(), b"the real binary");
         // and exactly one binary, never a deleted one or a duplicate
         let left: Vec<_> = fs::read_dir(&staging).unwrap().flatten().collect();
@@ -380,7 +380,7 @@ mod tests {
     /// a failed install must not leave its `<version>.<pid>.tmp` folder behind.
     #[test]
     fn staging_is_removed_however_the_install_ends() {
-        let dir = std::env::temp_dir().join("lpm-test-staging-guard");
+        let dir = std::env::temp_dir().join("embr-test-staging-guard");
         let _ = fs::remove_dir_all(&dir);
 
         {
@@ -411,7 +411,7 @@ mod tests {
             assert!(Tool::split_repository(full).is_ok(), "{full}");
             assert!(!is_reserved_alias(short), "{short} is reserved");
         }
-        // the marquee lpx demo stays wired to its repo
+        // the marquee embx demo stays wired to its repo
         assert_eq!(
             expand_shorthand("create-chief-project"),
             "ryancundiff/create-chief-project"
@@ -420,8 +420,8 @@ mod tests {
 
     #[test]
     fn reserved_aliases_refuse_tool_installs() {
-        assert!(is_reserved_alias("lpm"));
-        assert!(is_reserved_alias("LPX"));
+        assert!(is_reserved_alias("embr"));
+        assert!(is_reserved_alias("EMBX"));
         assert!(!is_reserved_alias("rojo"));
 
         let tool = Tool {
@@ -429,11 +429,11 @@ mod tests {
             version: "1.0.0".to_string(),
         };
         assert!(matches!(
-            is_installed("lpx", &tool),
+            is_installed("embx", &tool),
             Err(Error::ReservedToolAlias(_))
         ));
         assert!(matches!(
-            install_tool("LPM", &tool, &GithubAPI::new()),
+            install_tool("EMBR", &tool, &GithubAPI::new()),
             Err(Error::ReservedToolAlias(_))
         ));
     }
@@ -441,10 +441,12 @@ mod tests {
     #[test]
     fn latest_stamp_freshness_gates_reuse() {
         // the assertions below assume the default TTL
-        if std::env::var_os("LPM_INDEX_TTL_SECS").is_some() {
+        if std::env::var_os("EMBER_INDEX_TTL_SECS").is_some()
+            || std::env::var_os("LPM_INDEX_TTL_SECS").is_some()
+        {
             return;
         }
-        let dir = std::env::temp_dir().join("lpm-test-latest-stamp");
+        let dir = std::env::temp_dir().join("embr-test-latest-stamp");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let stamp = dir.join(".latest");

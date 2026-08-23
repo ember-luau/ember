@@ -17,11 +17,11 @@
 #   * --locked is what makes this reproducible, and it also means the RESOLVER
 #     never runs. Version selection, transitive discovery, conflict handling and
 #     lockfile writing are not covered here; they are covered by unit tests.
-#     lpm.lock is copied IN as an input, so its hash in tree.txt proves nothing.
-#   * NOT hermetic with respect to the host. Every `lpm install` merges the
-#     machine's ~/.lpm/tools.toml into its job list (install.rs, tool_jobs +
-#     global_tools) and lpm's home has no override -- it is always
-#     dirs::home_dir()/.lpm. On a machine with global tools pinned, this run
+#     ember.lock is copied IN as an input, so its hash in tree.txt proves nothing.
+#   * NOT hermetic with respect to the host. Every `embr install` merges the
+#     machine's ~/.ember/tools.toml into its job list (install.rs, tool_jobs +
+#     global_tools) and embr's home has no override -- it is always
+#     dirs::home_dir()/.ember. On a machine with global tools pinned, this run
 #     downloads them and prints extra lines. Those lines are filtered below.
 #     A run on a machine with no global tools is hermetic by accident, not by
 #     construction.
@@ -36,12 +36,12 @@
 # Needs network (archives download unless the cache is warm).
 
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot "..\target\release\lpm.exe"),
+    [string]$Exe = (Join-Path $PSScriptRoot "..\target\release\embr.exe"),
     [string]$Out = (Join-Path $PSScriptRoot "..\.golden\install-current"),
     [string]$Baseline = "",
     [switch]$Relock,
-    # DESTRUCTIVE: `lpm cache clean` wipes the real ~/.lpm archive and index
-    # caches for every project on this machine, not a sandboxed copy. lpm has no
+    # DESTRUCTIVE: `embr cache clean` wipes the real ~/.ember archive and index
+    # caches for every project on this machine, not a sandboxed copy. embr has no
     # home-directory override, so there is no way to do this in isolation.
     [switch]$ColdCache
 )
@@ -54,8 +54,8 @@ if (-not (Test-Path $Exe)) {
 }
 $Exe = (Resolve-Path $Exe).Path
 $fixture = Join-Path $PSScriptRoot "fixtures\install"
-$manifest = Join-Path $fixture "lpm.toml.fixture"
-$lock = Join-Path $fixture "lpm.lock.fixture"
+$manifest = Join-Path $fixture "ember.toml.fixture"
+$lock = Join-Path $fixture "ember.lock.fixture"
 $utf8 = New-Object Text.UTF8Encoding $false
 
 if ($Baseline -ne "") {
@@ -65,10 +65,10 @@ if ($Baseline -ne "") {
     }
 }
 
-$work = Join-Path $env:TEMP "lpm-fixture-install"
+$work = Join-Path $env:TEMP "embr-fixture-install"
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $work | Out-Null
-Copy-Item $manifest (Join-Path $work "lpm.toml")
+Copy-Item $manifest (Join-Path $work "ember.toml")
 
 if ($Relock) {
     Push-Location $work
@@ -76,7 +76,7 @@ if ($Relock) {
     $code = $LASTEXITCODE
     Pop-Location
     if ($code -ne 0) { Write-Error "install failed ($code); lockfile not regenerated"; exit 1 }
-    Copy-Item (Join-Path $work "lpm.lock") $lock -Force
+    Copy-Item (Join-Path $work "ember.lock") $lock -Force
     Write-Output "Wrote $lock"
     exit 0
 }
@@ -85,10 +85,10 @@ if (-not (Test-Path $lock)) {
     Write-Error "No committed lockfile at $lock -- run with -Relock once, and commit it"
     exit 1
 }
-Copy-Item $lock (Join-Path $work "lpm.lock")
+Copy-Item $lock (Join-Path $work "ember.lock")
 
 if ($ColdCache) {
-    Write-Warning "-ColdCache wipes the REAL ~/.lpm archive and index caches (all projects on this machine)"
+    Write-Warning "-ColdCache wipes the REAL ~/.ember archive and index caches (all projects on this machine)"
     & $Exe cache clean *> $null
     # a swallowed failure here would leave the cache warm and still report a
     # cold-cache PASS, which is the sort of quiet lie this harness exists to avoid
@@ -142,11 +142,11 @@ $stdout = @(
 [IO.File]::WriteAllLines((Join-Path $Out "stdout-sorted.txt"), $stdout, $utf8)
 
 # stderr, same treatment. The global-tool PATH warning is dropped: the fixture
-# declares no [tools], so it comes from the host's own ~/.lpm/tools.toml.
+# declares no [tools], so it comes from the host's own ~/.ember/tools.toml.
 $warnings = @(
     [IO.File]::ReadAllText($stderrFile, $utf8) -split "`r?`n" |
     ForEach-Object { $_ -replace [regex]::Escape($env:USERPROFILE), "<HOME>" } |
-    Where-Object { $_ -notmatch "on PATH before lpm's shims" } |
+    Where-Object { $_ -notmatch "on PATH before embr's shims" } |
     Where-Object { $_.Trim() -ne "" } |
     Sort-Object
 )

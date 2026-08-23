@@ -1,11 +1,11 @@
 /*! the logo as ascii art, and the brand gradient it and the help text are
 painted with.
 
-regenerate from the website's lpm-logo.png with scripts/logo.py if the mark
-changes. the artwork's own LPM letters are knocked out of a shape only 36
-columns wide, far too fine to survive that, so they come out as speckle and
-the generator fills them in. the notch is the one knockout kept: it is big
-enough to read, and it is what makes the mark recognisable at this size. */
+regenerate from ember.png with scripts/logo.py if the mark changes. the mark
+is a flame above an open crate. its alpha carries every knockout that counts,
+the curl inside the flame and the gap between the crate panels, so the art
+places none by hand. the two spark diamonds are the one thing dropped: each
+covers about one cell at this size, and renders as stray punctuation. */
 
 use crate::ui::{ACCENT, RESET, fg};
 
@@ -24,8 +24,8 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
     /* the ends stay off pure white and off near black on purpose: the help
     text is painted with this same ramp, and its first and last lines have to
     stay readable on a light terminal as well as a dark one */
-    const TOP: (u8, u8, u8) = (0xFF, 0xB0, 0xC4); // pale rose
-    const BOTTOM: (u8, u8, u8) = (0xA3, 0x0B, 0x33); // deep crimson
+    const TOP: (u8, u8, u8) = (0xFF, 0xBC, 0xB0); // pale coral
+    const BOTTOM: (u8, u8, u8) = (0xA3, 0x22, 0x0B); // deep ember
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let position = row.min(rows.saturating_sub(1)) as u32 * 1000 / last; // 0..=1000
@@ -104,24 +104,27 @@ fn render_gradient(art: &str, color: bool) -> String {
 }
 
 pub const LOGO: &str = r#"
-         -===:
-       *@@@@@@@%#*+=-:
-      *@@@@@@@@@@@@@@@@%**=-:
-     -@@@@@@@@@@@@@@@%%%%%%%%%%*+:
-     #@@@@@@@@@@@@@@%%%*++++*%%%@@=
-    -@@@@@@@@@@@@@@@%%-      :#%@@#
-    #@@@@@@@@@@@@@@@%%        *%@@+
-   =@@@@@@@@@@@@@@@@%%:       #%@%
-   %@@@@@@@@@@@@@@@@%%#=----=*%%@+
-  +@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%
-  %@@@@@@@@@@@@@@@@@@@@@@@@@@@@@=
- +@@@@@@@@@@@@@@@@@@@@@@@@@@@@@#
- %@@@@@@@@@@@@@@@@@@@@@@@@@@@@@-
- =@@@@@@@@@@@@@@@@@@@@@@@@@@@@#
-  :+#%@@@@@@@@@@@@@@@@@@@@@@@@-
-       :-=**%@@@@@@@@@@@@@@@@*
-              :-=+*#%@@@@@@@*
-                      :===-
+           -*=
+          *@@-
+         #@@@*
+        :@@@@@#-
+         %@@@@@@#=
+         -@@@@@@@@%+
+     -*:  +@@@@@@@@@#
+   =#@@:  #@@@@*@@@@@*
+ :#@@@@@%@@@@@+ *@@@@%
+ #@@@@@@@@@@%=  :@@@@* =*
+-@@@@@@@@@#=    =@@@@*#@@-
+:%@@@@@@@#     +@@@@@@@@%:
+-:=*@@@@@#   -%@@@@@@@*=:-
+@%*=:-*%@@=  =@@@@%*-:=*%@
+@@@@@#=:-+%#- =*+-:=#@@@@@
+@@@@@@@@#+::+= :+#@@@@@@@@
+%@@@@@@@@@@%::%@@@@@@@@@@%
+:*%@@@@@@@@@--@@@@@@@@@%*:
+   -*%@@@@@@--@@@@@@%*-
+      -+%@@@--@@@%+-
+         :+#--#+:
 "#;
 
 #[cfg(test)]
@@ -130,13 +133,13 @@ mod tests {
 
     #[test]
     fn the_gradient_runs_pale_through_the_accent_to_deep() {
-        let rows = 18;
+        let rows = 21;
         let top = row_color(0, rows);
         let middle = row_color(rows / 2, rows);
         let bottom = row_color(rows - 1, rows);
 
-        assert_eq!(top, (0xFF, 0xB0, 0xC4));
-        assert_eq!(bottom, (0xA3, 0x0B, 0x33));
+        assert_eq!(top, (0xFF, 0xBC, 0xB0));
+        assert_eq!(bottom, (0xA3, 0x22, 0x0B));
         // the middle is the brand colour itself, near enough to see it
         let (r, g, b) = middle;
         assert!(
@@ -154,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_single_row_and_an_empty_ramp_do_not_divide_by_zero() {
-        assert_eq!(row_color(0, 1), (0xFF, 0xB0, 0xC4));
+        assert_eq!(row_color(0, 1), (0xFF, 0xBC, 0xB0));
         // rows past the end clamp rather than running off the ramp
         assert_eq!(row_color(99, 4), row_color(3, 4));
     }
@@ -174,8 +177,8 @@ mod tests {
         assert!(!lines.is_empty());
         // the layout reserves this much for the logo, see main::print_root_help
         assert!(
-            lines.iter().all(|line| line.chars().count() <= 36),
-            "the art must stay within 36 columns"
+            lines.iter().all(|line| line.chars().count() <= 26),
+            "the art must stay within 26 columns"
         );
         // no trailing blanks: they would show up as stray padding in the layout
         assert!(lines.iter().all(|line| !line.ends_with(' ')));

@@ -65,7 +65,7 @@ jobs:
                  else $body
                end) as $description
             | {
-                username: "lpm",
+                username: "embr",
                 avatar_url: "https://luaupm.com/lpm-logo.png",
                 # The role ping lives in content, above the embed. Discord only
                 # notifies when the message is first posted, so later PATCHes of
@@ -82,8 +82,8 @@ jobs:
                   thumbnail: { url: "https://luaupm.com/lpm-logo.png" },
                   footer: {
                     text: (if $release.prerelease
-                             then "Pre-release · lpm self update stays on the latest stable"
-                             else "Update with: lpm self update"
+                             then "Pre-release · embr self update stays on the latest stable"
+                             else "Update with: embr self update"
                            end)
                   }
                 }]

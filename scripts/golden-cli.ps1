@@ -1,9 +1,9 @@
-# G2: captures every scrap of CLI text lpm can print without touching the
+# G2: captures every scrap of CLI text embr can print without touching the
 # network, so a build-configuration change can be shown not to have moved any
 # of it.
 #
 # The subcommand tree is walked, not hand-listed: `--help` is parsed for its own
-# Commands: block and each entry recursed into. lpm has three levels (main.rs,
+# Commands: block and each entry recursed into. embr has three levels (main.rs,
 # then cache/index/patch/self/studio/tool, then tool's own nested group), and a
 # hand-written list is exactly the thing that goes stale.
 #
@@ -13,7 +13,7 @@
 #
 # WHAT THIS DOES NOT COVER, so nobody mistakes a pass for more than it is:
 # interactive prompts (inquire/crossterm) are absent by design -- they would
-# block on stdin; the shim and lpx dispatch paths in main.rs key off the
+# block on stdin; the shim and embx dispatch paths in main.rs key off the
 # executable's own filename and are never entered here; `self install`,
 # `self code`, `studio open`, and `publish` appear only as help text, which
 # means both of the crate's `unsafe` blocks are outside this gate; and the
@@ -27,7 +27,7 @@
 # Exits non-zero if -Baseline is given and anything differs.
 
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot "..\target\release\lpm.exe"),
+    [string]$Exe = (Join-Path $PSScriptRoot "..\target\release\embr.exe"),
     [string]$Out = (Join-Path $PSScriptRoot "..\.golden\current"),
     [string]$Baseline = "",
     [int]$TimeoutSeconds = 60
@@ -57,7 +57,7 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 
 # Three sandboxes, because the error text depends on what is on disk and a
 # single empty directory collapses most failures into "no manifest found".
-$sandboxRoot = Join-Path $env:TEMP "lpm-golden-sandbox"
+$sandboxRoot = Join-Path $env:TEMP "embr-golden-sandbox"
 Remove-Item $sandboxRoot -Recurse -Force -ErrorAction SilentlyContinue
 $sandboxes = @{}
 foreach ($kind in "empty", "project", "broken") {
@@ -67,7 +67,7 @@ foreach ($kind in "empty", "project", "broken") {
 }
 # a valid manifest with no dependencies: reaches the errors that only fire once
 # a manifest has been found and parsed
-[IO.File]::WriteAllText((Join-Path $sandboxes["project"] "lpm.toml"), @"
+[IO.File]::WriteAllText((Join-Path $sandboxes["project"] "ember.toml"), @"
 [package]
 name = "golden/fixture"
 version = "0.1.0"
@@ -76,7 +76,7 @@ version = "0.1.0"
 environment = "roblox"
 "@)
 # and one that does not parse, for the manifest-error path
-[IO.File]::WriteAllText((Join-Path $sandboxes["broken"] "lpm.toml"), "[package`nname = ")
+[IO.File]::WriteAllText((Join-Path $sandboxes["broken"] "ember.toml"), "[package`nname = ")
 
 $utf8 = New-Object Text.UTF8Encoding $false
 
@@ -90,12 +90,12 @@ function Capture([string]$mode, [string]$name, [string[]]$arguments, [string]$sa
     # never hang the harness on a command that turns out to want stdin
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill()
-        throw "lpm $($arguments -join ' ') did not exit within $TimeoutSeconds s"
+        throw "embr $($arguments -join ' ') did not exit within $TimeoutSeconds s"
     }
     # read as UTF-8 explicitly: Get-Content in PS 5.1 decodes with the ANSI
-    # codepage, which mangles lpm's ✓/✗/→ and makes captures codepage-dependent
+    # codepage, which mangles embr's ✓/✗/→ and makes captures codepage-dependent
     $text = @(
-        "$ lpm $($arguments -join ' ')   [$mode, sandbox: $sandbox]",
+        "$ embr $($arguments -join ' ')   [$mode, sandbox: $sandbox]",
         "exit: $($process.ExitCode)",
         "--- stdout ---",
         [IO.File]::ReadAllText($stdout, $utf8),
@@ -105,7 +105,7 @@ function Capture([string]$mode, [string]$name, [string[]]$arguments, [string]$sa
     # scrub anything machine-specific so two checkouts compare equal. all three
     # are case-insensitive regex replaces: Windows paths vary in case, and the
     # 8.3 short form of $env:TEMP is scrubbed alongside the long form because
-    # lpm canonicalizes some paths and not others.
+    # embr canonicalizes some paths and not others.
     foreach ($pair in @(
             @($sandboxRoot, "<SANDBOX>"),
             @([IO.Path]::GetFullPath($sandboxRoot), "<SANDBOX>"),
@@ -149,7 +149,7 @@ function Walk([string]$mode, [string[]]$path) {
 
 # Error paths, each pinned to the sandbox that reaches the code being tested.
 # Six of these used to run in an empty directory and all print the same "no
-# lpm.toml found" line; `tool install` used to be tested against a subcommand
+# ember.toml found" line; `tool install` used to be tested against a subcommand
 # that does not exist (it is `tool add`), so it only ever exercised clap.
 $errorCases = @(
     @{ name = "err_unknown_command"; args = @("instal"); box = "empty" }

@@ -55,7 +55,7 @@ pub enum ToolCommand {
         version: Option<String>,
     },
 
-    /// Manage the stored tool binaries under ~/.lpm/tools
+    /// Manage the stored tool binaries under ~/.ember/tools
     #[command(subcommand)]
     Cache(ToolCacheCommand),
 }
@@ -82,9 +82,9 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
 }
 
 /** wipes the tool store, every version of every tool, plus the `.latest`
-stamps `lpm execute` keeps beside them. shims, manifest pins, and the
+stamps `embr execute` keeps beside them. shims, manifest pins, and the
 global tools file survive. a shim without storage errors with "run
-`lpm install`", and that or the next lpx run is the repair path. */
+`embr install`", and that or the next embx run is the repair path. */
 fn cache_clean() -> Result<(), Error> {
     let (freed, skipped) = sweep_tool_store(&paths::tools_dir()?);
 
@@ -104,7 +104,7 @@ fn cache_clean() -> Result<(), Error> {
         freed as f64 / (1024.0 * 1024.0)
     ));
     println!(
-        "Pinned tools reinstall with `lpm install` in each project; lpx runs re-download on demand"
+        "Pinned tools reinstall with `embr install` in each project; embx runs re-download on demand"
     );
     Ok(())
 }
@@ -149,7 +149,7 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     let (owner, repo) = Tool::split_repository(&name)?;
 
     /* the repo short name becomes the alias key and its bin shim, a repo
-    named lpm or lpx would shadow lpm's own binaries there */
+    named embr or embx would shadow embr's own binaries there */
     if tools::is_reserved_alias(repo) {
         return Err(Error::ReservedToolAlias(repo.to_string()));
     }
@@ -160,7 +160,7 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
         None => github.get_latest_release(&name)?,
     };
 
-    /* global tools live in ~/.lpm/tools.toml, created on first use, and
+    /* global tools live in ~/.ember/tools.toml, created on first use, and
     resolve in any directory. project tools only inside their project */
     let mut manifest = ManifestDoc::open_or_create(Scope::from_global(global))?;
 
@@ -174,9 +174,9 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     if global {
         ui::print_success(&format!("Added global tool {name}@{version}"));
     } else {
-        ui::print_success(&format!("Added tool {name}@{version} to lpm.toml"));
+        ui::print_success(&format!("Added tool {name}@{version} to ember.toml"));
     }
-    println!("Run `lpm install` to install it");
+    println!("Run `embr install` to install it");
 
     Ok(())
 }
@@ -283,10 +283,10 @@ fn update() -> Result<(), Error> {
 
     manifest.save()?;
     ui::print_success(&format!(
-        "Updated {updated} tool{} in lpm.toml",
+        "Updated {updated} tool{} in ember.toml",
         if updated == 1 { "" } else { "s" }
     ));
-    println!("Run `lpm install` to install the updated tools");
+    println!("Run `embr install` to install the updated tools");
 
     Ok(())
 }
@@ -419,8 +419,8 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
 
     /* when the whole tool or its last version is gone, drop the shim too.
     manifest pins stay, `tool list` shows it as "not installed" and the
-    next `lpm install` puts it back. only version directories count.
-    the `.latest` stamp `lpm execute` leaves beside them must not keep a
+    next `embr install` puts it back. only version directories count.
+    the `.latest` stamp `embr execute` leaves beside them must not keep a
     deleted tool half-alive, and gets swept along with the dir. */
     let tool_gone = version.is_none()
         || fs::read_dir(&tool_dir)
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn sweeping_the_store_removes_tools_and_stamps() {
-        let store = std::env::temp_dir().join("lpm-test-tool-store-sweep");
+        let store = std::env::temp_dir().join("embr-test-tool-store-sweep");
         let _ = fs::remove_dir_all(&store);
         fs::create_dir_all(store.join("acme_tool").join("1.0.0")).unwrap();
         fs::write(

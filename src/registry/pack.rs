@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest};
+use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest, is_manifest};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 /// Never published, matched by name at any depth.
 const SKIP_NAMES: [&str; 6] = [
     ".git",
-    ".lpm-staging",
-    ".lpm-patch",
-    "lpm.lock",
+    ".ember-staging",
+    ".ember-patch",
+    "ember.lock",
     "target",
     "node_modules",
 ];
@@ -18,7 +18,7 @@ const SKIP_NAMES: [&str; 6] = [
 /// deterministic. Skips packages-out folders and `SKIP_NAMES`. Without
 /// `includes` under [target] that walk is the whole selection. Include/exclude
 /// entries are relative paths, a directory covering its subtree, or globs like
-/// `src/*`. `excludes` subtracts from the selection, and lpm.toml always
+/// `src/*`. `excludes` subtracts from the selection, and ember.toml always
 /// ships.
 pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
     let mut out_dirs: Vec<PathBuf> = Environment::ALL
@@ -26,8 +26,8 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
         .map(|environment| manifest.packages_out(environment))
         .collect();
     /* the pre-rename roblox output folder, see `Environment::Roblox`. only
-    `lpm install` clears it, so a publish that happens first would otherwise
-    walk straight into a whole vendored `.lpm` store and ship somebody
+    `embr install` clears it, so a publish that happens first would otherwise
+    walk straight into a whole vendored `.ember` store and ship somebody
     else's packages inside this archive */
     out_dirs.push(Path::new("packages").join("shared"));
 
@@ -42,7 +42,7 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     let includes = PathFilter::new(includes)?;
     let excludes = PathFilter::new(excludes)?;
     files.retain(|file| {
-        if file.as_path() == Path::new(MANIFEST_FILE) {
+        if is_manifest(file) {
             return true;
         }
         if !includes.is_empty() && !includes.matches(file) {
@@ -100,7 +100,7 @@ impl PathFilter {
 }
 
 /** Packs the selected files into a gzipped tar. Entry paths are
-forward-slash relative, no leading "./". The lpm.toml entry is serialized
+forward-slash relative, no leading "./". The ember.toml entry is serialized
 from `manifest`, not copied from disk. Publish rewrites workspace deps into
 registry ones in memory and the archive is where that rewrite has to land,
 the on-disk file stays untouched, same as pesde. */
@@ -108,7 +108,8 @@ pub fn pack(root: &Path, manifest: &Manifest) -> Result<Vec<u8>, Error> {
     let files = packed_files(root, manifest)?;
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
     for file in &files {
-        if file.as_path() == Path::new(MANIFEST_FILE) {
+        // published under the current name whatever it is called on disk
+        if is_manifest(file) {
             let contents = toml::to_string(manifest)?;
             let mut header = tar::Header::new_gnu();
             header.set_size(contents.len() as u64);
@@ -198,16 +199,16 @@ mod tests {
 
     #[test]
     fn skips_vcs_build_and_output_dirs() {
-        let base = std::env::temp_dir().join("lpm-test-pack-skips");
+        let base = std::env::temp_dir().join("embr-test-pack-skips");
         let _ = fs::remove_dir_all(&base);
 
-        write(&base, "lpm.toml", "");
+        write(&base, "ember.toml", "");
         write(&base, "src/init.luau", "return {}");
         write(&base, ".git/HEAD", "ref: refs/heads/master");
-        write(&base, ".lpm-staging/rocket.tar.gz", "");
-        write(&base, ".lpm-patch/acme_dep@1.0.0/src/init.luau", "");
-        write(&base, "lpm.lock", "version = 1");
-        write(&base, "target/debug/lpm", "");
+        write(&base, ".ember-staging/rocket.tar.gz", "");
+        write(&base, ".ember-patch/acme_dep@1.0.0/src/init.luau", "");
+        write(&base, "ember.lock", "version = 1");
+        write(&base, "target/debug/embr", "");
         write(&base, "node_modules/left-pad/index.js", "");
         write(&base, "packages/luau/Core.luau", "");
         write(&base, "Packages/Chief.luau", "");
@@ -216,7 +217,7 @@ mod tests {
         install has not necessarily run to clear it */
         write(
             &base,
-            "packages/shared/.lpm/evaera_promise/lib/init.lua",
+            "packages/shared/.ember/evaera_promise/lib/init.lua",
             "",
         );
 
@@ -234,7 +235,7 @@ mod tests {
         let files = packed_files(&base, &manifest).unwrap();
         assert_eq!(
             files,
-            vec![PathBuf::from("lpm.toml"), PathBuf::from("src/init.luau")]
+            vec![PathBuf::from("ember.toml"), PathBuf::from("src/init.luau")]
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -262,10 +263,10 @@ mod tests {
 
     #[test]
     fn includes_and_excludes_are_plain_path_filters() {
-        let base = std::env::temp_dir().join("lpm-test-pack-filters");
+        let base = std::env::temp_dir().join("embr-test-pack-filters");
         let _ = fs::remove_dir_all(&base);
 
-        write(&base, "lpm.toml", "");
+        write(&base, "ember.toml", "");
         write(&base, "README.md", "");
         write(&base, "notes.txt", "");
         write(&base, "src/init.luau", "");
@@ -289,7 +290,7 @@ mod tests {
             files,
             vec![
                 PathBuf::from("README.md"),
-                PathBuf::from("lpm.toml"),
+                PathBuf::from("ember.toml"),
                 PathBuf::from("src/init.luau"),
             ]
         );
@@ -301,10 +302,10 @@ mod tests {
 
     #[test]
     fn tar_round_trips_with_forward_slash_paths() {
-        let base = std::env::temp_dir().join("lpm-test-pack-roundtrip");
+        let base = std::env::temp_dir().join("embr-test-pack-roundtrip");
         let _ = fs::remove_dir_all(&base);
 
-        write(&base, "lpm.toml", "[package]\nname = \"acme/rocket\"\n");
+        write(&base, "ember.toml", "[package]\nname = \"acme/rocket\"\n");
         write(&base, "src/init.luau", "return 1\n");
         write(&base, "docs/guide.md", "# rocket\n");
 
@@ -328,7 +329,7 @@ mod tests {
         assert_eq!(unpacked.len(), 3);
         /* The archive's manifest comes from memory, where publish's
         workspace-dep rewrite lives, not from disk. */
-        assert_eq!(unpacked["lpm.toml"], toml::to_string(&manifest).unwrap());
+        assert_eq!(unpacked["ember.toml"], toml::to_string(&manifest).unwrap());
         assert_eq!(unpacked["src/init.luau"], "return 1\n");
         assert_eq!(unpacked["docs/guide.md"], "# rocket\n");
 

@@ -1,9 +1,9 @@
-/*! editing side of the manifest. every command that changes lpm.toml or the
+/*! editing side of the manifest. every command that changes ember.toml or the
 global tools file needs the same steps, open the right file, reach for a table,
 write it back. all of it goes through `ManifestDoc` so the toml_edit dance lives
 in one place and comments/formatting survive every write. */
 
-use super::MANIFEST_FILE;
+use super::manifest_in;
 use crate::error::Error;
 use crate::sys::paths;
 use std::fs;
@@ -13,9 +13,9 @@ use toml_edit::{DocumentMut, Item, Table};
 /// which file a command edits. most tool commands take a `--global` flag that picks between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// lpm.toml in the current directory.
+    /// ember.toml in the current directory.
     Project,
-    /// ~/.lpm/tools.toml, whose tools resolve in any directory.
+    /// ~/.ember/tools.toml, whose tools resolve in any directory.
     Global,
 }
 
@@ -30,7 +30,7 @@ impl Scope {
 
     pub fn path(self) -> Result<PathBuf, Error> {
         match self {
-            Scope::Project => Ok(PathBuf::from(MANIFEST_FILE)),
+            Scope::Project => Ok(manifest_in(std::path::Path::new(""))),
             Scope::Global => paths::global_tools_file(),
         }
     }
@@ -38,7 +38,7 @@ impl Scope {
     /// how the file is named when a command talks about it.
     pub fn label(self) -> &'static str {
         match self {
-            Scope::Project => "lpm.toml",
+            Scope::Project => "ember.toml",
             Scope::Global => "the global tools file",
         }
     }
@@ -65,7 +65,7 @@ impl ManifestDoc {
 
     /** same, except a missing global tools file starts an empty document, it only
     exists once the first global tool is added. project manifests are still never
-    created here, that's `lpm init`'s job. */
+    created here, that's `embr init`'s job. */
     pub fn open_or_create(scope: Scope) -> Result<Self, Error> {
         let path = scope.path()?;
         if scope == Scope::Global && !path.exists() {
@@ -115,7 +115,7 @@ impl ManifestDoc {
         }
     }
 
-    /// writes the document back. parent dirs get created because the global tools file lives in ~/.lpm, which may not exist yet.
+    /// writes the document back. parent dirs get created because the global tools file lives in ~/.ember, which may not exist yet.
     pub fn save(&self) -> Result<(), Error> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -137,7 +137,7 @@ mod tests {
 
     fn doc(text: &str) -> ManifestDoc {
         ManifestDoc {
-            path: PathBuf::from(MANIFEST_FILE),
+            path: manifest_in(std::path::Path::new("")),
             document: text.parse().unwrap(),
         }
     }

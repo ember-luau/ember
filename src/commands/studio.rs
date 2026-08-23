@@ -9,14 +9,14 @@ use std::path::Path;
 
 #[derive(Subcommand, Debug)]
 pub enum StudioCommand {
-    /// Create the [studio] table in lpm.toml
+    /// Create the [studio] table in ember.toml
     Init,
 
     /// Open this project's place in Roblox Studio
     Open,
 }
 
-/** bare `lpm studio` never gets here, clap prints the studio help instead
+/** bare `embr studio` never gets here, clap prints the studio help instead
 via arg_required_else_help in main.rs. */
 pub fn run(command: StudioCommand) -> Result<(), Error> {
     match command {
@@ -30,12 +30,12 @@ const LOCAL_FILE: &str = "Local place file (.rbxl / .rbxlx)";
 
 fn init() -> Result<(), Error> {
     /* open the manifest first so a missing/broken one fails before any
-    prompting, same as `lpm index add` */
+    prompting, same as `embr index add` */
     let mut document = ManifestDoc::open(Scope::Project)?;
 
     /* a [studio] with anything in it is left alone, including an inline
     `studio = {...}` which table() rejects. an empty table from a hand-edit
-    just gets filled in, so `open`'s "run `lpm studio init`" advice always
+    just gets filled in, so `open`'s "run `embr studio init`" advice always
     works */
     let occupied = match document.table("studio") {
         Ok(table) => table.is_some_and(|table| !table.is_empty()),
@@ -51,7 +51,7 @@ fn init() -> Result<(), Error> {
         "How should Studio open this project?",
         vec![PUBLISHED_PLACE, LOCAL_FILE],
     )
-    .with_help_message("Saved under [studio] in lpm.toml; `lpm studio open` uses it")
+    .with_help_message("Saved under [studio] in ember.toml; `embr studio open` uses it")
     .prompt()?;
 
     if method == LOCAL_FILE {
@@ -87,8 +87,8 @@ fn init() -> Result<(), Error> {
     }
 
     document.save()?;
-    ui::print_success("Added [studio] to lpm.toml");
-    println!("Open the place any time with `lpm studio open`");
+    ui::print_success("Added [studio] to ember.toml");
+    println!("Open the place any time with `embr studio open`");
     Ok(())
 }
 
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn validates_place_files_on_disk() {
-        let dir = std::env::temp_dir().join("lpm-test-studio-place-file");
+        let dir = std::env::temp_dir().join("embr-test-studio-place-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn rojo_default_reads_default_project_json() {
-        let dir = std::env::temp_dir().join("lpm-test-studio-rojo-default");
+        let dir = std::env::temp_dir().join("embr-test-studio-rojo-default");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn rojo_default_falls_back_and_survives_bad_json() {
-        let dir = std::env::temp_dir().join("lpm-test-studio-rojo-fallback");
+        let dir = std::env::temp_dir().join("embr-test-studio-rojo-fallback");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

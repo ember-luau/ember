@@ -12,9 +12,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use commands::self_cmd::SelfCommand;
 
 #[derive(Parser, Debug)]
-#[command(name = "lpm", bin_name = "lpm", version, about, styles = ui::help_styles())]
+#[command(name = "embr", bin_name = "embr", version, about, styles = ui::help_styles())]
 struct Cli {
-    /** None is bare `lpm`, which prints the same help `-h` does rather than
+    /** None is bare `embr`, which prints the same help `-h` does rather than
     a usage error: it is what someone types when they want to see the tool. */
     #[command(subcommand)]
     command: Option<Commands>,
@@ -22,10 +22,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create an lpm.toml manifest in the current directory
+    /// Create an ember.toml manifest in the current directory
     Init,
 
-    /// Runs a script from lpm.toml, or lists them all when given no name
+    /// Runs a script from ember.toml, or lists them all when given no name
     Run(commands::run::RunArgs),
 
     /* the [scripts] names that double as subcommands, npm's
@@ -35,28 +35,28 @@ enum Commands {
     the list lives in commands::run::SHORTCUTS.
 
     hidden, npm's way: `npm start` works everywhere and is nobody's idea of a
-    command to look up. they belong to a project's [scripts], not to lpm's own
+    command to look up. they belong to a project's [scripts], not to embr's own
     surface, and listing five of them would say otherwise while telling a
-    project that defines none of them about commands it cannot run. `lpm run`
+    project that defines none of them about commands it cannot run. `embr run`
     lists what this project actually has, and `script_hint` points at these
     from the one place they get typed by mistake. */
-    /// Runs the `build` script from lpm.toml
+    /// Runs the `build` script from ember.toml
     #[command(hide = true)]
     Build(commands::run::ShortcutArgs),
 
-    /// Runs the `test` script from lpm.toml
+    /// Runs the `test` script from ember.toml
     #[command(hide = true)]
     Test(commands::run::ShortcutArgs),
 
-    /// Runs the `start` script from lpm.toml
+    /// Runs the `start` script from ember.toml
     #[command(hide = true)]
     Start(commands::run::ShortcutArgs),
 
-    /// Runs the `serve` script from lpm.toml
+    /// Runs the `serve` script from ember.toml
     #[command(hide = true)]
     Serve(commands::run::ShortcutArgs),
 
-    /// Runs the `fmt` (or `format`) script from lpm.toml
+    /// Runs the `fmt` (or `format`) script from ember.toml
     // plain alias, not visible_alias: nothing of this command is on display
     #[command(hide = true, alias = "format")]
     Fmt(commands::run::ShortcutArgs),
@@ -72,7 +72,7 @@ enum Commands {
         command: commands::studio::StudioCommand,
     },
 
-    /// Add a dependency to lpm.toml
+    /// Add a dependency to ember.toml
     Add(commands::add::AddArgs),
 
     /// Manage tooling used in the current project
@@ -87,24 +87,24 @@ enum Commands {
     #[command(arg_required_else_help = true)]
     Patch(commands::patch::PatchArgs),
 
-    /// Install dependencies and tools from lpm.toml
+    /// Install dependencies and tools from ember.toml
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 
-    /// Publish this package to the lpm registry
+    /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
 
-    /// Manage lpm's caches
+    /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
 
-    /// Manage this lpm installation
+    /// Manage this embr installation
     #[command(subcommand, name = "self")]
     SelfManage(SelfCommand),
 }
 
 fn main() {
-    /* tool shims are copies of lpm named after their alias. started under
+    /* tool shims are copies of embr named after their alias. started under
     one of those names, run the tool the surrounding manifest pins
     instead of the CLI. */
     if let Some(alias) = tools::shim::shim_alias() {
@@ -117,10 +117,10 @@ fn main() {
         }
     }
 
-    let args: Vec<std::ffi::OsString> = if tools::shim::invoked_as_lpx() {
-        /* lpx is `lpm execute` under its own name, a copy `self install`
-        drops beside lpm, so every argument belongs to execute */
-        let prefix: [std::ffi::OsString; 2] = ["lpm".into(), "execute".into()];
+    let args: Vec<std::ffi::OsString> = if tools::shim::invoked_as_embx() {
+        /* embx is `embr execute` under its own name, a copy `self install`
+        drops beside embr, so every argument belongs to execute */
+        let prefix: [std::ffi::OsString; 2] = ["embr".into(), "execute".into()];
         prefix
             .into_iter()
             .chain(std::env::args_os().skip(1))
@@ -129,10 +129,10 @@ fn main() {
         std::env::args_os().collect()
     };
 
-    /* the three ways to ask lpm itself for help, caught before clap so they
+    /* the three ways to ask embr itself for help, caught before clap so they
     get the logo layout instead of the plain one. anything longer is a
     question about a subcommand, and clap answers those as it always has:
-    `lpm add -h`, `lpm help tool`, `lpm tool add --help`. */
+    `embr add -h`, `embr help tool`, `embr tool add --help`. */
     if matches!(
         args.get(1).and_then(|arg| arg.to_str()),
         Some("-h" | "--help" | "help")
@@ -183,7 +183,7 @@ fn main() {
     }
 }
 
-/// parses, reporting a failure in lpm's own style rather than clap's.
+/// parses, reporting a failure in embr's own style rather than clap's.
 fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
     Cli::try_parse_from(args).unwrap_or_else(|err| report_parse_error(err))
 }
@@ -199,7 +199,7 @@ fn print_root_help() {
     /// narrower than this beside the logo and the help wraps into soup, so stack instead.
     const HELP_MIN: usize = 50;
 
-    /* the art is for a person looking at a terminal. redirected, `lpm --help`
+    /* the art is for a person looking at a terminal. redirected, `embr --help`
     is being read by something -- a pager, a grep, scripts/golden-cli.ps1 --
     and a logo down the left of every line is in its way. colour is gated
     separately, so NO_COLOR in a terminal still gets the layout, unpainted. */
@@ -274,7 +274,7 @@ fn print_root_help() {
         }
     }
 
-    // a closed pipe (`lpm | head`) is not an error
+    // a closed pipe (`embr | head`) is not an error
     if let Err(err) = std::io::stdout().write_all(out.as_bytes())
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
@@ -298,12 +298,12 @@ fn push_help_line(out: &mut String, line: &str, row: usize, rows: usize, color: 
     out.push_str(ui::RESET);
 }
 
-/** Points at `lpm run <name>` when the unrecognized subcommand turns out to
+/** Points at `embr run <name>` when the unrecognized subcommand turns out to
 be a script this project defines.
 
-Only four script names double as subcommands, so `lpm fmt` is a mistake
+Only four script names double as subcommands, so `embr fmt` is a mistake
 people will make -- and "unrecognized subcommand 'fmt'" is a bad answer when
-lpm.toml plainly has an `fmt` script. None for anything else, including a
+ember.toml plainly has an `fmt` script. None for anything else, including a
 name that is simply nobody's script, which keeps clap's own did-you-mean
 suggestion the only thing said about it. */
 fn script_hint(err: &clap::Error) -> Option<String> {
@@ -319,7 +319,7 @@ fn script_hint(err: &clap::Error) -> Option<String> {
     let manifest = project::manifest::Manifest::load().ok()?;
     manifest.scripts.contains_key(name).then(|| {
         format!(
-            "'{name}' is a script in lpm.toml; run it with `lpm run {name}` (only {} can drop `run`)",
+            "'{name}' is a script in ember.toml; run it with `embr run {name}` (only {} can drop `run`)",
             commands::run::shortcut_list()
         )
     })
@@ -381,27 +381,27 @@ mod tests {
         `Commands` variant fails here rather than at someone's terminal. */
         for name in commands::run::SHORTCUTS {
             assert!(
-                Cli::try_parse_from(["lpm", name]).is_ok(),
-                "`lpm {name}` should be a subcommand"
+                Cli::try_parse_from(["embr", name]).is_ok(),
+                "`embr {name}` should be a subcommand"
             );
-            // and it still takes trailing arguments, like `lpm run` does
-            assert!(Cli::try_parse_from(["lpm", name, "--watch"]).is_ok());
+            // and it still takes trailing arguments, like `embr run` does
+            assert!(Cli::try_parse_from(["embr", name, "--watch"]).is_ok());
         }
     }
 
     #[test]
     fn every_other_script_needs_run() {
         /* the point of a fixed list: a script named `lint` is reachable as
-        `lpm run lint` and nothing else, whatever lpm.toml says. */
-        assert!(Cli::try_parse_from(["lpm", "lint"]).is_err());
-        assert!(Cli::try_parse_from(["lpm", "run", "lint"]).is_ok());
+        `embr run lint` and nothing else, whatever ember.toml says. */
+        assert!(Cli::try_parse_from(["embr", "lint"]).is_err());
+        assert!(Cli::try_parse_from(["embr", "run", "lint"]).is_ok());
     }
 
     #[test]
     fn fmt_answers_to_both_spellings() {
         // as the subcommand, either way round
-        assert!(Cli::try_parse_from(["lpm", "fmt"]).is_ok());
-        assert!(Cli::try_parse_from(["lpm", "format"]).is_ok());
+        assert!(Cli::try_parse_from(["embr", "fmt"]).is_ok());
+        assert!(Cli::try_parse_from(["embr", "format"]).is_ok());
         // and as the script name the subcommand looks for
         assert_eq!(commands::run::FMT_NAMES, ["fmt", "format"]);
     }

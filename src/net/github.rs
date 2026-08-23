@@ -1,7 +1,7 @@
 /*!
-GitHub's REST API. The release endpoints for tool installs and `lpm self
+GitHub's REST API. The release endpoints for tool installs and `embr self
 update`, and the user lookup the OAuth device flow ends with. Publishing no
-longer touches GitHub, that goes through lpm's own registry API.
+longer touches GitHub, that goes through embr's own registry API.
 */
 
 const BASE_URL: &str = "https://api.github.com";

@@ -26,8 +26,12 @@ pub enum Refresh {
     Force,
 }
 
-/// default TTL. `LPM_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
+/// default TTL. `EMBER_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
 const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// the knob's name before the ember rename, still honoured for existing setups.
+const LEGACY_TTL_VAR: &str = "LPM_INDEX_TTL_SECS";
+const TTL_VAR: &str = "EMBER_INDEX_TTL_SECS";
 
 /** computed once per process. it never changes mid-run, and a malformed
 value should warn exactly once, not per index. a garbage value falls back
@@ -35,22 +39,27 @@ to the default *with* a warning, silently ignoring "-1" or "30s" would
 read as the variable doing nothing. */
 pub(crate) fn index_ttl() -> Duration {
     static TTL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *TTL.get_or_init(|| match std::env::var("LPM_INDEX_TTL_SECS") {
-        Err(_) => DEFAULT_INDEX_TTL,
-        Ok(value) => match value.trim().parse::<u64>() {
-            Ok(seconds) => Duration::from_secs(seconds),
-            Err(_) => {
-                eprintln!(
-                    "warning: LPM_INDEX_TTL_SECS is '{value}', not a whole number of seconds; using the default ({}s)",
-                    DEFAULT_INDEX_TTL.as_secs()
-                );
-                DEFAULT_INDEX_TTL
-            }
-        },
+    *TTL.get_or_init(|| {
+        let set = std::env::var(TTL_VAR)
+            .map(|value| (TTL_VAR, value))
+            .or_else(|_| std::env::var(LEGACY_TTL_VAR).map(|value| (LEGACY_TTL_VAR, value)));
+        match set {
+            Err(_) => DEFAULT_INDEX_TTL,
+            Ok((name, value)) => match value.trim().parse::<u64>() {
+                Ok(seconds) => Duration::from_secs(seconds),
+                Err(_) => {
+                    eprintln!(
+                        "warning: {name} is '{value}', not a whole number of seconds; using the default ({}s)",
+                        DEFAULT_INDEX_TTL.as_secs()
+                    );
+                    DEFAULT_INDEX_TTL
+                }
+            },
+        }
     })
 }
 
-/** A package index, a git repo cached under ~/.lpm/index-cache. Root
+/** A package index, a git repo cached under ~/.ember/index-cache. Root
 config.json means wally, root config.toml means pesde. */
 pub struct Index {
     url: String,
@@ -69,7 +78,7 @@ enum Kind {
 pub struct ResolvedPackage {
     pub version: semver::Version,
     /** Known from index metadata. None means inspect the archive after
-    extraction, lpm.toml -> pesde.toml -> wally.toml. */
+    extraction, ember.toml -> pesde.toml -> wally.toml. */
     pub environment: Option<Environment>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
@@ -85,7 +94,7 @@ pub struct TransitiveDependency {
 }
 
 /** Everything needed to re-download a resolved package, also stored in
-lpm.lock. Resolution bakes the full URL so --locked installs never consult
+ember.lock. Resolution bakes the full URL so --locked installs never consult
 an index. */
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -111,7 +120,7 @@ impl Index {
             Kind::Pesde(pesde::load_config(&root)?)
         } else {
             /* Empty or half-set-up index repo. a raw io error here would
-            read as an lpm bug rather than an index problem. */
+            read as an embr bug rather than an index problem. */
             return Err(Error::IndexFetch {
                 url: url.to_string(),
                 reason: "the index has no config.json or config.toml at its root".to_string(),
@@ -134,7 +143,7 @@ impl Index {
     }
 
     /** GitHub OAuth client id publishes authenticate against. Lives in the
-    index's config, not the binary. Wally indices carry one too, but lpm
+    index's config, not the binary. Wally indices carry one too, but embr
     never publishes to wally, so only pesde-format configs are consulted. */
     pub fn github_oauth_id(&self) -> Option<&str> {
         match &self.kind {
@@ -161,7 +170,7 @@ impl Index {
 }
 
 /** Downloads and extracts a resolved package into `dest`. All downloads are
-anonymous, lpm's registry serves tarballs from a public CDN and wally/pesde
+anonymous, ember's registry serves tarballs from a public CDN and wally/pesde
 registries are public too. If credentialed downloads ever come back, restore
 the old restraint of tokens only to GitHub-owned hosts, so an arbitrary
 registry url in an index entry can't harvest them. */
@@ -230,7 +239,7 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
 registry versions are immutable by policy, registries reject duplicate
 publishes, which is what makes caching by URL sound. `--refresh` is the
 escape hatch for the exceptions like takedowns or republished storage, and
-`lpm cache clean` drops everything. the bool is "these came from the
+`embr cache clean` drops everything. the bool is "these came from the
 cache", which decides whether an extract failure warrants a refetch. */
 fn fetch_archive(
     url: &str,
@@ -252,7 +261,7 @@ fn fetch_archive(
 
     /* caching is best-effort, a full disk or permission problem must not
     fail an install that already has the bytes in hand. no size budget or
-    eviction yet, `lpm cache clean` is the release valve. an
+    eviction yet, `embr cache clean` is the release valve. an
     extracted-file store shared across projects, pesde-style, is the
     natural next step if this ever needs more */
     if let Some(entry) = &entry {
@@ -417,7 +426,7 @@ pub fn is_fresh(url: &str) -> bool {
 }
 
 /// marks when an index cache last attempted a refresh, see `Refresh`.
-const REFRESH_STAMP: &str = ".lpm-refreshed";
+const REFRESH_STAMP: &str = ".ember-refreshed";
 
 /** whether `stamp` exists and is younger than `ttl`. a zero ttl is never
 fresh. also behind the tools module's latest-release stamps, which share
@@ -447,7 +456,7 @@ mod tests {
 
     #[test]
     fn archive_cache_verifies_what_it_returns() {
-        let dir = std::env::temp_dir().join("lpm-test-archive-cache");
+        let dir = std::env::temp_dir().join("embr-test-archive-cache");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let entry = dir.join("thing-0123");
@@ -485,7 +494,7 @@ mod tests {
 
     #[test]
     fn stamps_age_out_by_ttl() {
-        let dir = std::env::temp_dir().join("lpm-test-refresh-stamp");
+        let dir = std::env::temp_dir().join("embr-test-refresh-stamp");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let stamp = dir.join(REFRESH_STAMP);
@@ -522,7 +531,7 @@ mod tests {
     fn ttl_skips_pulls_and_failed_resolves_force_one() {
         /* the assertions below assume the default TTL. a dev running the
         suite with the knob exported gets a skip, not a bogus failure */
-        if std::env::var_os("LPM_INDEX_TTL_SECS").is_some() {
+        if std::env::var_os(TTL_VAR).is_some() || std::env::var_os(LEGACY_TTL_VAR).is_some() {
             return;
         }
 
@@ -536,7 +545,7 @@ mod tests {
             }
         }
 
-        let origin = std::env::temp_dir().join("lpm-test-ttl-origin");
+        let origin = std::env::temp_dir().join("embr-test-ttl-origin");
         let _ = fs::remove_dir_all(&origin);
         fs::create_dir_all(origin.join("acme")).unwrap();
         let url = origin.to_string_lossy().replace('\\', "/");
@@ -550,9 +559,9 @@ mod tests {
                 "-C",
                 origin.to_str().unwrap(),
                 "-c",
-                "user.name=lpm-test",
+                "user.name=embr-test",
                 "-c",
-                "user.email=lpm-test@localhost",
+                "user.email=embr-test@localhost",
             ];
             full.extend_from_slice(args);
             git::run(&full).unwrap();

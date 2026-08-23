@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Subcommand, Debug)]
 pub enum CacheCommand {
-    /// Delete the downloaded-archive and index caches under ~/.lpm
+    /// Delete the downloaded-archive and index caches under ~/.ember
     Clean,
 }
 
@@ -18,7 +18,7 @@ pub fn run(command: CacheCommand) -> Result<(), Error> {
 }
 
 /** both caches go, archives and index clones. removing the index root
-also sweeps orphaned index dirs left behind by older lpm versions that
+also sweeps orphaned index dirs left behind by older embr versions that
 keyed them differently. everything here re-downloads on demand. */
 fn clean() -> Result<(), Error> {
     let mut freed = 0;
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn sizes_directories_recursively() {
-        let base = std::env::temp_dir().join("lpm-test-cache-size");
+        let base = std::env::temp_dir().join("embr-test-cache-size");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("v1")).unwrap();
         fs::write(base.join("v1/a.bin"), [0u8; 100]).unwrap();

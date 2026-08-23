@@ -9,17 +9,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// github repo `self update` pulls releases from
-const REPO: &str = "luaupm/lpm";
+const REPO: &str = "embr/embr";
 
 #[derive(Subcommand, Debug)]
 pub enum SelfCommand {
-    /// Install lpm to ~/.lpm/bin and add it to your PATH
+    /// Install embr to ~/.ember/bin and add it to your PATH
     Install,
-    /// Update lpm to the latest GitHub release
+    /// Update embr to the latest GitHub release
     Update,
-    /// Remove lpm from your system
+    /// Remove embr from your system
     Uninstall,
-    /// Set up lpm.toml IntelliSense in VS Code
+    /// Set up ember.toml IntelliSense in VS Code
     Code,
 }
 
@@ -35,24 +35,24 @@ pub fn run(command: SelfCommand) -> Result<(), Error> {
 fn install() -> Result<(), Error> {
     let bin_dir = paths::bin_dir()?;
     fs::create_dir_all(&bin_dir)?;
-    let target = bin_dir.join(format!("lpm{}", env::consts::EXE_SUFFIX));
+    let target = bin_dir.join(format!("embr{}", env::consts::EXE_SUFFIX));
 
     let current = env::current_exe()?;
     if target.exists() && paths::same_file(&current, &target) {
-        println!("lpm is already installed at {}", target.display());
+        println!("embr is already installed at {}", target.display());
     } else {
         replace_binary(&current, &target)?;
         println!(
-            "Installed lpm v{} to {}",
+            "Installed embr v{} to {}",
             env!("CARGO_PKG_VERSION"),
             target.display()
         );
     }
 
-    /* lpx is `lpm execute` under its own name, so `lpx thing` runs things
+    /* embx is `embr execute` under its own name, so `embx thing` runs things
     npx-style. a copy of the binary, like the tool shims. */
-    if write_lpx_launcher(&bin_dir, &current) {
-        println!("Installed the lpx launcher beside it");
+    if write_embx_launcher(&bin_dir, &current) {
+        println!("Installed the embx launcher beside it");
     }
 
     add_to_path(&bin_dir)?;
@@ -60,7 +60,7 @@ fn install() -> Result<(), Error> {
     Ok(())
 }
 
-/** points a fresh install at `lpm self code` when there is a VS Code to
+/** points a fresh install at `embr self code` when there is a VS Code to
 point it at. it's the one setup step `self install` can't do for you --
 it edits an editor's settings, which is not something an install should
 decide -- and nothing else ever mentions it. silent when no flavor is
@@ -80,12 +80,12 @@ fn suggest_code_setup() {
     }
 
     println!(
-        "Detected {}; run `lpm self code` for lpm.toml autocomplete and validation",
+        "Detected {}; run `embr self code` for ember.toml autocomplete and validation",
         pending.join(", ")
     );
 }
 
-/// whether a settings.json already points at the lpm.toml schema. unreadable or absent reads as "not yet", the direction that suggests rather than hides.
+/// whether a settings.json already points at the ember.toml schema. unreadable or absent reads as "not yet", the direction that suggests rather than hides.
 fn schema_configured(settings: &Path) -> bool {
     fs::read_to_string(settings)
         .ok()
@@ -93,9 +93,9 @@ fn schema_configured(settings: &Path) -> bool {
         .is_some_and(|association| matches!(association, Association::Current))
 }
 
-/// "lpx.exe" on windows, "lpx" elsewhere.
-fn lpx_name() -> String {
-    format!("lpx{}", env::consts::EXE_SUFFIX)
+/// "embx.exe" on windows, "embx" elsewhere.
+fn embx_name() -> String {
+    format!("embx{}", env::consts::EXE_SUFFIX)
 }
 
 /** Puts `source` at `target`, replacing whatever is there, even while that
@@ -103,8 +103,8 @@ file is running.
 
 A plain copy opens the destination for writing, and on unix writing a file
 some process is currently executing fails with ETXTBSY -- "Text file busy".
-~/.lpm/bin/lpm is exactly that whenever another lpm is alive: a second
-terminal, a long `lpm run`, an lpx, a tool shim. Installing should not
+~/.ember/bin/embr is exactly that whenever another embr is alive: a second
+terminal, a long `embr run`, an embx, a tool shim. Installing should not
 require hunting those down first.
 
 So the new bytes land beside the target and a rename swaps the directory
@@ -141,20 +141,20 @@ fn replace_binary(source: &Path, target: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/** copies `source` over ~/.lpm/bin/lpx. best-effort with a warning: on
+/** copies `source` over ~/.ember/bin/embx. best-effort with a warning: on
 windows the launcher stays locked for as long as anything it started is
 still running, and that must never sink the install or update this rides
 along with. */
-fn write_lpx_launcher(bin_dir: &Path, source: &Path) -> bool {
-    let lpx = bin_dir.join(lpx_name());
-    /* the same running-binary problem as lpm itself, and more likely here:
-    an `lpx` in another terminal is a whole separate process holding it */
-    match replace_binary(source, &lpx) {
+fn write_embx_launcher(bin_dir: &Path, source: &Path) -> bool {
+    let embx = bin_dir.join(embx_name());
+    /* the same running-binary problem as embr itself, and more likely here:
+    an `embx` in another terminal is a whole separate process holding it */
+    match replace_binary(source, &embx) {
         Ok(()) => true,
         Err(error) => {
             eprintln!(
-                "warning: could not write the lpx launcher {}: {error}",
-                lpx.display()
+                "warning: could not write the embx launcher {}: {error}",
+                embx.display()
             );
             false
         }
@@ -170,26 +170,26 @@ fn update() -> Result<(), Error> {
 
     let latest = Version::parse(release.tag_name.trim_start_matches('v'))?;
     if latest <= current {
-        println!("lpm is already up to date");
-        /* installs from before lpx existed still gain the launcher here,
+        println!("embr is already up to date");
+        /* installs from before embx existed still gain the launcher here,
         so "run `self update`" is the whole migration story even for
         users already on the newest release */
         let bin_dir = paths::bin_dir()?;
         if bin_dir.is_dir()
-            && !bin_dir.join(lpx_name()).exists()
-            && write_lpx_launcher(&bin_dir, &env::current_exe()?)
+            && !bin_dir.join(embx_name()).exists()
+            && write_embx_launcher(&bin_dir, &env::current_exe()?)
         {
-            println!("Installed the lpx launcher (new in this version)");
+            println!("Installed the embx launcher (new in this version)");
         }
         return Ok(());
     }
 
     /* the zipped asset release.yml uploads. releases also carry the bare
-    binary, but only so an lpm from before the zip existed can still find
+    binary, but only so an embr from before the zip existed can still find
     something it understands and update INTO this one -- from here on the
-    zip is the only shape lpm reads, and the bare asset can stop being
+    zip is the only shape embr reads, and the bare asset can stop being
     published once nobody is left on a version that needs it */
-    let asset_name = format!("lpm-{}-{}.zip", env::consts::OS, env::consts::ARCH);
+    let asset_name = format!("embr-{}-{}.zip", env::consts::OS, env::consts::ARCH);
     let asset = release
         .assets
         .iter()
@@ -199,7 +199,7 @@ fn update() -> Result<(), Error> {
             asset: asset_name.clone(),
         })?;
 
-    println!("Downloading lpm v{latest}");
+    println!("Downloading embr v{latest}");
 
     let bytes = crate::net::http::get_bytes(&asset.browser_download_url, &[])?;
 
@@ -207,30 +207,30 @@ fn update() -> Result<(), Error> {
     stale after self_replace renames the running file out of the way,
     but the path keeps pointing at the freshly installed binary */
     let exe_path = env::current_exe()?;
-    let staging = env::temp_dir().join(format!("lpm-update-{}", std::process::id()));
+    let staging = env::temp_dir().join(format!("embr-update-{}", std::process::id()));
     // the staging dir goes whether or not the swap worked
     let replaced = unpack_update(&asset_name, &bytes, &staging)
         .and_then(|binary| Ok(self_replace::self_replace(&binary)?));
     let _ = fs::remove_dir_all(&staging);
     replaced?;
 
-    /* keep the lpx launcher, a copy of the binary, in step with what was
-    just installed. created on update too, so existing installs gain lpx
+    /* keep the embx launcher, a copy of the binary, in step with what was
+    just installed. created on update too, so existing installs gain embx
     without re-running `self install` */
     let bin_dir = paths::bin_dir()?;
     if bin_dir.is_dir() {
-        write_lpx_launcher(&bin_dir, &exe_path);
+        write_embx_launcher(&bin_dir, &exe_path);
     }
 
-    println!("Updated lpm v{current} -> v{latest}");
+    println!("Updated embr v{current} -> v{latest}");
     Ok(())
 }
 
-/** the new lpm binary, unpacked out of a release asset into `staging`.
+/** the new embr binary, unpacked out of a release asset into `staging`.
 
-releases ship `lpm-{os}-{arch}.zip` holding a bare `lpm[.exe]`, which is
-the shape rokit and mise will install lpm from -- they take archives, not
-loose binaries. so lpm now reads its own release the same way it reads
+releases ship `embr-{os}-{arch}.zip` holding a bare `embr[.exe]`, which is
+the shape rokit and mise will install embr from -- they take archives, not
+loose binaries. so embr now reads its own release the same way it reads
 every other tool's, through `tools::archive`.
 
 searched for by name rather than taken from the archive root, so an
@@ -241,12 +241,12 @@ fn unpack_update(asset_name: &str, bytes: &[u8], staging: &Path) -> Result<PathB
     let _ = fs::remove_dir_all(staging);
     fs::create_dir_all(staging)?;
 
-    let name = format!("lpm{}", env::consts::EXE_SUFFIX);
+    let name = format!("embr{}", env::consts::EXE_SUFFIX);
     /* `extract` sniffs magic bytes and writes anything that isn't an archive
     to the raw target as-is, which is right for a tool whose release really
     is a bare binary. it is not right here: our asset is an archive by
     contract, so bytes that aren't one are a truncated download or an error
-    page, and writing those over the running lpm would brick the install.
+    page, and writing those over the running embr would brick the install.
     parking them under a name the search below can't match turns that into
     the NoExecutableInAsset error instead. */
     crate::tools::archive::extract(asset_name, bytes, staging, &staging.join(".raw-asset"))?;
@@ -264,14 +264,14 @@ fn unpack_update(asset_name: &str, bytes: &[u8], staging: &Path) -> Result<PathB
 }
 
 fn uninstall() -> Result<(), Error> {
-    let dir = paths::lpm_dir()?;
+    let dir = paths::ember_dir()?;
     if !dir.exists() {
         return Err(Error::NotInstalled(dir));
     }
 
     inquire::set_global_render_config(crate::ui::render_config());
     let confirmed = inquire::Confirm::new(&format!("Remove {}?", dir.display()))
-        .with_help_message("Deletes lpm and removes it from your PATH")
+        .with_help_message("Deletes embr and removes it from your PATH")
         .with_default(false)
         .prompt()?;
     if !confirmed {
@@ -293,17 +293,17 @@ fn uninstall() -> Result<(), Error> {
     }
     fs::remove_dir_all(&dir)?;
 
-    println!("Uninstalled lpm");
+    println!("Uninstalled embr");
     Ok(())
 }
 
-/// canonical schema URL, served from the lpm website
+/// canonical schema URL, served from the embr website
 const SCHEMA_URL: &str = "https://luaupm.com/lpm.schema.json";
 /** the file-path pattern the schema is associated with. Even Better TOML
 keys its associations by regex over the absolute document URI, which uses
-forward slashes on every platform, so this matches lpm.toml after a path
-separator, but not e.g. not-lpm.toml. */
-const ASSOCIATION_PATTERN: &str = "(^|[/\\\\])lpm\\.toml$";
+forward slashes on every platform, so this matches ember.toml after a path
+separator, but not e.g. not-ember.toml. */
+const ASSOCIATION_PATTERN: &str = "(^|[/\\\\])embr\\.toml$";
 /// the Even Better TOML setting associations live under
 const ASSOCIATIONS_SETTING: &str = "evenBetterToml.schema.associations";
 /// the extension that reads the association, Taplo
@@ -343,7 +343,7 @@ const EDITORS: &[Editor] = &[
 ];
 
 /** points every detected VS Code flavor's settings.json at the hosted
-lpm.toml schema, so Even Better TOML provides completions and validation.
+ember.toml schema, so Even Better TOML provides completions and validation.
 settings.json is JSONC and hand-edited, so edits go through a CST that
 keeps comments and existing entries intact. the edited object may be
 reflowed to one key per line, that much is the CST's prerogative. */
@@ -371,7 +371,7 @@ fn code() -> Result<(), Error> {
             }
             Ok(Association::Added(_)) => {
                 crate::ui::print_success(&format!(
-                    "Pointed {} at the lpm.toml schema ({})",
+                    "Pointed {} at the ember.toml schema ({})",
                     editor.name,
                     settings.display()
                 ));
@@ -475,7 +475,7 @@ fn configure_settings(path: &Path) -> Result<Association, Error> {
 }
 
 /** writes through a sibling temp file + rename, so an interrupted write
-can't leave a truncated settings.json. unlike lpm's own files, it isn't in
+can't leave a truncated settings.json. unlike embr's own files, it isn't in
 version control. a symlinked settings.json from dotfile setups is resolved
 first so the rename lands on the real file instead of replacing the link. */
 fn write_settings(path: &Path, text: &str) -> std::io::Result<()> {
@@ -486,7 +486,7 @@ fn write_settings(path: &Path, text: &str) -> std::io::Result<()> {
     };
 
     let mut file_name = target.file_name().unwrap_or_default().to_os_string();
-    file_name.push(".lpm-tmp");
+    file_name.push(".ember-tmp");
     let staging = target.with_file_name(file_name);
 
     fs::write(&staging, text)?;
@@ -495,7 +495,7 @@ fn write_settings(path: &Path, text: &str) -> std::io::Result<()> {
     })
 }
 
-/** the pure edit. adds or repoints the lpm.toml association in JSONC text,
+/** the pure edit. adds or repoints the ember.toml association in JSONC text,
 touching nothing else, comments and existing entries survive. */
 fn upsert_association(text: &str) -> Result<Association, String> {
     use jsonc_parser::cst::{CstInputValue, CstRootNode};
@@ -580,14 +580,14 @@ fn add_to_path(bin_dir: &Path) -> Result<(), Error> {
     let new_path = if path.trim().is_empty() {
         dir.to_string()
     } else {
-        /* prepended so lpm's tool shims win over aftman/rokit shims for
+        /* prepended so embr's tool shims win over aftman/rokit shims for
         the same tools later in PATH */
         format!("{dir};{path}")
     };
     write_user_path(&env_key, &new_path)?;
 
     println!("Added {dir} to your PATH");
-    println!("Restart your terminal, then run `lpm --version` to verify");
+    println!("Restart your terminal, then run `embr --version` to verify");
     Ok(())
 }
 
@@ -697,10 +697,10 @@ mod tests {
 
     #[test]
     fn path_matching_ignores_case_and_padding() {
-        let path = r"C:\Windows;c:\users\me\.LPM\BIN ; C:\Tools";
-        assert!(path_contains(path, r"C:\Users\Me\.lpm\bin"));
+        let path = r"C:\Windows;c:\users\me\.EMBR\BIN ; C:\Tools";
+        assert!(path_contains(path, r"C:\Users\Me\.ember\bin"));
         assert!(path_contains(path, r"C:\Tools"));
-        assert!(!path_contains(path, r"C:\Users\Me\.lpm"));
+        assert!(!path_contains(path, r"C:\Users\Me\.ember"));
     }
 }
 
@@ -725,7 +725,7 @@ mod update_tests {
     }
 
     fn staging(name: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("lpm-test-update-{name}"));
+        let dir = env::temp_dir().join(format!("embr-test-update-{name}"));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -733,10 +733,10 @@ mod update_tests {
     #[test]
     fn takes_the_binary_out_of_a_release_zip() {
         let dir = staging("zip");
-        let binary = format!("lpm{}", env::consts::EXE_SUFFIX);
+        let binary = format!("embr{}", env::consts::EXE_SUFFIX);
 
         // the shape release.yml uploads: the binary alone, at the root
-        let found = unpack_update("lpm-linux-x86_64.zip", &zip_of(&[&binary]), &dir).unwrap();
+        let found = unpack_update("embr-linux-x86_64.zip", &zip_of(&[&binary]), &dir).unwrap();
         assert_eq!(found.file_name().unwrap().to_str().unwrap(), binary);
         assert!(found.starts_with(&dir));
         assert!(found.is_file());
@@ -754,22 +754,22 @@ mod update_tests {
     #[test]
     fn finds_the_binary_even_when_the_archive_nests_it() {
         let dir = staging("nested");
-        let binary = format!("lpm{}", env::consts::EXE_SUFFIX);
-        let nested = format!("lpm-linux-x86_64/{binary}");
+        let binary = format!("embr{}", env::consts::EXE_SUFFIX);
+        let nested = format!("embr-linux-x86_64/{binary}");
 
-        let found = unpack_update("lpm-linux-x86_64.zip", &zip_of(&[&nested]), &dir).unwrap();
+        let found = unpack_update("embr-linux-x86_64.zip", &zip_of(&[&nested]), &dir).unwrap();
         assert_eq!(found.file_name().unwrap().to_str().unwrap(), binary);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn an_archive_without_lpm_in_it_is_an_error_not_a_swap() {
+    fn an_archive_without_embr_in_it_is_an_error_not_a_swap() {
         /* the failure that matters: replacing the running binary with
         whatever happened to be in the archive would brick the install */
         let dir = staging("empty");
         assert!(matches!(
-            unpack_update("lpm-linux-x86_64.zip", &zip_of(&["README.md"]), &dir),
+            unpack_update("embr-linux-x86_64.zip", &zip_of(&["README.md"]), &dir),
             Err(Error::NoExecutableInAsset(_))
         ));
 
@@ -777,7 +777,7 @@ mod update_tests {
         error page -- must not be written over the running binary either */
         let raw = staging("raw");
         assert!(matches!(
-            unpack_update("lpm-linux-x86_64.zip", b"not an archive", &raw),
+            unpack_update("embr-linux-x86_64.zip", b"not an archive", &raw),
             Err(Error::NoExecutableInAsset(_))
         ));
 
@@ -806,7 +806,7 @@ mod code_tests {
             assert!(written.contains(SCHEMA_URL), "in {written:?}");
             // the written pattern is JSON-escaped, backslashes doubled
             assert!(
-                written.contains(r#"(^|[/\\\\])lpm\\.toml$"#),
+                written.contains(r#"(^|[/\\\\])embr\\.toml$"#),
                 "in {written:?}"
             );
         }
@@ -871,19 +871,19 @@ mod code_tests {
 
     #[test]
     fn repoints_an_outdated_url_and_reports_what_it_replaced() {
-        let outdated = added("{}").replace(SCHEMA_URL, "https://old.example.com/lpm.json");
+        let outdated = added("{}").replace(SCHEMA_URL, "https://old.example.com/embr.json");
         let (written, previous) = match upsert_association(&outdated).unwrap() {
             Association::Updated { text, previous } => (text, previous),
             _ => panic!("expected Updated"),
         };
         assert!(written.contains(SCHEMA_URL));
         assert!(!written.contains("old.example.com"));
-        assert_eq!(previous, "https://old.example.com/lpm.json");
+        assert_eq!(previous, "https://old.example.com/embr.json");
     }
 
     #[test]
     fn configures_a_settings_file_on_disk() {
-        let dir = std::env::temp_dir().join("lpm-test-self-code-configure");
+        let dir = std::env::temp_dir().join("embr-test-self-code-configure");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let settings = dir.join("settings.json");
@@ -923,7 +923,7 @@ mod code_tests {
     is not already pointed at the schema. */
     #[test]
     fn schema_setup_is_only_pending_until_it_is_done() {
-        let dir = std::env::temp_dir().join("lpm-test-self-code-pending");
+        let dir = std::env::temp_dir().join("embr-test-self-code-pending");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let settings = dir.join("settings.json");
@@ -948,7 +948,7 @@ mod code_tests {
 
     #[test]
     fn detects_editors_that_have_run() {
-        let root = std::env::temp_dir().join("lpm-test-self-code-detect");
+        let root = std::env::temp_dir().join("embr-test-self-code-detect");
         let _ = std::fs::remove_dir_all(&root);
         // Code has run, its User dir exists. Cursor is installed but never
         // ran, the rest are absent entirely.

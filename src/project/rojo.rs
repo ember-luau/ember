@@ -9,9 +9,9 @@ evaera/promise, whose project file is
 { "name": "promise", "tree": { "$path": "lib" } }
 ```
 
-extracted to `packages/shared/.lpm/evaera_promise/`, that mounts as a single
+extracted to `packages/shared/.ember/evaera_promise/`, that mounts as a single
 ModuleScript named `promise` while the generated wrapper requires
-`./.lpm/evaera_promise/lib`. the folder is renamed and the `lib` level is
+`./.ember/evaera_promise/lib`. the folder is renamed and the `lib` level is
 gone, so luau-lsp and Studio can't resolve the require, or any type
 re-exported through it, even though darklua maps the require by file path
 at runtime and works fine.
@@ -19,7 +19,7 @@ at runtime and works fine.
 so after extraction each project file is renamed to its folder and its mount
 re-nested under the same names the require path spells, keeping the tree
 keys and the require in lockstep. both come from `normalize_entry`.
-packages that ship no project file, every lpm-native one, already sync
+packages that ship no project file, every embr-native one, already sync
 that way and are left alone.
 
 that pass only covers what the project file already mounts. the `packages/`
@@ -289,7 +289,7 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/packages/shared/.lpm/{name}"))
+        std::path::PathBuf::from(format!("/packages/shared/.ember/{name}"))
     }
 
     fn rewrite(text: &str, folder: &str) -> Value {
@@ -311,11 +311,11 @@ mod tests {
     #[test]
     fn nests_a_folder_per_path_component() {
         let project = rewrite(
-            r#"{"name": "x", "tree": {"$path": "./out/lpm"}}"#,
+            r#"{"name": "x", "tree": {"$path": "./out/embr"}}"#,
             "acme_pkg",
         );
         assert_eq!(project["tree"]["out"]["$className"], "Folder");
-        assert_eq!(project["tree"]["out"]["lpm"]["$path"], "./out/lpm");
+        assert_eq!(project["tree"]["out"]["embr"]["$path"], "./out/embr");
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn rewrites_every_project_file_in_the_package() {
-        let base = std::env::temp_dir().join("lpm-test-rojo-mirror");
+        let base = std::env::temp_dir().join("embr-test-rojo-mirror");
         let _ = fs::remove_dir_all(&base);
         let package = base.join("evaera_promise");
         let nested = package.join("modules/testez");
@@ -445,7 +445,7 @@ mod tests {
 
     /// a package dir holding `files`, plus a linked dependency when `linked`.
     fn package_with(name: &str, files: &[(&str, &str)], linked: bool) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("lpm-test-rojo-{name}"));
+        let base = std::env::temp_dir().join(format!("embr-test-rojo-{name}"));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         for (path, contents) in files {
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn links_without_a_project_file_need_no_mount() {
-        // these mount from disk already, every lpm-native package
+        // these mount from disk already, every embr-native package
         let package = package_with("mount-native", &[("init.luau", "return {}\n")], true);
 
         let mut warnings = Vec::new();
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn a_package_without_project_files_is_untouched() {
-        let base = std::env::temp_dir().join("lpm-test-rojo-none");
+        let base = std::env::temp_dir().join("embr-test-rojo-none");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("src")).unwrap();
         fs::write(base.join("src/init.luau"), "return {}").unwrap();
