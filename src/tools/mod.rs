@@ -69,14 +69,28 @@ fn stored_executable(repository: &str, version: &str) -> Result<PathBuf, Error> 
     Ok(storage_dir(repository, version)?.join(executable_name(repo_short_name(repository))))
 }
 
+/** Whether a stored executable is present and runnable.
+
+`exists()` on its own is not enough. An install from before the compressed
+formats were sniffed left the asset itself at this path, and that file exists
+forever without ever running, so the cache hit repeats and the tool stays
+broken. Counting it as a miss re-downloads the release once and repairs the
+entry in place. */
+fn stored_is_usable(stored: &Path) -> bool {
+    stored.exists() && !archive::is_packed(stored)
+}
+
 /** whether a pinned tool is fully present, version stored and alias
 shimmed. the cheap check install's fast path runs instead of the full tool
-phase, a few stats, no network. */
+phase: a few stats, a 512-byte read per tool, no network. */
 pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
         return Err(Error::ReservedToolAlias(alias.to_string()));
     }
-    Ok(stored_executable(&tool.repository, &tool.version)?.exists() && shim::path(alias)?.exists())
+    Ok(
+        stored_is_usable(&stored_executable(&tool.repository, &tool.version)?)
+            && shim::path(alias)?.exists(),
+    )
 }
 
 /** Installs a manifest tool, skipping the network when the version is
@@ -87,7 +101,7 @@ pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool
         return Err(Error::ReservedToolAlias(alias.to_string()));
     }
     let stored = stored_executable(&tool.repository, &tool.version)?;
-    if stored.exists() {
+    if stored_is_usable(&stored) {
         shim::write(&shim::path(alias)?)?;
         return Ok(false);
     }
@@ -121,7 +135,7 @@ pub fn store_release(
     let repo = repo_short_name(repository);
 
     let stored = storage.join(executable_name(repo));
-    if stored.exists() {
+    if stored_is_usable(&stored) {
         return Ok((stored, false));
     }
 
@@ -157,7 +171,7 @@ pub fn store_release(
     /* a concurrent run may have stored this version while we downloaded.
     its copy of the same release is just as good, and possibly already
     executing, in which case deleting it would fail on windows anyway */
-    if stored.exists() {
+    if stored_is_usable(&stored) {
         return Ok((stored, true));
     }
 
@@ -182,7 +196,7 @@ pub fn ensure_stored(
     github: &GithubAPI,
 ) -> Result<PathBuf, Error> {
     let stored = stored_executable(repository, version)?;
-    if stored.exists() {
+    if stored_is_usable(&stored) {
         return Ok(stored);
     }
     let release = github.get_release(repository, version)?;
@@ -212,7 +226,7 @@ pub fn ensure_latest(
         Err(error) => {
             if let Some(version) = stamped_version(&stamp) {
                 let stored = stored_executable(repository, &version)?;
-                if stored.exists() {
+                if stored_is_usable(&stored) {
                     eprintln!(
                         "warning: could not check {repository} for a newer release ({error}); running {version}"
                     );
@@ -329,6 +343,28 @@ pub(crate) fn make_executable(_path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_archive_counts_as_a_cache_miss() {
+        let dir = std::env::temp_dir().join("embr-test-usable-stored");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let packed = dir.join("blink");
+        fs::write(&packed, [0xfd, b'7', b'z', b'X', b'Z', 0x00, 0x00, 0x04]).unwrap();
+        /* the entry exists, so every exists() check passed it and the tool
+        stayed broken. it has to read as a miss for the release to be
+        fetched again and the entry repaired. */
+        assert!(packed.exists());
+        assert!(!stored_is_usable(&packed));
+
+        let real = dir.join("stylua");
+        fs::write(&real, [0x7f, b'E', b'L', b'F', 2, 1, 1, 0]).unwrap();
+        assert!(stored_is_usable(&real));
+
+        assert!(!stored_is_usable(&dir.join("never-installed")));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn storage_paths_include_owner_repo_and_version() {

@@ -203,6 +203,40 @@ fn kind(name: &str, bytes: &[u8]) -> Kind {
     }
 }
 
+/** Whether a stored executable is really an archive.
+
+An install from before `kind` sniffed the compressed formats wrote the asset
+straight to the executable's path. The file is there, so every `exists()`
+cache hit fires, but running it fails with an exec format error and no later
+install ever repairs it. Archive magic at this path is proof that happened:
+no ELF, Mach-O, PE or `#!` script starts with one.
+
+Unreadable counts as false. A file that cannot be opened is a different
+problem, and re-downloading would not fix it. */
+pub fn is_packed(path: &Path) -> bool {
+    let Ok(head) = read_head(path) else {
+        return false;
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    /* looks_like_tar as well as kind: a bare tar has no leading magic, and
+    kind only falls back to the ".tar" name, which a stored executable never
+    carries. */
+    !matches!(kind(name, &head), Kind::Raw) || looks_like_tar(&head)
+}
+
+/// the first 512 bytes of `path`, covering every leading magic plus tar's at 257.
+fn read_head(path: &Path) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+
+    let mut head = vec![0u8; 512];
+    let read = fs::File::open(path)?.read(&mut head)?;
+    head.truncate(read);
+    Ok(head)
+}
+
 /// every regular file under `dir` with its size, recursively.
 pub fn collect_files(dir: &Path, files: &mut Vec<(PathBuf, u64)>) -> Result<(), Error> {
     for entry in fs::read_dir(dir)? {
@@ -370,6 +404,54 @@ mod tests {
         assert!(select_asset(&metadata_only, "linux", "x86_64").is_none());
         let wrong_os = assets(&["tool-windows-x86_64.zip"]);
         assert!(select_asset(&wrong_os, "linux", "x86_64").is_none());
+    }
+
+    /// a file holding `bytes`, to sniff as if it were an installed tool.
+    fn stored(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embr-test-packed-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // named like a real stored executable: no extension to give it away
+        let path = dir.join("blink");
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn an_archive_left_where_the_executable_goes_is_seen_as_packed() {
+        /* the 1axen/blink case: an install from before .tar.xz was sniffed
+        wrote the xz asset to the executable's path, and every run after it
+        failed with an exec format error. */
+        assert!(is_packed(&stored(
+            "xz",
+            &[0xfd, b'7', b'z', b'X', b'Z', 0x00, 0x00, 0x04]
+        )));
+        assert!(is_packed(&stored("gz", &[0x1f, 0x8b, 0x08, 0x00])));
+        assert!(is_packed(&stored("zip", b"PK\x03\x04rest of zip")));
+
+        // a bare tar carries no leading magic, so it is caught at offset 257
+        let mut tar = vec![0u8; 512];
+        tar[257..262].copy_from_slice(b"ustar");
+        assert!(is_packed(&stored("tar", &tar)));
+    }
+
+    #[test]
+    fn a_real_executable_is_never_seen_as_packed() {
+        assert!(!is_packed(&stored(
+            "elf",
+            &[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]
+        )));
+        assert!(!is_packed(&stored("pe", b"MZ\x90\x00rest of a pe")));
+        assert!(!is_packed(&stored("macho", &[0xcf, 0xfa, 0xed, 0xfe])));
+        assert!(!is_packed(&stored("script", b"#!/bin/sh\necho hi\n")));
+        // short files must not index past their end
+        assert!(!is_packed(&stored("tiny", b"hi")));
+    }
+
+    #[test]
+    fn an_unreadable_path_is_not_reported_as_packed() {
+        // re-downloading would not fix a missing file, so it is not a repair case
+        assert!(!is_packed(std::path::Path::new("/nope/not/here")));
     }
 
     #[test]
