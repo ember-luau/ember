@@ -14,8 +14,14 @@ pub fn logo(color: bool) -> String {
     render_gradient(LOGO, color)
 }
 
-/** the gradient colour of one row: pale rose at the top, through the brand
-accent in the middle, down to a deep crimson.
+/** the gradient colour of one row: gold at the top, through the brand accent
+in the middle, down to a deep ember.
+
+The hue travels, it is not one colour getting darker. A flame runs gold where
+it is hottest and deep red where it is spent, and the mark is a flame above a
+crate, so the ramp reads down the artwork the way heat does. A single-hue run
+from a pale tint to a dark shade renders the top rows as pastel, which is what
+this replaces.
 
 the help text beside the logo uses the same ramp for the same row, so the two
 columns read as one object lit from above rather than two things that happen
@@ -24,8 +30,8 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
     /* the ends stay off pure white and off near black on purpose: the help
     text is painted with this same ramp, and its first and last lines have to
     stay readable on a light terminal as well as a dark one */
-    const TOP: (u8, u8, u8) = (0xFF, 0xBC, 0xB0); // pale coral
-    const BOTTOM: (u8, u8, u8) = (0xA3, 0x22, 0x0B); // deep ember
+    const TOP: (u8, u8, u8) = (0xFF, 0xC2, 0x4A); // gold, the hot tip
+    const BOTTOM: (u8, u8, u8) = (0x8C, 0x16, 0x07); // deep ember, the coal
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let position = row.min(rows.saturating_sub(1)) as u32 * 1000 / last; // 0..=1000
@@ -138,8 +144,8 @@ mod tests {
         let middle = row_color(rows / 2, rows);
         let bottom = row_color(rows - 1, rows);
 
-        assert_eq!(top, (0xFF, 0xBC, 0xB0));
-        assert_eq!(bottom, (0xA3, 0x22, 0x0B));
+        assert_eq!(top, (0xFF, 0xC2, 0x4A));
+        assert_eq!(bottom, (0x8C, 0x16, 0x07));
         // the middle is the brand colour itself, near enough to see it
         let (r, g, b) = middle;
         assert!(
@@ -157,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_single_row_and_an_empty_ramp_do_not_divide_by_zero() {
-        assert_eq!(row_color(0, 1), (0xFF, 0xBC, 0xB0));
+        assert_eq!(row_color(0, 1), (0xFF, 0xC2, 0x4A));
         // rows past the end clamp rather than running off the ramp
         assert_eq!(row_color(99, 4), row_color(3, 4));
     }
