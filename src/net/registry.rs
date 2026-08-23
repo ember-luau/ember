@@ -1,5 +1,5 @@
 /*!
-lpm's own registry API at api.luaupm.com, the write side of publishing.
+embr's own registry API at api.luaupm.com, the write side of publishing.
 
 Reads never come here. Resolution and installs go through the git index
 clone and the CDN URLs baked into its entries, so they work even when the
@@ -29,7 +29,7 @@ struct ErrorBody {
 }
 
 /** Uploads a packed `.tar.gz` to `POST /v1/publish` as the given user.
-The API answers 401 bad token, 400 malformed tarball or lpm.toml, 403
+The API answers 401 bad token, 400 malformed tarball or ember.toml, 403
 scope owned by someone else since first publish claims a scope, 409
 version already exists, 413 over the size cap. `oidc_token` is the
 Actions provenance token when there is one. It rides along in its own

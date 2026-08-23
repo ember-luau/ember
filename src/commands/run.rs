@@ -9,22 +9,22 @@ use crate::{
 };
 use clap::Args;
 
-/** The `[scripts]` names that are also subcommands, so `lpm build` works
+/** The `[scripts]` names that are also subcommands, so `embr build` works
 without `run`. npm's idea, and deliberately npm's scale: a handful of verbs
 every project has, not every script. npm promotes `test`/`start`/`stop`/
 `restart`; the Luau equivalents of "the things you always have" are these.
 
 Widening this list later is harmless. Narrowing it breaks people, so it
-stays short. Everything outside it is `lpm run <name>`, which never stops
+stays short. Everything outside it is `embr run <name>`, which never stops
 working for the names that are in it either.
 
 Each entry needs a matching variant on `Commands` in main.rs, which
 `shortcuts_are_all_real_subcommands` there checks. */
 pub const SHORTCUTS: [&str; 5] = ["build", "test", "start", "serve", "fmt"];
 
-/** The script names `lpm fmt` will accept, in preference order. Both
+/** The script names `embr fmt` will accept, in preference order. Both
 spellings are common and neither is obviously right, so rather than make
-people remember which one lpm chose, `fmt` and `format` are accepted as the
+people remember which one embr chose, `fmt` and `format` are accepted as the
 subcommand (one is an alias of the other) and as the `[scripts]` key. */
 pub const FMT_NAMES: [&str; 2] = ["fmt", "format"];
 
@@ -38,19 +38,19 @@ pub fn shortcut_list() -> String {
 
 #[derive(Args, Debug)]
 #[command(after_long_help = "\
-With no script name, `lpm run` lists every [scripts] entry under three \
-headings: Scripts, which need `lpm run`; Lifecycle Scripts, whose names are \
-subcommands too; and Hooks, the pre/post entries lpm runs by itself.\n\n\
-A script hooks its own name: `lpm run build` runs `prebuild`, then `build`, \
+With no script name, `embr run` lists every [scripts] entry under three \
+headings: Scripts, which need `embr run`; Lifecycle Scripts, whose names are \
+subcommands too; and Hooks, the pre/post entries embr runs by itself.\n\n\
+A script hooks its own name: `embr run build` runs `prebuild`, then `build`, \
 then `postbuild`, using whichever of the three [scripts] defines. Hooks do \
 not nest, so `prebuild` is run as-is and no `preprebuild` is looked for.\n\n\
 Anything after the script name is appended to its command line, shell-quoted, \
-with an optional `--` separator: `lpm run build -- --watch` and `lpm build \
+with an optional `--` separator: `embr run build -- --watch` and `embr build \
 --watch` reach the script identically.\n\n\
 build, test, start, serve and fmt are also subcommands, so `run` is optional \
 for those five. Every other script needs it.")]
 pub struct RunArgs {
-    /// Name of the script under [scripts] in lpm.toml; omit to list them all
+    /// Name of the script under [scripts] in ember.toml; omit to list them all
     pub name: Option<String>,
 
     /// Extra arguments appended to the script's command line
@@ -66,7 +66,7 @@ pub struct ShortcutArgs {
     pub args: Vec<String>,
 }
 
-/** `lpm build` and friends, exactly `lpm run build` with the name baked in.
+/** `embr build` and friends, exactly `embr run build` with the name baked in.
 
 `names` is usually one name. Where it isn't, as with `fmt`/`format`, the
 first one the manifest actually defines wins, and the first overall is what
@@ -85,7 +85,7 @@ pub fn run(args: RunArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     match &args.name {
         Some(name) => script(&manifest, name, &args.args),
-        // bare `lpm run` is a question, not a mistake. npm answers it the same way
+        // bare `embr run` is a question, not a mistake. npm answers it the same way
         None => {
             list(&manifest);
             Ok(())
@@ -96,16 +96,16 @@ pub fn run(args: RunArgs) -> Result<(), Error> {
 /** How a `[scripts]` entry is reached, which is the only distinction worth
 drawing between them when listing.
 
-⚠ "Lifecycle" here means a script lpm gave a subcommand to, npm's sense of
+⚠ "Lifecycle" here means a script embr gave a subcommand to, npm's sense of
 the word in `npm run`'s output. That is NOT `hooks::Lifecycle`, which is one
 event's `pre`/`post` pair -- those land in [`Kind::Hook`]. */
 #[derive(Debug, PartialEq)]
 enum Kind {
-    /// reachable only as `lpm run <name>`.
+    /// reachable only as `embr run <name>`.
     Script,
     /// its name is also a subcommand, so `run` is optional.
     Lifecycle,
-    /// a `pre`/`post` hook: lpm runs it, nobody types it.
+    /// a `pre`/`post` hook: embr runs it, nobody types it.
     Hook,
 }
 
@@ -115,7 +115,7 @@ The `pre`/`post` test is deliberately not "starts with pre" -- a script
 named `prelude` or `postmortem` is a script, not a hook. What makes a name
 a hook is that something else answers to the rest of it: a command event,
 or another entry in this same table. That also means a `prebuild` with no
-`build` reads as plain, which is exactly right, since `lpm run prebuild` is
+`build` reads as plain, which is exactly right, since `embr run prebuild` is
 then the only way it ever runs. */
 fn kind(manifest: &Manifest, name: &str) -> Kind {
     let base = name
@@ -136,7 +136,7 @@ fn kind(manifest: &Manifest, name: &str) -> Kind {
 /// prints every `[scripts]` entry, grouped by how it is reached.
 fn list(manifest: &Manifest) {
     if manifest.scripts.is_empty() {
-        println!("No scripts in lpm.toml. Add some under [scripts]:");
+        println!("No scripts in ember.toml. Add some under [scripts]:");
         ui::print_script_entry("build", &["rojo build -o game.rbxl".to_string()]);
         return;
     }
@@ -144,7 +144,7 @@ fn list(manifest: &Manifest) {
     match manifest.id() {
         Some(id) => println!("Scripts in {id}"),
         // a consuming-only project has no [package] to name
-        None => println!("Scripts in lpm.toml"),
+        None => println!("Scripts in ember.toml"),
     }
 
     let mut scripts = Vec::new();
@@ -163,9 +163,9 @@ fn list(manifest: &Manifest) {
     never asked for. the dimmed hint carries what the heading alone can't,
     which is how you actually run the things underneath it */
     for (heading, hint, group) in [
-        ("Scripts", "lpm run <name>", scripts),
-        ("Lifecycle Scripts", "lpm <name>", lifecycle),
-        ("Hooks", "run by lpm", hooks),
+        ("Scripts", "embr run <name>", scripts),
+        ("Lifecycle Scripts", "embr <name>", lifecycle),
+        ("Hooks", "run by embr", hooks),
     ] {
         if group.is_empty() {
             continue;
@@ -198,7 +198,7 @@ fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error
     ui::print_script_notice(manifest.id().as_deref(), name, &commands);
 
     /* wait rather than exec. a failing script should exit with its own
-    code since CI reads it, and a successful one still gets lpm's "Done
+    code since CI reads it, and a successful one still gets embr's "Done
     in" line -- and, now, its `post<name>` hook. */
     let code = process::script(&commands)?;
     if code != 0 {
@@ -211,8 +211,8 @@ fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error
 
 /** Appends extra command line arguments to a script.
 
-npm's `--` separator is accepted and dropped, so `lpm run build -- --watch`
-and the bare `lpm build --watch` produce the same command line. Each argument
+npm's `--` separator is accepted and dropped, so `embr run build -- --watch`
+and the bare `embr build --watch` produce the same command line. Each argument
 is quoted for the platform shell: they arrive as one word each no matter what
 whitespace or shell syntax they contain, which is the whole point of having
 passed them as separate arguments. */
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn a_hook_with_nothing_to_hook_is_just_a_script() {
         /* `prebuild` without `build` never fires, so listing it as lifecycle
-        would promise a run that cannot happen. `lpm run prebuild` is the
+        would promise a run that cannot happen. `embr run prebuild` is the
         only way it goes, which is exactly what Plain says */
         let manifest = manifest("prebuild = \"a\"\n");
         assert_eq!(kind(&manifest, "prebuild"), Kind::Script);

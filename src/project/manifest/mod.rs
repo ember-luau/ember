@@ -6,14 +6,40 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-pub const MANIFEST_FILE: &str = "lpm.toml";
+pub const MANIFEST_FILE: &str = "ember.toml";
+
+/// the manifest's name before the ember rename. still read, never written.
+pub const LEGACY_MANIFEST_FILE: &str = "lpm.toml";
+
+/** The manifest to read inside `dir`.
+
+Prefers ember.toml, falls back to lpm.toml, so a project written before the
+rename keeps resolving without being touched. When neither is there it returns
+the ember.toml path, so the caller reports the current name as missing rather
+than the old one. */
+pub fn manifest_in(dir: &Path) -> std::path::PathBuf {
+    let current = dir.join(MANIFEST_FILE);
+    if current.exists() {
+        return current;
+    }
+    let legacy = dir.join(LEGACY_MANIFEST_FILE);
+    if legacy.exists() { legacy } else { current }
+}
+
+/// Whether `file` is a manifest under either name.
+pub fn is_manifest(file: &Path) -> bool {
+    matches!(
+        file.to_str(),
+        Some(name) if name == MANIFEST_FILE || name == LEGACY_MANIFEST_FILE
+    )
+}
 
 /// [indices] key used for dependencies that name no index.
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
-/** lpm's own package index, the fallback for dependencies naming no index when
+/** ember's own package index, the fallback for dependencies naming no index when
 the project defines no `default` one. pesde-format entries whose `download` URLs
-point at the registry CDN. written only by the lpm API at publish time, read by
+point at the registry CDN. written only by the ember API at publish time, read by
 the CLI like any other git index. */
 pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 
@@ -21,7 +47,7 @@ pub const DEFAULT_INDEX_URL: &str = "https://github.com/luaupm/index";
 pub struct Manifest {
     /** who this package is, for the registry. optional: a manifest that only
     consumes packages -- a game, an app, anything that never publishes -- has
-    nothing to put here. `lpm publish` is the one command that demands it, see
+    nothing to put here. `embr publish` is the one command that demands it, see
     [`Error::PackageMissing`]. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<Package>,
@@ -37,7 +63,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
     /** diffs applied to dependencies at install, "scope/name@version" ->
-    a repo-relative .patch file, written by `lpm patch commit`. root
+    a repo-relative .patch file, written by `embr patch commit`. root
     manifest only, same as [overrides]. a dependency's own table is never
     consulted, and publish strips it. keys parse with [`patch_key`],
     values validate with [`patch_path`]. */
@@ -45,10 +71,10 @@ pub struct Manifest {
     pub patches: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, Tool>,
-    /// shell commands runnable with `lpm run <name>`.
+    /// shell commands runnable with `embr run <name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scripts: BTreeMap<String, Script>,
-    /// what `lpm studio open` opens in Roblox Studio.
+    /// what `embr studio open` opens in Roblox Studio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub studio: Option<Studio>,
 }
@@ -68,7 +94,7 @@ that as `a & b & wait` is neither portable to Windows nor able to tag whose
 output is whose.
 
 The two forms are not the same execution model, which is the thing to know
-about them. One command inherits lpm's stdio outright, so a TTY stays a TTY
+about them. One command inherits embr's stdio outright, so a TTY stays a TTY
 and interactive programs work. Several have their output read through pipes
 so each line can be tagged, which costs them that. See `sys::process`. */
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -166,7 +192,7 @@ pub struct Target {
     #[serde(default, alias = "include", skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<String>,
     /** subtracted from whatever `includes` or the default walk selected, same
-    path-or-glob entries. lpm.toml always ships. */
+    path-or-glob entries. ember.toml always ships. */
     #[serde(default, alias = "exclude", skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<String>,
 }
@@ -232,8 +258,8 @@ impl Environment {
         }
     }
 
-    /// parses lpm's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
-    pub fn from_lpm(environment: &str) -> Result<Self, Error> {
+    /// parses embr's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
+    pub fn from_embr(environment: &str) -> Result<Self, Error> {
         match environment {
             "roblox" | "shared" => Ok(Environment::Roblox),
             "server" => Ok(Environment::Server),
@@ -260,7 +286,7 @@ pub struct Studio {
     /// place ID inside the universe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub place: Option<u64>,
-    /// path to a .rbxl/.rbxlx place file, relative to lpm.toml.
+    /// path to a .rbxl/.rbxlx place file, relative to ember.toml.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /** anything else written under [studio]. the table gets hand-edited a lot and
@@ -271,7 +297,7 @@ pub struct Studio {
     pub unknown: BTreeMap<String, toml::Value>,
 }
 
-/// a validated [studio] table, the one thing `lpm studio open` should open.
+/// a validated [studio] table, the one thing `embr studio open` should open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StudioTarget {
     /// published place, opened through the roblox-studio: protocol.
@@ -328,7 +354,7 @@ pub enum Dependency {
         name: String,
         /// semver requirement. "^" alone means "latest".
         version: String,
-        /// key into [indices]. None means the default luaupm index.
+        /// key into [indices]. None means the default embr index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
         /// see [`Dependency::target`]. kept unparsed so a typo reports itself
@@ -375,7 +401,7 @@ impl Dependency {
     other entry reaches the resolver with a context already inherited from
     the root of its subtree, and moving one out of that tree would strand
     its dependents: they link what is installed alongside them and nothing
-    else. so `target` on a specifier lpm only ever meets transitively --
+    else. so `target` on a specifier embr only ever meets transitively --
     an `[overrides]` value, or a workspace member's own dependency while
     the *root* installs -- has no effect. it is honored when that member
     installs itself, where the same entry is a direct dependency. */
@@ -391,7 +417,7 @@ impl Dependency {
     `Vow = { name = "synttx/vow", version = "^", entry = "src/vow" }`.
 
     which module inside the package its link file points at, for packages
-    that name none themselves and ship nothing lpm can guess from. it beats
+    that name none themselves and ship nothing embr can guess from. it beats
     both what the package declares and the guess, so it is also the way out
     of a guess that picked the wrong file.
 
@@ -420,7 +446,7 @@ impl Dependency {
 
 only the two Roblox trees can be chosen. the rest are runtimes -- moving a
 Roblox package into `lune` would put it where nothing that runs it lives,
-and lpm would have no way to tell that from a typo. */
+and embr would have no way to tell that from a typo. */
 pub fn dependency_target(
     alias: &str,
     dependency: &Dependency,
@@ -428,7 +454,7 @@ pub fn dependency_target(
     let Some(target) = dependency.target() else {
         return Ok(None);
     };
-    match Environment::from_lpm(target.trim()) {
+    match Environment::from_embr(target.trim()) {
         Ok(environment @ (Environment::Roblox | Environment::Server)) => Ok(Some(environment)),
         _ => Err(Error::DependencyTargetInvalid {
             alias: alias.to_string(),
@@ -446,7 +472,7 @@ paths are made of. values are either the alias of one of this manifest's
 own [dependencies] entries, `"Foo.Bar" = "Bar"` meaning use mine, or a
 full specifier.
 
-semantics under lpm's flat install model, plainly. an override redirects
+semantics under embr's flat install model, plainly. an override redirects
 that one edge. other dependents that ask for the original package by
 name keep it, and both packages then coexist in the set, each linked
 where it was asked for. only the root manifest's [overrides] is
@@ -563,7 +589,7 @@ pub fn workspace_version_req(
     })
 }
 
-/// a GitHub-released binary tool, written in lpm.toml as the single string "owner/repo@version" under [tools], the key being the alias.
+/// a GitHub-released binary tool, written in ember.toml as the single string "owner/repo@version" under [tools], the key being the alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
     /// "owner/repo" GitHub repository.
@@ -594,7 +620,7 @@ impl Tool {
     like "JohnnyMorganz/StyLua", so mostly the shape is validated, exactly one '/',
     both halves non-empty. backslashes and dot-only components are rejected.
     GitHub never allows them, and either could steer the storage path out of
-    ~/.lpm/tools on windows. */
+    ~/.ember/tools on windows. */
     pub fn split_repository(repository: &str) -> Result<(&str, &str), Error> {
         let valid =
             |half: &str| !half.is_empty() && half != "." && half != ".." && !half.contains('\\');
@@ -633,9 +659,9 @@ impl<'de> Deserialize<'de> for Tool {
 }
 
 impl Manifest {
-    /// loads the manifest from the current directory.
+    /// loads the manifest from the current directory, under either name.
     pub fn load() -> Result<Self, Error> {
-        Self::load_from(Path::new(MANIFEST_FILE))
+        Self::load_from(&manifest_in(Path::new("")))
     }
 
     /// member globs from [target] workspace. empty = not a workspace root.
@@ -679,7 +705,7 @@ impl Manifest {
     }
 
     /** resolves a dependency's `index` key to an index URL. no key = the `default`
-    entry under [indices] when the project defines one, lpm's own index otherwise. */
+    entry under [indices] when the project defines one, embr's own index otherwise. */
     pub fn index_url(&self, index: Option<&str>) -> Result<&str, Error> {
         match index {
             None => Ok(self
@@ -700,14 +726,14 @@ impl Manifest {
         self.package.as_ref().map(|package| package.name.as_str())
     }
 
-    /// "scope/name@version", how lpm names this package in its own output. None without a [package] table -- a consuming-only project has no such name.
+    /// "scope/name@version", how embr names this package in its own output. None without a [package] table -- a consuming-only project has no such name.
     pub fn id(&self) -> Option<String> {
         self.package
             .as_ref()
             .map(|package| format!("{}@{}", package.name, package.version))
     }
 
-    /** the `[scripts]` entry named `name`. read side only, used by `lpm run`.
+    /** the `[scripts]` entry named `name`. read side only, used by `embr run`.
     edits go through `edit::ManifestDoc`.
 
     An entry with nothing in it, `serve = []`, is refused rather than run as a
@@ -767,6 +793,45 @@ pub fn parse_version_req(req: &str) -> Result<semver::VersionReq, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// an empty dir holding the given manifest names.
+    fn scratch(name: &str, files: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embr-test-manifest-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in files {
+            std::fs::write(dir.join(file), "[dependencies]\n").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn the_current_manifest_wins_over_the_legacy_one() {
+        let dir = scratch("prefers-current", &[MANIFEST_FILE, LEGACY_MANIFEST_FILE]);
+        assert_eq!(manifest_in(&dir), dir.join(MANIFEST_FILE));
+    }
+
+    #[test]
+    fn a_project_from_before_the_rename_still_resolves() {
+        let dir = scratch("legacy-only", &[LEGACY_MANIFEST_FILE]);
+        assert_eq!(manifest_in(&dir), dir.join(LEGACY_MANIFEST_FILE));
+    }
+
+    #[test]
+    fn with_no_manifest_at_all_the_current_name_is_reported() {
+        let dir = scratch("neither", &[]);
+        // so "no ember.toml found" names the file the user should expect
+        assert_eq!(manifest_in(&dir), dir.join(MANIFEST_FILE));
+    }
+
+    #[test]
+    fn both_manifest_names_pack_and_publish_as_manifests() {
+        assert!(is_manifest(Path::new(MANIFEST_FILE)));
+        assert!(is_manifest(Path::new(LEGACY_MANIFEST_FILE)));
+        assert!(!is_manifest(Path::new("src/init.luau")));
+        // a nested manifest is a dependency's, not this project's
+        assert!(!is_manifest(Path::new("packages/dep/ember.toml")));
+    }
 
     #[test]
     fn parses_full_manifest() {
@@ -885,7 +950,7 @@ mod tests {
         )
         .unwrap();
 
-        // no `default` key, bare deps fall back to lpm's own index.
+        // no `default` key, bare deps fall back to embr's own index.
         assert_eq!(manifest.index_url(None).unwrap(), DEFAULT_INDEX_URL);
         assert_eq!(
             manifest.index_url(Some("wally")).unwrap(),
@@ -960,7 +1025,7 @@ mod tests {
             legacy.packages_out(Environment::Roblox),
             std::path::PathBuf::from("src/ReplicatedStorage/Packages")
         );
-        // and is rewritten under the new name whenever lpm writes the manifest
+        // and is rewritten under the new name whenever embr writes the manifest
         let serialized = toml::to_string(&legacy).unwrap();
         assert!(serialized.contains("roblox-packages-out"), "{serialized}");
         assert!(!serialized.contains("shared-packages-out"), "{serialized}");
@@ -991,16 +1056,16 @@ mod tests {
 
     /** the rename's compatibility contract. `shared` is what every manifest,
     lockfile and index entry published before it says, so it has to keep
-    parsing, in every reader -- while `roblox` is the only spelling lpm
+    parsing, in every reader -- while `roblox` is the only spelling embr
     writes, and the only folder name it installs into. */
     #[test]
     fn shared_is_still_read_as_roblox_everywhere() {
         assert_eq!(
-            Environment::from_lpm("shared").unwrap(),
+            Environment::from_embr("shared").unwrap(),
             Environment::Roblox
         );
         assert_eq!(
-            Environment::from_lpm("roblox").unwrap(),
+            Environment::from_embr("roblox").unwrap(),
             Environment::Roblox
         );
         assert_eq!(Environment::Roblox.dir_name(), "roblox");
@@ -1108,7 +1173,7 @@ mod tests {
             );
         }
 
-        // the key round-trips, so `lpm publish` doesn't silently drop it
+        // the key round-trips, so `embr publish` doesn't silently drop it
         let serialized = toml::to_string(&manifest).unwrap();
         assert!(serialized.contains(r#"target = "server""#), "{serialized}");
         let reparsed: Manifest = toml::from_str(&serialized).unwrap();
@@ -1357,14 +1422,14 @@ mod tests {
 
             [target]
             environment = "luau"
-            includes = ["src", "lpm.toml", "README.md"]
+            includes = ["src", "ember.toml", "README.md"]
             excludes = ["src/tests"]
             "#,
         )
         .unwrap();
 
         let target = manifest.target.as_ref().unwrap();
-        assert_eq!(target.includes, ["src", "lpm.toml", "README.md"]);
+        assert_eq!(target.includes, ["src", "ember.toml", "README.md"]);
         assert_eq!(target.excludes, ["src/tests"]);
 
         let serialized = toml::to_string(&manifest).unwrap();

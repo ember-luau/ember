@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# G2: captures every scrap of CLI text lpm can print without touching the
+# G2: captures every scrap of CLI text embr can print without touching the
 # network, so a build-configuration change can be shown not to have moved any
 # of it.
 #
 # The subcommand tree is walked, not hand-listed: `--help` is parsed for its own
-# Commands: block and each entry recursed into. lpm has three levels (main.rs,
+# Commands: block and each entry recursed into. embr has three levels (main.rs,
 # then cache/index/patch/self/studio/tool, then tool's own nested group), and a
 # hand-written list is exactly the thing that goes stale.
 #
@@ -14,7 +14,7 @@
 #
 # WHAT THIS DOES NOT COVER, so nobody mistakes a pass for more than it is:
 # interactive prompts (inquire/crossterm) are absent by design -- they would
-# block on stdin; the shim and lpx dispatch paths in main.rs key off the
+# block on stdin; the shim and embx dispatch paths in main.rs key off the
 # executable's own filename and are never entered here; `self install`,
 # `self code`, `studio open`, and `publish` appear only as help text, which
 # means both of the crate's `unsafe` blocks are outside this gate; the
@@ -35,7 +35,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-exe="$here/../target/release/lpm"
+exe="$here/../target/release/embr"
 out="$here/../.golden/current"
 baseline=""
 timeout_seconds=60
@@ -75,12 +75,12 @@ mkdir -p "$out"
 
 # Three sandboxes, because the error text depends on what is on disk and a
 # single empty directory collapses most failures into "no manifest found".
-sandbox_root="${TMPDIR:-/tmp}/lpm-golden-sandbox"
+sandbox_root="${TMPDIR:-/tmp}/embr-golden-sandbox"
 rm -rf "$sandbox_root"
 mkdir -p "$sandbox_root/empty" "$sandbox_root/project" "$sandbox_root/broken"
 # a valid manifest with no dependencies: reaches the errors that only fire once
 # a manifest has been found and parsed
-cat > "$sandbox_root/project/lpm.toml" <<'TOML'
+cat > "$sandbox_root/project/ember.toml" <<'TOML'
 [package]
 name = "golden/fixture"
 version = "0.1.0"
@@ -89,9 +89,9 @@ version = "0.1.0"
 environment = "roblox"
 TOML
 # and one that does not parse, for the manifest-error path
-printf '[package\nname = ' > "$sandbox_root/broken/lpm.toml"
+printf '[package\nname = ' > "$sandbox_root/broken/ember.toml"
 
-# $TMPDIR is a symlink on macOS, and lpm canonicalizes some paths and not
+# $TMPDIR is a symlink on macOS, and embr canonicalizes some paths and not
 # others, so both spellings of the sandbox get scrubbed.
 sandbox_real=$(cd "$sandbox_root" && pwd -P)
 
@@ -107,12 +107,12 @@ capture() {
     (cd "$work" && timeout "${timeout_seconds}s" "$exe" "$@" </dev/null) \
         >"$stdout" 2>"$stderr" || code=$?
     if [ "$code" = 124 ]; then
-        echo "lpm $* did not exit within ${timeout_seconds}s" >&2
+        echo "embr $* did not exit within ${timeout_seconds}s" >&2
         exit 1
     fi
 
     local text
-    text="\$ lpm $*   [$mode, sandbox: $sandbox]
+    text="\$ embr $*   [$mode, sandbox: $sandbox]
 exit: $code
 --- stdout ---
 $(cat "$stdout")
@@ -168,7 +168,7 @@ walk() {
 
 # Error paths, each pinned to the sandbox that reaches the code being tested.
 # Six of these used to run in an empty directory and all print the same "no
-# lpm.toml found" line; `tool install` used to be tested against a subcommand
+# ember.toml found" line; `tool install` used to be tested against a subcommand
 # that does not exist (it is `tool add`), so it only ever exercised clap.
 error_cases=(
     "err_unknown_command|empty|instal"

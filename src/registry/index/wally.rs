@@ -16,7 +16,7 @@ pub struct Config {
 }
 
 /** One JSON line of a wally index package file. Dev-dependencies aren't
-modeled, lpm never installs them. */
+modeled, embr never installs them. */
 #[derive(Deserialize)]
 struct Entry {
     package: EntryPackage,

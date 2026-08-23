@@ -65,8 +65,8 @@ jobs:
                  else $body
                end) as $description
             | {
-                username: "lpm",
-                avatar_url: "https://luaupm.com/lpm-logo.png",
+                username: "embr",
+                avatar_url: "https://luaupm.com/ember-logo.png",
                 # The role ping lives in content, above the embed. Discord only
                 # notifies when the message is first posted, so later PATCHes of
                 # the same message never re-ping. allowed_mentions pins the ping
@@ -79,11 +79,11 @@ jobs:
                   description: $description,
                   color: 15077448,
                   timestamp: ($release.published_at // $release.created_at),
-                  thumbnail: { url: "https://luaupm.com/lpm-logo.png" },
+                  thumbnail: { url: "https://luaupm.com/ember-logo.png" },
                   footer: {
                     text: (if $release.prerelease
-                             then "Pre-release · lpm self update stays on the latest stable"
-                             else "Update with: lpm self update"
+                             then "Pre-release · embr self update stays on the latest stable"
+                             else "Update with: embr self update"
                            end)
                   }
                 }]

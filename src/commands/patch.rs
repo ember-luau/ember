@@ -1,16 +1,16 @@
 /*!
-`lpm patch` edits a dependency's source and keeps the edit. `lpm patch
-scope/name` extracts a pristine working copy under .lpm-patch/, its own
+`embr patch` edits a dependency's source and keeps the edit. `embr patch
+scope/name` extracts a pristine working copy under .ember-patch/, its own
 little git repo so the published state is the baseline commit, the user
-edits it, `lpm patch commit` diffs it into patches/ and records the file
-under [patches] in lpm.toml, and every later install re-applies it. pnpm's
+edits it, `embr patch commit` diffs it into patches/ and records the file
+under [patches] in ember.toml, and every later install re-applies it. pnpm's
 patch/patch-commit and pesde's [patches] are the models.
 
 the working copy is the archive as published, download plus flatten, NOT
 the installed folder. rojo mirroring, require rewriting, and nested links
 all run after patching at install time, so patches survive changes to
-lpm's own transforms. that also means the copy won't be byte identical to
-what sits in packages/<env>/.lpm/.
+embr's own transforms. that also means the copy won't be byte identical to
+what sits in packages/<env>/.ember/.
 */
 
 use crate::error::Error;
@@ -27,7 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// where working copies live, relative to the project root.
-const WORK_DIR: &str = ".lpm-patch";
+const WORK_DIR: &str = ".ember-patch";
 
 /// where committed patch files live, relative to the project root.
 const PATCHES_DIR: &str = "patches";
@@ -49,7 +49,7 @@ pub struct PatchArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum PatchCommand {
-    /// Diff the working copy into patches/ and record it in lpm.toml
+    /// Diff the working copy into patches/ and record it in ember.toml
     Commit {
         /// Package the working copy belongs to, scope/name with optional @version
         spec: String,
@@ -71,7 +71,7 @@ pub fn run(args: PatchArgs) -> Result<(), Error> {
             let Some(spec) = args.spec else {
                 return Err(Error::PatchSpecInvalid {
                     spec: String::new(),
-                    reason: "name a package to patch, e.g. `lpm patch scope/name`".to_string(),
+                    reason: "name a package to patch, e.g. `embr patch scope/name`".to_string(),
                 });
             };
             start(&spec, args.force)
@@ -115,7 +115,7 @@ of it. several versions can't happen per install, but a multi target
 pesde package under two roots can, and that's refused, same rule the
 install side check enforces. */
 fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Error> {
-    let mut candidates: Vec<Located> = if Path::new(crate::project::lockfile::LOCKFILE).exists() {
+    let mut candidates: Vec<Located> = if crate::project::lockfile::lockfile_path().exists() {
         Lockfile::load()?
             .packages
             .into_iter()
@@ -153,7 +153,7 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
         return Err(Error::PatchSpecInvalid {
             spec: name.to_string(),
             reason: format!(
-                "{name} is not a dependency of this project (run `lpm install` first?)"
+                "{name} is not a dependency of this project (run `embr install` first?)"
             ),
         });
     }
@@ -224,7 +224,7 @@ fn slug(name: &str, version: &str) -> String {
     format!("{}@{version}", name.replace('/', "_"))
 }
 
-/** `lpm patch <spec>` extracts the published bytes into a working copy and
+/** `embr patch <spec>` extracts the published bytes into a working copy and
 hands the path to the user. */
 fn start(spec: &str, force: bool) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
@@ -266,9 +266,9 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
             /* a baseline commit needs an identity and must dodge user
             hooks and signing config, the working copy isn't a real repo */
             "-c",
-            "user.name=lpm",
+            "user.name=embr",
             "-c",
-            "user.email=lpm@luaupm.com",
+            "user.email=embr@luaupm.com",
             "-c",
             "commit.gpgsign=false",
             "commit",
@@ -284,12 +284,12 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
         located.version,
         dir.display()
     ));
-    println!("Edit it, then run `lpm patch commit {name}` to save the changes as a patch");
+    println!("Edit it, then run `embr patch commit {name}` to save the changes as a patch");
     remind_gitignore();
     Ok(())
 }
 
-/** `lpm patch commit <spec>` diffs the working copy against the published
+/** `embr patch commit <spec>` diffs the working copy against the published
 baseline, writes the patch, records it, cleans up. */
 fn commit(spec: &str) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
@@ -334,7 +334,7 @@ fn commit(spec: &str) -> Result<(), Error> {
     let file = Path::new(PATCHES_DIR).join(format!("{}.patch", slug(&name, &version)));
     fs::write(&file, &diff)?;
 
-    // forward slashes, the path lands in lpm.toml and should read the same everywhere
+    // forward slashes, the path lands in ember.toml and should read the same everywhere
     let recorded = format!("{PATCHES_DIR}/{}.patch", slug(&name, &version));
     let mut document = ManifestDoc::open(Scope::Project)?;
     document
@@ -345,11 +345,11 @@ fn commit(spec: &str) -> Result<(), Error> {
     fs::remove_dir_all(&dir)?;
 
     ui::print_success(&format!("Patched {name}@{version} -> {recorded}"));
-    println!("Run `lpm install` to apply it");
+    println!("Run `embr install` to apply it");
     Ok(())
 }
 
-/** `lpm patch remove <spec>` drops the entry and the file. */
+/** `embr patch remove <spec>` drops the entry and the file. */
 fn remove(spec: &str) -> Result<(), Error> {
     let (name, version) = parse_spec(spec)?;
 
@@ -357,7 +357,7 @@ fn remove(spec: &str) -> Result<(), Error> {
     let Some(table) = document.table("patches")? else {
         return Err(Error::PatchSpecInvalid {
             spec: spec.to_string(),
-            reason: "there is no [patches] table in lpm.toml".to_string(),
+            reason: "there is no [patches] table in ember.toml".to_string(),
         });
     };
 
@@ -458,17 +458,27 @@ fn find_working_copy(
     }
 }
 
-/** `lpm init` git-ignores .lpm-patch/ for new projects, existing ones get
+/** `embr init` git-ignores .ember-patch/ for new projects, existing ones get
 this nudge once a working copy appears. */
 fn remind_gitignore() {
     let Ok(contents) = fs::read_to_string(".gitignore") else {
         println!("Tip: add `{WORK_DIR}/` to .gitignore (working copies are scratch space)");
         return;
     };
+    /* the pre-rebrand name counts as ignored too: the tip is about whether
+    the working copies are out of git's way, and .lpm-patch/ still puts them
+    there for a project that has not been renamed. */
     let ignored = contents.lines().map(str::trim).any(|line| {
         matches!(
             line,
-            ".lpm-patch" | ".lpm-patch/" | "/.lpm-patch" | "/.lpm-patch/"
+            ".ember-patch"
+                | ".ember-patch/"
+                | "/.ember-patch"
+                | "/.ember-patch/"
+                | ".lpm-patch"
+                | ".lpm-patch/"
+                | "/.lpm-patch"
+                | "/.lpm-patch/"
         )
     });
     if !ignored {
@@ -517,7 +527,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let base = std::env::temp_dir().join("lpm-test-patch-roundtrip");
+        let base = std::env::temp_dir().join("embr-test-patch-roundtrip");
         let _ = fs::remove_dir_all(&base);
 
         let write = |dir: &Path, file: &str, contents: &str| {
@@ -544,9 +554,9 @@ mod tests {
             "-C",
             &in_work,
             "-c",
-            "user.name=lpm",
+            "user.name=embr",
             "-c",
-            "user.email=lpm@luaupm.com",
+            "user.email=embr@luaupm.com",
             "-c",
             "commit.gpgsign=false",
             "commit",

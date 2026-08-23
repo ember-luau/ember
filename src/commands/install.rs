@@ -25,9 +25,9 @@ use std::time::Instant;
 
 #[derive(Args, Debug)]
 #[command(after_long_help = "\
-When lpm.toml, lpm.lock, and the global tools file are unchanged since the \
+When ember.toml, ember.lock, and the global tools file are unchanged since the \
 last successful install, `install` trusts the lockfile: within the index \
-TTL (5 minutes; LPM_INDEX_TTL_SECS overrides) it skips everything, and \
+TTL (5 minutes; EMBER_INDEX_TTL_SECS overrides) it skips everything, and \
 past it, it re-checks the indices so `^` requirements still pick up new \
 releases, rebuilding only when something actually resolved differently. \
 Two things this check cannot see: hand-edits inside an installed packages \
@@ -35,7 +35,7 @@ folder, and a repository that commits its packages folders (those packages \
 really are present, and tools still verify). --refresh forces the full \
 pipeline.")]
 pub struct InstallArgs {
-    /// Install exactly what lpm.lock records, without re-resolving
+    /// Install exactly what ember.lock records, without re-resolving
     #[arg(long)]
     pub locked: bool,
 
@@ -73,10 +73,15 @@ struct JobPatch {
 /// how many packages download and unpack at once.
 const WORKERS: usize = 8;
 
-/// stamp file the fast path reads, under each `<out>/.lpm/`.
+/// stamp file the fast path reads, under each `<out>/.ember/`.
 const STATE_FILE: &str = ".state";
 
-/// alias, pinned tool, and whether the pin came from ~/.lpm/tools.toml.
+/// the per-environment package store inside `packages/`.
+const STORE_DIR: &str = ".ember";
+/// what that store was called before the ember rename. removed on install.
+const LEGACY_STORE_DIR: &str = ".lpm";
+
+/// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
@@ -270,7 +275,7 @@ fn install_project(
     /* extraction can happen before we know the environment and so the
     output folder, so stage in a project local temp dir. a rename then
     moves it into place, same filesystem as the outputs */
-    let staging = Path::new(".lpm-staging").to_path_buf();
+    let staging = Path::new(".ember-staging").to_path_buf();
     let packages_started = Instant::now();
     if !jobs.is_empty() {
         section("Installing packages", &mut printed);
@@ -299,7 +304,7 @@ fn install_project(
                 _ => (
                     manifest
                         .packages_out(package.context())
-                        .join(".lpm")
+                        .join(STORE_DIR)
                         .join(package.name.replace('/', "_")),
                     false,
                 ),
@@ -327,13 +332,13 @@ fn install_project(
     let environments: BTreeSet<Environment> =
         locked.iter().map(|package| package.context()).collect();
     if !args.locked {
-        // written even when empty, so lpm.lock always mirrors the manifest
+        // written even when empty, so ember.lock always mirrors the manifest
         Lockfile::new(locked).save()?;
     }
 
     /* tool versions are exact pins, so no lockfile entries. normal and
     --locked runs install them the same way. global tools from
-    ~/.lpm/tools.toml install here too, `tool add` never downloads, this
+    ~/.ember/tools.toml install here too, `tool add` never downloads, this
     is the one place every tool gets installed */
     let tool_jobs = tool_jobs(manifest, include_global_tools)?;
     let tool_count = tool_jobs.len();
@@ -396,7 +401,7 @@ fn tool_jobs(
 
 /** what the fast path saw when it decided to skip, one hash over every
 local input that can change what an install produces. coarse on purpose,
-a comment edit in lpm.toml busts the fast path and wastes a few
+a comment edit in ember.toml busts the fast path and wastes a few
 milliseconds, anything finer risks missing an input and breaking an
 install. */
 fn state_hash(
@@ -417,7 +422,7 @@ fn state_hash(
     project's first install under the new binary misses its old stamps and
     rebuilds into the new layout. the fast path can't skip past a
     migration it can't see in its inputs */
-    format!("lpm-state-v2:{hash:016x}\n")
+    format!("ember-state-v3:{hash:016x}\n")
 }
 
 /** the manifest and global tools inputs of the state hash, as text. read
@@ -426,11 +431,12 @@ never be stamped as satisfied. None means an input exists but can't be
 read, the fast path then stays off, the safe direction.
 
 member installs don't consume global tools (include_global = false), so
-those hash a fixed marker instead of the file, editing ~/.lpm/tools.toml
+those hash a fixed marker instead of the file, editing ~/.ember/tools.toml
 shouldn't wipe and rebuild every member of a workspace. absence is a
 distinct marker too, not an empty string. */
 fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
-    let manifest_text = fs::read_to_string(crate::project::manifest::MANIFEST_FILE).ok()?;
+    let manifest_text =
+        fs::read_to_string(crate::project::manifest::manifest_in(Path::new(""))).ok()?;
     let tools_text = if include_global {
         let path = paths::global_tools_file().ok()?;
         if path.exists() {
@@ -446,7 +452,7 @@ fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
 }
 
 /** the [patches] files' bytes, concatenated in manifest key order, so
-editing a patch file without touching lpm.toml still busts the fast path.
+editing a patch file without touching ember.toml still busts the fast path.
 a missing file is a distinct marker, not an empty string, same discipline
 as the global tools file's `<absent>`. */
 fn patches_state_text(manifest_text: &str) -> String {
@@ -471,7 +477,7 @@ fn patches_state_text(manifest_text: &str) -> String {
 /// the full state hash as things stand right now, None if any input is unreadable.
 fn current_state_hash(include_global: bool) -> Option<String> {
     let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
-    let lock_text = fs::read_to_string(crate::project::lockfile::LOCKFILE).ok()?;
+    let lock_text = fs::read_to_string(crate::project::lockfile::lockfile_path()).ok()?;
     Some(state_hash(
         &manifest_text,
         &lock_text,
@@ -545,7 +551,7 @@ fn fast_path(
     for environment in environments {
         let stamp = manifest
             .packages_out(environment)
-            .join(".lpm")
+            .join(STORE_DIR)
             .join(STATE_FILE);
         if fs::read_to_string(&stamp).ok().as_deref() != Some(hash.as_str()) {
             return Ok(FastPath::Full);
@@ -765,7 +771,7 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
 
 /** refuses an install whose contexts map to one output folder. `[config]`
 lets users repoint each environment's out dir, and two contexts sharing a
-folder would race their `.lpm` stores against each other. */
+folder would race their `.ember` stores against each other. */
 fn assert_distinct_roots(manifest: &Manifest, jobs: &[Job]) -> Result<(), Error> {
     let contexts: Vec<Environment> = jobs
         .iter()
@@ -819,20 +825,20 @@ it: a whole stale tree of link files, which editors go on autocompleting
 and Rojo goes on syncing. so the first install after the rename takes it
 away, and every install after that finds nothing to do.
 
-two things keep this from touching anything that isn't lpm's. the folder
-must still hold the `.lpm` store an install put there, and no [config] key
+two things keep this from touching anything that isn't embr's. the folder
+must still hold the `.ember` store an install put there, and no [config] key
 may still point an environment at it -- `shared-packages-out` is a
 supported spelling, and a project that aims one at this exact path means
 it. best-effort: a failure to remove costs a stale folder, not an
 install.
 
 said out loud, not swept quietly. the project's own source and Rojo files
-may spell `packages/shared` in requires and `$path`s that lpm cannot
+may spell `packages/shared` in requires and `$path`s that embr cannot
 rewrite, so the one build this breaks has to arrive with its reason
 attached. returns whether it removed anything. */
 fn remove_legacy_roblox_out(manifest: &Manifest) -> bool {
     let legacy = Path::new("packages").join("shared");
-    if !legacy.join(".lpm").is_dir() {
+    if !legacy.join(STORE_DIR).is_dir() && !legacy.join(LEGACY_STORE_DIR).is_dir() {
         return false;
     }
     // unresolvable paths can't be compared, so nothing may be removed on them
@@ -867,14 +873,19 @@ fn write_state_stamps(
     let Some((manifest_text, tools_text, patches_text)) = inputs else {
         return;
     };
-    let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::LOCKFILE) else {
+    let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::lockfile_path()) else {
         return;
     };
     let hash = state_hash(manifest_text, &lock_text, tools_text, patches_text);
     for environment in environments {
-        let dir = manifest.packages_out(*environment).join(".lpm");
+        let out = manifest.packages_out(*environment);
+        let dir = out.join(STORE_DIR);
         if fs::create_dir_all(&dir).is_ok() {
             let _ = fs::write(dir.join(STATE_FILE), &hash);
+            /* the store moved with the rename. what it held is regenerated
+            scratch, so the old one goes rather than sitting dead under
+            packages/. best-effort: a failure costs a stale folder. */
+            let _ = fs::remove_dir_all(out.join(LEGACY_STORE_DIR));
         }
     }
 }
@@ -884,7 +895,7 @@ caller owns the bar's lifecycle so it gets cleared on errors too.
 
 registry packages fan out over a small thread pool. each worker owns one
 job at a time end to end, download, extract, rewrite, parse, under its
-own staging dir, so nothing is shared but the target `.lpm` parents. this
+own staging dir, so nothing is shared but the target `.ember` parents. this
 thread keeps the bar, writes the link files, and fills `locked` by job
 index, so lockfile order is exactly the resolver's order no matter who
 finishes first. on the first error the pool stops taking work, in-flight
@@ -980,7 +991,7 @@ fn install_packages(
                     let shown = job
                         .link
                         .clone()
-                        .unwrap_or_else(|| format!(".lpm/{}", job.name.replace('/', "_")));
+                        .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
                     ui::bar_println(
                         bar,
                         &ui::success_line(&format!(
@@ -1014,14 +1025,14 @@ fn install_packages(
     if let Some(error) = first_error {
         return Err(error);
     }
-    /* every slot must have reported. a hole here is an lpm bug, and
+    /* every slot must have reported. a hole here is an embr bug, and
     silently writing a shorter lockfile would be far worse than failing */
     slots
         .into_iter()
         .map(|slot| {
             slot.ok_or_else(|| {
                 Error::Io(std::io::Error::other(
-                    "an install worker never reported its result; please report this as an lpm bug",
+                    "an install worker never reported its result; please report this as an embr bug",
                 ))
             })
         })
@@ -1063,22 +1074,22 @@ fn install_one(
     }
 
     /* indices usually know the environment, otherwise ask the files,
-    lpm.toml then pesde.toml then wally.toml */
+    ember.toml then pesde.toml then wally.toml */
     let environment = match job.environment {
         Some(environment) => environment,
         None => package::environment(staging)
             .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
     };
 
-    /* real contents live under <out>/.lpm/<scope>_<name>/ where <out> is
+    /* real contents live under <out>/.ember/<scope>_<name>/ where <out> is
     the CONTEXT's folder, not the package's own environment. each root is
     self contained, so a server package's roblox deps stay under server.
-    workers race to create the same .lpm parent, create_dir_all treats
+    workers race to create the same .ember parent, create_dir_all treats
     existing as success, and Windows occasionally answers concurrent
     creation or a fresh rename with a transient denial worth one retry */
     let folder = job.name.replace('/', "_");
     let out = manifest.packages_out(job.context);
-    let storage = out.join(".lpm").join(&folder);
+    let storage = out.join(STORE_DIR).join(&folder);
     with_retry(|| fs::create_dir_all(storage.parent().expect("storage dir has a parent")))?;
     if storage.exists() {
         with_retry(|| fs::remove_dir_all(&storage))?;
@@ -1151,7 +1162,7 @@ fn write_registry_link(
     Ok(())
 }
 
-/** workspace members link in place, no download, no copy under .lpm/,
+/** workspace members link in place, no download, no copy under .ember/,
 so edits to the member are picked up without reinstalling, like pesde's
 symlinks. */
 fn link_workspace_member(
@@ -1219,7 +1230,7 @@ fn link_workspace_member(
 struct StoredPackage {
     /// lowercased "scope/name", the form dependency declarations resolve by
     name: String,
-    /// where the contents live, <context out>/.lpm/<scope>_<name> or a member's own directory
+    /// where the contents live, <context out>/.ember/<scope>_<name> or a member's own directory
     storage: PathBuf,
     /// the package's own environment, names the nested link folder dependents use
     environment: Environment,
@@ -1501,7 +1512,7 @@ fn install_tools(jobs: &[ToolJob], bar: &ProgressBar) -> Result<(), Error> {
         if let Some(shadow) = tools::shim::shadowing_executable(alias) {
             bar.suspend(|| {
                 eprintln!(
-                    "warning: `{alias}` resolves to {} on PATH before lpm's shims; that copy will run instead",
+                    "warning: `{alias}` resolves to {} on PATH before embr's shims; that copy will run instead",
                     shadow.display()
                 )
             });
@@ -1519,7 +1530,7 @@ mod tests {
     #[test]
     fn state_hash_tracks_every_input() {
         let base = state_hash("manifest", "lock", "tools", "patches");
-        assert!(base.starts_with("lpm-state-v2:"));
+        assert!(base.starts_with("ember-state-v3:"));
         assert_eq!(base, state_hash("manifest", "lock", "tools", "patches"));
 
         // each input moves the hash, and boundaries are unambiguous
@@ -1536,7 +1547,7 @@ mod tests {
 
     #[test]
     fn patch_state_text_reads_the_files_in_key_order() {
-        let base = std::env::temp_dir().join("lpm-test-patch-state");
+        let base = std::env::temp_dir().join("embr-test-patch-state");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("patches")).unwrap();
         fs::write(base.join("patches/b.patch"), "bbb").unwrap();
@@ -1597,7 +1608,7 @@ mod tests {
 
     #[test]
     fn patches_attach_before_anything_downloads_or_not_at_all() {
-        let base = std::env::temp_dir().join("lpm-test-attach-patches");
+        let base = std::env::temp_dir().join("embr-test-attach-patches");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("patches")).unwrap();
         fs::write(base.join("patches/traits.patch"), "diff").unwrap();
@@ -1703,7 +1714,7 @@ mod tests {
 
     #[test]
     fn one_name_at_two_versions_across_contexts_is_drift_not_a_half_patch() {
-        let base = std::env::temp_dir().join("lpm-test-partial-patch");
+        let base = std::env::temp_dir().join("embr-test-partial-patch");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("patches")).unwrap();
         fs::write(base.join("patches/traits.patch"), "diff").unwrap();
@@ -1748,9 +1759,9 @@ mod tests {
         if !git::available() {
             return;
         }
-        let base = std::env::temp_dir().join("lpm-test-apply-enclosed");
+        let base = std::env::temp_dir().join("embr-test-apply-enclosed");
         let _ = fs::remove_dir_all(&base);
-        let staging = base.join("project/.lpm-staging/pkg");
+        let staging = base.join("project/.ember-staging/pkg");
         fs::create_dir_all(staging.join("src")).unwrap();
         // the trap, an enclosing repo above the staging dir
         git::run(&[
@@ -1802,7 +1813,7 @@ mod tests {
 
     #[test]
     fn locked_patches_verify_the_recorded_bytes() {
-        let base = std::env::temp_dir().join("lpm-test-locked-patch");
+        let base = std::env::temp_dir().join("embr-test-locked-patch");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let file = base.join("x.patch");
@@ -1955,7 +1966,7 @@ mod tests {
 
     #[test]
     fn top_level_links_are_for_direct_dependencies_only() {
-        let base = std::env::temp_dir().join("lpm-test-top-links");
+        let base = std::env::temp_dir().join("embr-test-top-links");
         let _ = fs::remove_dir_all(&base);
         let out = base.join("packages/roblox");
         fs::create_dir_all(&out).unwrap();
@@ -1988,7 +1999,7 @@ mod tests {
         // a direct dependency gets its consumer-level link
         write_registry_link(&manifest, &job(Some("thing")), &extracted(Some("")), &bar).unwrap();
         let link = fs::read_to_string(out.join("thing.luau")).unwrap();
-        assert!(link.contains("./.lpm/acme_thing"), "{link}");
+        assert!(link.contains("./.ember/acme_thing"), "{link}");
 
         // a transitive writes nothing at the top level
         write_registry_link(&manifest, &job(None), &extracted(Some("")), &bar).unwrap();
@@ -2047,15 +2058,15 @@ mod tests {
     }
 
     /** the one destructive path this rename added. it must take the store
-    an older lpm left behind, and nothing else: not a folder of the user's
+    an older embr left behind, and nothing else: not a folder of the user's
     own that happens to sit there, and not the output folder of a project
     that deliberately still points an environment at that path. */
     #[test]
-    fn the_legacy_output_folder_goes_only_when_it_is_lpm_s() {
+    fn the_legacy_output_folder_goes_only_when_it_is_embr_s() {
         /* a [package] table neither case cares about, so the fixture stays
-        readable to any lpm: what this varies is [config] */
+        readable to any embr: what this varies is [config] */
         const PACKAGE: &str = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
-        let base = std::env::temp_dir().join("lpm-test-legacy-out");
+        let base = std::env::temp_dir().join("embr-test-legacy-out");
         let plain: Manifest = toml::from_str(PACKAGE).unwrap();
         let claimed: Manifest = toml::from_str(&format!(
             "{PACKAGE}\n[config]\nshared-packages-out = \"packages/shared\"\n"
@@ -2066,7 +2077,7 @@ mod tests {
             let _ = fs::remove_dir_all(&base);
             fs::create_dir_all(base.join("packages/shared")).unwrap();
             if store {
-                fs::create_dir_all(base.join("packages/shared/.lpm/acme_thing")).unwrap();
+                fs::create_dir_all(base.join("packages/shared/.ember/acme_thing")).unwrap();
             }
             fs::write(base.join("packages/shared/Thing.luau"), "return nil\n").unwrap();
         };
@@ -2076,7 +2087,7 @@ mod tests {
                 .unwrap()
         };
 
-        // an lpm store from before the rename goes, and says so
+        // an embr store from before the rename goes, and says so
         setup(true);
         assert!(in_base(&plain));
         assert!(!base.join("packages/shared").exists());
@@ -2084,7 +2095,7 @@ mod tests {
         assert!(!in_base(&plain));
 
         /* a folder of the user's own that merely shares the name is not an
-        install output: no `.lpm`, no removal */
+        install output: no `.ember`, no removal */
         setup(false);
         assert!(!in_base(&plain));
         assert!(base.join("packages/shared/Thing.luau").exists());
@@ -2092,14 +2103,14 @@ mod tests {
         // and a project that still aims an environment there keeps it
         setup(true);
         assert!(!in_base(&claimed));
-        assert!(base.join("packages/shared/.lpm").exists());
+        assert!(base.join("packages/shared/.ember").exists());
 
         let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn state_stamps_land_in_each_environment() {
-        let base = std::env::temp_dir().join("lpm-test-state-stamps");
+        let base = std::env::temp_dir().join("embr-test-state-stamps");
         let _ = fs::remove_dir_all(&base);
         let manifest: Manifest = toml::from_str(&format!(
             "[package]\nname = \"acme/x\"\nversion = \"0.1.0\"\n\n[config]\n\
@@ -2122,8 +2133,13 @@ mod tests {
             .collect();
         write_state_stamps(&manifest, &environments, &inputs);
 
-        let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::LOCKFILE) else {
-            assert!(!base.join("packages/roblox/.lpm").join(STATE_FILE).exists());
+        let Ok(lock_text) = fs::read_to_string(crate::project::lockfile::lockfile_path()) else {
+            assert!(
+                !base
+                    .join("packages/roblox/.ember")
+                    .join(STATE_FILE)
+                    .exists()
+            );
             let _ = fs::remove_dir_all(&base);
             return;
         };
@@ -2133,7 +2149,7 @@ mod tests {
                 fs::read_to_string(
                     base.join("packages")
                         .join(environment)
-                        .join(".lpm")
+                        .join(".ember")
                         .join(STATE_FILE)
                 )
                 .unwrap(),
@@ -2160,7 +2176,7 @@ mod tests {
     says so rather than writing a link file pointing at nothing. */
     #[test]
     fn entries_come_from_the_manifest_then_the_package_then_a_guess() {
-        let base = std::env::temp_dir().join("lpm-test-entry-sources");
+        let base = std::env::temp_dir().join("embr-test-entry-sources");
         let _ = fs::remove_dir_all(&base);
 
         // ships one file and declares nothing, so only a guess finds it
@@ -2196,7 +2212,7 @@ mod tests {
 
         // what the package declares beats the guess too
         let declared = base.join("declared");
-        write(&declared, "lpm.toml", "[target]\nmain = \"lib.luau\"\n");
+        write(&declared, "ember.toml", "[target]\nmain = \"lib.luau\"\n");
         write(&declared, "lib.luau", "return {}");
         write(&declared, "extra.luau", "return {}");
         warnings.clear();
@@ -2254,14 +2270,14 @@ mod tests {
 
     #[test]
     fn mounts_the_packages_folder_of_a_package_shipping_a_project_file() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-rojo");
+        let base = std::env::temp_dir().join("embr-test-nested-links-rojo");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
 
         /* both ship a project file, as wally packages built from Rojo
         projects do. lyra declares its dependency the way a server realm
         package does, under [server-dependencies] */
-        let promise = roblox.join(".lpm/evaera_promise");
+        let promise = roblox.join(".ember/evaera_promise");
         write(
             &promise,
             "default.project.json",
@@ -2269,7 +2285,7 @@ mod tests {
         );
         write(&promise, "lib/init.luau", "return {}\n");
 
-        let lyra = roblox.join(".lpm/lyra_lyra");
+        let lyra = roblox.join(".ember/lyra_lyra");
         write(
             &lyra,
             "wally.toml",
@@ -2327,9 +2343,9 @@ mod tests {
         /* the folder being there isn't the gate, having linked into it is.
         a package that published a `packages` folder of its own keeps the
         tree it published, we don't graft its contents into the sync */
-        let base = std::env::temp_dir().join("lpm-test-nested-links-vendored");
+        let base = std::env::temp_dir().join("embr-test-nested-links-vendored");
         let _ = fs::remove_dir_all(&base);
-        let vendored = base.join("packages/roblox/.lpm/acme_vendored");
+        let vendored = base.join("packages/roblox/.ember/acme_vendored");
 
         // no manifest, so nothing is declared and nothing links
         let project = r#"{"name": "acme_vendored", "tree": {"$className": "Folder",
@@ -2366,16 +2382,16 @@ mod tests {
 
         the slice is ordered the way the resolver's BTreeMap hands it over,
         alphabetically, which is what puts the dependency first here */
-        let base = std::env::temp_dir().join("lpm-test-nested-links-mounted-dep");
+        let base = std::env::temp_dir().join("embr-test-nested-links-mounted-dep");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
 
-        let promise = roblox.join(".lpm/evaera_promise");
+        let promise = roblox.join(".ember/evaera_promise");
         write(&promise, "lib/init.luau", "return {}\n");
 
         /* roblox-ts shaped: `out` is an entry none of the conventional
         fallbacks can recover, so a broken tree read shows up as a miss */
-        let tslib = roblox.join(".lpm/a_tslib");
+        let tslib = roblox.join(".ember/a_tslib");
         write(
             &tslib,
             "wally.toml",
@@ -2388,7 +2404,7 @@ mod tests {
         );
         write(&tslib, "out/init.lua", "return {}\n");
 
-        let app = roblox.join(".lpm/z_app");
+        let app = roblox.join(".ember/z_app");
         write(
             &app,
             "wally.toml",
@@ -2425,7 +2441,7 @@ mod tests {
 
     #[test]
     fn writes_nested_links_for_stored_dependencies() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links");
+        let base = std::env::temp_dir().join("embr-test-nested-links");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
 
@@ -2433,23 +2449,23 @@ mod tests {
         exports a type, and on `util`, a luau environment package pulled
         into the roblox tree. same context, so its storage sits in the
         roblox root while its link folder keeps the luau name */
-        let core = roblox.join(".lpm/acme_core");
-        write(&core, "lpm.toml", "[target]\nmain = \"out/lpm\"\n");
+        let core = roblox.join(".ember/acme_core");
+        write(&core, "ember.toml", "[target]\nmain = \"out/embr\"\n");
         write(
             &core,
-            "out/lpm/init.luau",
+            "out/embr/init.luau",
             "export type Entry = { id: number }\nreturn {}\n",
         );
-        let util = roblox.join(".lpm/acme_util");
+        let util = roblox.join(".ember/acme_util");
         write(&util, "init.luau", "return {}\n");
-        let lifecycles = roblox.join(".lpm/acme_lifecycles");
+        let lifecycles = roblox.join(".ember/acme_lifecycles");
         write(
             &lifecycles,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n\
              util = { name = \"acme/util\", version = \"^\" }\n",
         );
-        write(&lifecycles, "out/lpm/init.luau", "return {}\n");
+        write(&lifecycles, "out/embr/init.luau", "return {}\n");
 
         let packages = [
             stored("Acme/Core", core.clone(), Environment::Roblox),
@@ -2464,7 +2480,7 @@ mod tests {
         appended, exported types restated */
         assert_eq!(
             fs::read_to_string(lifecycles.join("packages/roblox/core.luau")).unwrap(),
-            "local module = require(\"../../../acme_core/out/lpm\")\n\
+            "local module = require(\"../../../acme_core/out/embr\")\n\
              export type Entry = module.Entry\n\
              return module\n"
         );
@@ -2483,21 +2499,21 @@ mod tests {
 
     #[test]
     fn contexts_keep_their_trees_apart() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-contexts");
+        let base = std::env::temp_dir().join("embr-test-nested-links-contexts");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
         let server = base.join("packages/server");
 
         /* the same dependency name installed under both roots, each
         consumer must link the copy in its OWN tree */
-        let roblox_dep = roblox.join(".lpm/acme_dep");
+        let roblox_dep = roblox.join(".ember/acme_dep");
         write(&roblox_dep, "init.luau", "return { tree = \"roblox\" }\n");
-        let server_dep = server.join(".lpm/acme_dep");
+        let server_dep = server.join(".ember/acme_dep");
         write(&server_dep, "init.luau", "return { tree = \"server\" }\n");
-        let consumer = server.join(".lpm/acme_service");
+        let consumer = server.join(".ember/acme_service");
         write(
             &consumer,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\ndep = { name = \"acme/dep\", version = \"^\" }\n",
         );
         write(&consumer, "init.luau", "return {}\n");
@@ -2531,19 +2547,19 @@ mod tests {
 
     #[test]
     fn redirected_edges_link_the_replacement() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-redirect");
+        let base = std::env::temp_dir().join("embr-test-nested-links-redirect");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
 
         /* the shipped manifest still declares acme/bar, but [overrides]
         swapped the edge for acme/qux. the nested link must follow the
         redirect, not the manifest */
-        let qux = roblox.join(".lpm/acme_qux");
+        let qux = roblox.join(".ember/acme_qux");
         write(&qux, "init.luau", "return {}\n");
-        let consumer = roblox.join(".lpm/acme_foo");
+        let consumer = roblox.join(".ember/acme_foo");
         write(
             &consumer,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\nbar = { name = \"acme/bar\", version = \"^1\" }\n",
         );
 
@@ -2564,12 +2580,12 @@ mod tests {
 
     #[test]
     fn missing_dependencies_warn_and_skip() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-missing");
+        let base = std::env::temp_dir().join("embr-test-nested-links-missing");
         let _ = fs::remove_dir_all(&base);
-        let storage = base.join("packages/roblox/.lpm/acme_thing");
+        let storage = base.join("packages/roblox/.ember/acme_thing");
         write(
             &storage,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\ngone = { name = \"acme/gone\", version = \"^\" }\n",
         );
 
@@ -2587,20 +2603,20 @@ mod tests {
 
     #[test]
     fn aliases_cannot_escape_the_package() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-escape");
+        let base = std::env::temp_dir().join("embr-test-nested-links-escape");
         let _ = fs::remove_dir_all(&base);
         let roblox = base.join("packages/roblox");
 
-        let dep = roblox.join(".lpm/acme_dep");
+        let dep = roblox.join(".ember/acme_dep");
         write(&dep, "init.luau", "return {}\n");
         /* a downloaded manifest can quote anything as a key, neither of
         these may put a file outside the package */
-        let hostile = roblox.join(".lpm/acme_hostile");
+        let hostile = roblox.join(".ember/acme_hostile");
         write(
             &hostile,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\n\"../../../../../../escaped\" = { name = \"acme/dep\", version = \"^\" }\n\
-             \"C:/Windows/Temp/lpm-escaped\" = { name = \"acme/dep\", version = \"^\" }\n",
+             \"C:/Windows/Temp/embr-escaped\" = { name = \"acme/dep\", version = \"^\" }\n",
         );
 
         let packages = [
@@ -2614,25 +2630,29 @@ mod tests {
         assert!(warnings.iter().all(|line| line.contains("unusable alias")));
         assert!(!hostile.join("packages").exists());
         assert!(!base.join("escaped.luau").exists());
-        assert!(!Path::new("C:/Windows/Temp/lpm-escaped.luau").exists());
+        assert!(!Path::new("C:/Windows/Temp/embr-escaped.luau").exists());
 
         let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn workspace_members_are_link_targets_but_never_written_into() {
-        let base = std::env::temp_dir().join("lpm-test-nested-links-member");
+        let base = std::env::temp_dir().join("embr-test-nested-links-member");
         let _ = fs::remove_dir_all(&base);
 
         /* a member consumed by the root shadows the registry copy of the
         same name, so packages depending on it must still link */
         let member = base.join("packages/core");
-        write(&member, "lpm.toml", "[target]\nmain = \"src/init.luau\"\n");
+        write(
+            &member,
+            "ember.toml",
+            "[target]\nmain = \"src/init.luau\"\n",
+        );
         write(&member, "src/init.luau", "return {}\n");
-        let consumer = base.join("packages/roblox/.lpm/acme_extras");
+        let consumer = base.join("packages/roblox/.ember/acme_extras");
         write(
             &consumer,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n",
         );
 

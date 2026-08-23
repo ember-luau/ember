@@ -4,7 +4,7 @@ name: Binary size
 # targets release.yml ships -- but the only local measurement anyone can take is
 # Windows, and scripts/bench.ps1 is Windows-and-Rokit-bound on top of that. So a
 # change that shrinks Windows and bloats macOS-aarch64 would otherwise pass every
-# gate and reach users through `lpm self update`.
+# gate and reach users through `embr self update`.
 #
 # Runs on demand, and automatically on any PR that touches what decides code
 # size: the manifest, the lockfile, or cargo config.
@@ -34,16 +34,16 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: lpm-windows-x86_64.exe
+            asset: embr-windows-x86_64.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: lpm-linux-x86_64
+            asset: embr-linux-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: lpm-macos-aarch64
+            asset: embr-macos-aarch64
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: lpm-macos-x86_64
+            asset: embr-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +67,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.asset }}" == *.exe ]]; then
-            binary="target/${{ matrix.target }}/release/lpm.exe"
+            binary="target/${{ matrix.target }}/release/embr.exe"
           else
-            binary="target/${{ matrix.target }}/release/lpm"
+            binary="target/${{ matrix.target }}/release/embr"
           fi
           # bytes, not a human-readable rounding: the whole point is comparing
           # two numbers that may differ by well under a megabyte

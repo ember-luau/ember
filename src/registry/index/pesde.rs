@@ -9,7 +9,7 @@ use toml::Value;
 const DOWNLOAD_TEMPLATE: &str =
     "{API_URL}/v1/packages/{PACKAGE}/{PACKAGE_VERSION}/{PACKAGE_TARGET}/archive";
 
-/** Root config.toml of a pesde-format index. lpm's own index is this format
+/** Root config.toml of a pesde-format index. embr's own index is this format
 too, except its entries each carry a `download` URL, so it needs no `api`. */
 #[derive(Deserialize)]
 pub struct Config {
@@ -58,7 +58,7 @@ pub fn resolve(
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
     /* Newer pesde files nest entries under an "entries" table with sibling
     metadata like `meta`, older ones put them at the top level. Keys are
-    "<version> <target>", the target part optional in lpm indices. */
+    "<version> <target>", the target part optional in embr indices. */
     let entries = match file.get("entries") {
         Some(Value::Table(entries)) => entries,
         _ => file.as_table().ok_or_else(|| Error::PackageNotFound {
@@ -81,7 +81,7 @@ pub fn resolve(
         }
 
         /* The entry's own target is authoritative, a table with an
-        `environment` for pesde or a bare string for lpm API entries. The
+        `environment` for pesde or a bare string for embr API entries. The
         key's target part covers entries that don't carry one. */
         let target = entry
             .get("target")
@@ -91,7 +91,7 @@ pub fn resolve(
             })
             .or(key_target);
         let Ok(environment) = target.map(parse_environment).transpose() else {
-            continue; // published for a target lpm doesn't support
+            continue; // published for a target embr doesn't support
         };
 
         candidates.push(Candidate {
@@ -135,9 +135,9 @@ pub fn resolve(
     })
 }
 
-/// Accepts both lpm environment names and pesde's, "roblox" -> shared and so on.
+/// Accepts both embr environment names and pesde's, "roblox" -> shared and so on.
 fn parse_environment(environment: &str) -> Result<Environment, Error> {
-    Environment::from_lpm(environment).or_else(|_| Environment::from_pesde(environment))
+    Environment::from_embr(environment).or_else(|_| Environment::from_pesde(environment))
 }
 
 fn download_source(
@@ -146,7 +146,7 @@ fn download_source(
     name: &str,
     candidate: &Candidate,
 ) -> Result<DownloadSource, Error> {
-    /* lpm-index entries bake in their download URL, which lets
+    /* embr-index entries bake in their download URL, which lets
     installs work without a registry server being up. pesde entries
     build theirs from the registry template. */
     if let Some(url) = candidate.entry.get("download").and_then(Value::as_str) {
@@ -272,7 +272,7 @@ mod tests {
 
     impl TempIndex {
         fn new(name: &str, config: &str) -> Self {
-            let dir = format!("lpm-pesde-test-{name}-{}", std::process::id());
+            let dir = format!("embr-pesde-test-{name}-{}", std::process::id());
             let root = std::env::temp_dir().join(dir);
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn config_parses_both_oauth_spellings_and_tolerates_extras() {
         /* Real pesde configs spell the oauth id the long way and carry other
-        registry settings lpm ignores. */
+        registry settings embr ignores. */
         let config: Config = toml::from_str(
             r#"
             api = "https://registry.example.com"
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(config.api.as_deref(), Some("https://registry.example.com"));
         assert_eq!(config.github_oauth_id.as_deref(), Some("Iv1.abc123"));
 
-        // lpm's own index spells it github_oauth_id and has no api.
+        // embr's own index spells it github_oauth_id and has no api.
         let config: Config = toml::from_str(r#"github_oauth_id = "Ov23abc""#).unwrap();
         assert_eq!(config.api, None);
         assert_eq!(config.github_oauth_id.as_deref(), Some("Ov23abc"));
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn entry_download_url_wins_over_the_template() {
-        /* lpm's own index. entries carry their download URL, so no `api` is
+        /* embr's own index. entries carry their download URL, so no `api` is
         needed, and one being set wouldn't override the entry. */
         let config = Config {
             api: Some("https://registry.example.com".to_string()),
@@ -459,10 +459,10 @@ mod tests {
     }
 
     #[test]
-    fn resolves_lpm_index_entries_with_baked_downloads() {
-        /* The shape the lpm API writes. no root `api`, per-entry `download`,
+    fn resolves_embr_index_entries_with_baked_downloads() {
+        /* The shape the embr API writes. no root `api`, per-entry `download`,
         target as a table with just `environment`. */
-        let index = TempIndex::new("lpm-format", r#"github_oauth_id = "Ov23abc""#);
+        let index = TempIndex::new("embr-format", r#"github_oauth_id = "Ov23abc""#);
         index.write_package(
             "chief/core",
             r#"

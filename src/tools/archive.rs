@@ -169,7 +169,7 @@ enum Kind {
     Tar,
     /// not an archive, the asset is the executable itself.
     Raw,
-    /// compressed with something lpm has no decompressor for. named, so the error can say which.
+    /// compressed with something embr has no decompressor for. named, so the error can say which.
     Unsupported(&'static str),
 }
 
@@ -178,7 +178,7 @@ than trusted from the file name because ureq transparently decodes
 Content-Encoding: gzip, see index::download. only plain tar, which has
 no leading magic, falls back to the name.
 
-The compressed formats lpm cannot unpack are sniffed too, rather than left
+The compressed formats embr cannot unpack are sniffed too, rather than left
 to fall through to `Raw`. `Raw` means "these bytes are the executable", so
 anything compressed landing there installs a tool that cannot run.  */
 fn kind(name: &str, bytes: &[u8]) -> Kind {
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn compression_lpm_cannot_unpack_is_refused_not_installed() {
+    fn compression_embr_cannot_unpack_is_refused_not_installed() {
         /* the same trap as the xz one: anything compressed reaching Raw
         installs a "binary" that is really an archive. these say so instead. */
         for (name, magic, format) in [
@@ -410,7 +410,7 @@ mod tests {
         ] {
             assert_eq!(kind(name, magic), Kind::Unsupported(format), "{name}");
 
-            let base = std::env::temp_dir().join("lpm-test-archive-unsupported");
+            let base = std::env::temp_dir().join("embr-test-archive-unsupported");
             let _ = fs::remove_dir_all(&base);
             fs::create_dir_all(&base).unwrap();
             let target = base.join("tool");
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn xz_assets_are_decompressed_and_unpacked() {
-        let base = std::env::temp_dir().join("lpm-test-archive-xz");
+        let base = std::env::temp_dir().join("embr-test-archive-xz");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
 
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn a_bare_compressed_binary_becomes_the_executable() {
         // no tar inside, so the decompressed bytes are the tool themselves
-        let base = std::env::temp_dir().join("lpm-test-archive-bare-xz");
+        let base = std::env::temp_dir().join("embr-test-archive-bare-xz");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
 
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn raw_assets_are_written_as_the_executable() {
-        let base = std::env::temp_dir().join("lpm-test-archive-raw");
+        let base = std::env::temp_dir().join("embr-test-archive-raw");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
 

@@ -1,50 +1,98 @@
-"""Regenerates the ascii logo in src/art.rs from the website's lpm-logo.png.
+"""Regenerates the ascii logo in src/art.rs from the brand mark ember.png.
 
-    python3 scripts/logo.py ../lpm-website/public/lpm-logo.png
+    python3 scripts/logo.py ember.png
 
-Prints the art; paste it into `art::LOGO`. The mark's own LPM letters are
-knocked out of a shape only 36 columns wide, far too fine to survive that
-(they come out as speckle however much they are thickened first), so only the
-notch is kept as a knockout and the letters are filled. Needs ImageMagick.
+Prints the art; paste it into `art::LOGO`. Needs ImageMagick.
+
+The mark is a flame above an open crate. Its alpha channel already carries
+every knockout that matters -- the curl inside the flame, and the gap between
+the two crate panels -- so the art needs no hand-placed knockout, unlike the
+EMBR mark this replaces.
+
+Two spark diamonds float beside the flame. At 26 columns each covers about
+one cell, so it renders as a stray punctuation mark rather than a spark, and
+`drop_specks` removes both. Same reason the old generator filled in the EMBR
+letters: detail below about a cell cannot survive the ramp.
 """
 
 import re
 import subprocess
 import sys
+from collections import deque
 
 # the ramp art.rs shades by density, lightest first
 RAMP = [
     (0.10, "."), (0.22, ":"), (0.34, "-"), (0.48, "="), (0.60, "+"),
     (0.74, "*"), (0.86, "#"), (0.96, "%"), (1.01, "@"),
 ]
-WIDTH, HEIGHT = 36, 18
-# terminal cells are about twice as tall as they are wide, hence 2:1
+# 26 keeps the help beside the logo on an 80-column terminal: 26 columns, the
+# 3-column gap, and main::print_root_help's HELP_MIN of 50 come to 79. The
+# rows follow from the trimmed mark's 509x828 and the 2:1 terminal cell.
+WIDTH, HEIGHT = 26, 21
 SUPERSAMPLE = 8
-# where the notch sits in the artwork, as a fraction of each axis
-NOTCH = (0.56, 0.90, 0.18, 0.52)
+# a component smaller than this share of the largest one is a speck, not a shape
+SPECK = 0.05
 
 
-def render(source: str) -> str:
+def load(source: str) -> tuple[list[list[float]], int, int]:
+    """The mark's alpha as per-pixel coverage, trimmed and scaled to the grid."""
     wide, tall = WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE
     dump = subprocess.run(
         ["magick", source, "-background", "none", "-alpha", "on",
-         "-resize", f"{wide}x{tall}!", "-depth", "8", "txt:-"],
+         "-trim", "+repage", "-resize", f"{wide}x{tall}!", "-depth", "8", "txt:-"],
         capture_output=True, text=True, check=True,
     ).stdout
 
     ink = [[0.0] * wide for _ in range(tall)]
     pixel = re.compile(r"^(\d+),(\d+): \((\d+),(\d+),(\d+),(\d+)\)")
-    left, right, top, bottom = NOTCH
     for line in dump.splitlines()[1:]:
         found = pixel.match(line)
         if not found:
             continue
-        x, y, r, g, b, a = (int(value) for value in found.groups())
-        coverage = a / 255
-        if left <= x / wide <= right and top <= y / tall <= bottom:
-            coverage *= 1 - min(r, g, b) / 255  # the notch is white, knock it out
-        ink[y][x] = coverage
+        x, y, _r, _g, _b, a = (int(value) for value in found.groups())
+        ink[y][x] = a / 255
+    return ink, wide, tall
 
+
+def drop_specks(ink: list[list[float]], wide: int, tall: int) -> int:
+    """Erases components under SPECK of the largest. Returns how many went."""
+    seen = [[False] * wide for _ in range(tall)]
+    components = []
+    for y in range(tall):
+        for x in range(wide):
+            if ink[y][x] <= 0.5 or seen[y][x]:
+                continue
+            queue = deque([(x, y)])
+            seen[y][x] = True
+            cells = []
+            while queue:
+                cx, cy = queue.popleft()
+                cells.append((cx, cy))
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < wide and 0 <= ny < tall and not seen[ny][nx] and ink[ny][nx] > 0.5:
+                        seen[ny][nx] = True
+                        queue.append((nx, ny))
+            components.append(cells)
+
+    if not components:
+        return 0
+    largest = max(len(cells) for cells in components)
+    dropped = 0
+    for cells in components:
+        if len(cells) >= largest * SPECK:
+            continue
+        dropped += 1
+        # the halo the resize leaves around a speck sits below the 0.5 cut,
+        # so clearing only the component leaves a smudge. 2px covers it.
+        for cx, cy in cells:
+            for y in range(max(0, cy - 2), min(tall, cy + 3)):
+                for x in range(max(0, cx - 2), min(wide, cx + 3)):
+                    ink[y][x] = 0.0
+    return dropped
+
+
+def to_art(ink: list[list[float]]) -> str:
     lines = []
     for row in range(HEIGHT):
         cells = [
@@ -62,6 +110,12 @@ def render(source: str) -> str:
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines)
+
+
+def render(source: str) -> str:
+    ink, wide, tall = load(source)
+    drop_specks(ink, wide, tall)
+    return to_art(ink)
 
 
 if __name__ == "__main__":

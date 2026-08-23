@@ -8,7 +8,7 @@ use inquire::autocompletion::{Autocomplete, Replacement};
 
 #[derive(Subcommand, Debug)]
 pub enum IndexCommand {
-    /// Add an index under [indices] in lpm.toml
+    /// Add an index under [indices] in ember.toml
     Add {
         /// Name dependencies reference the index by, e.g. wally
         name: Option<String>,
@@ -17,7 +17,7 @@ pub enum IndexCommand {
         url: Option<String>,
     },
 
-    /// Remove an index from [indices] in lpm.toml
+    /// Remove an index from [indices] in ember.toml
     Remove {
         /// Name of the index, picked from a list when omitted
         name: Option<String>,
@@ -128,9 +128,9 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
     let verb = if replaced { "Updated" } else { "Added" };
     ui::print_success(&format!("{verb} index {name} → {url}"));
     if name == "default" {
-        println!("The default key overrides lpm's built-in index for bare dependencies");
+        println!("The default key overrides embr's built-in index for bare dependencies");
     } else {
-        println!("Use it with `lpm add <scope>/<name> --index {name}`");
+        println!("Use it with `embr add <scope>/<name> --index {name}`");
     }
 
     Ok(())
@@ -142,7 +142,7 @@ fn remove(name: Option<String>) -> Result<(), Error> {
 
     let mut document = ManifestDoc::open(Scope::Project)?;
     let Some(table) = document.table("indices")? else {
-        println!("No indices defined in lpm.toml");
+        println!("No indices defined in ember.toml");
         return Ok(());
     };
 
@@ -151,7 +151,7 @@ fn remove(name: Option<String>) -> Result<(), Error> {
         None => {
             let keys: Vec<String> = table.iter().map(|(key, _)| key.to_string()).collect();
             if keys.is_empty() {
-                println!("No indices defined in lpm.toml");
+                println!("No indices defined in ember.toml");
                 return Ok(());
             }
             inquire::set_global_render_config(ui::render_config());
@@ -164,7 +164,7 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     }
     document.drop_if_empty("indices");
     document.save()?;
-    ui::print_success(&format!("Removed index {name} from lpm.toml"));
+    ui::print_success(&format!("Removed index {name} from ember.toml"));
 
     /* deps keyed to the removed index break at the next resolve,
     warn now instead of letting install fail mysteriously later */
@@ -184,7 +184,9 @@ fn remove(name: Option<String>) -> Result<(), Error> {
             1 => ("1 dependency".to_string(), "references"),
             n => (format!("{n} dependencies"), "reference"),
         };
-        eprintln!("warning: {count} still {verb} index '{name}'; update them before `lpm install`");
+        eprintln!(
+            "warning: {count} still {verb} index '{name}'; update them before `embr install`"
+        );
     }
 
     Ok(())

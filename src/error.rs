@@ -9,13 +9,13 @@ fn ui_plural_packages(count: usize) -> String {
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("An lpm.toml manifest already exists in this directory")]
+    #[error("An ember.toml manifest already exists in this directory")]
     ManifestExists,
 
     #[error("Could not determine your home directory")]
     NoHomeDir,
 
-    #[error("lpm is not installed ({} does not exist)", .0.display())]
+    #[error("embr is not installed ({} does not exist)", .0.display())]
     NotInstalled(PathBuf),
 
     #[error("No releases have been published for {0} yet")]
@@ -51,11 +51,11 @@ pub enum Error {
     NoWorkspaceMember(String),
 
     #[error(
-        "'{0}' is a workspace dependency, but this project is not part of a workspace (no ancestor lpm.toml lists it under [target] workspace)"
+        "'{0}' is a workspace dependency, but this project is not part of a workspace (no ancestor ember.toml lists it under [target] workspace)"
     )]
     NotInWorkspace(String),
 
-    #[error("Workspace member {} has no lpm.toml", .0.display())]
+    #[error("Workspace member {} has no ember.toml", .0.display())]
     WorkspaceMemberMissingManifest(PathBuf),
 
     #[error("Invalid workspace glob '{glob}': {reason}")]
@@ -73,12 +73,12 @@ pub enum Error {
     PatchPathInvalid { key: String, path: String },
 
     #[error(
-        "Patch file {path} for {key} is missing; re-run `lpm patch` and commit it, or remove the [patches] entry"
+        "Patch file {path} for {key} is missing; re-run `embr patch` and commit it, or remove the [patches] entry"
     )]
     PatchFileMissing { key: String, path: String },
 
     #[error(
-        "Patch for {name}@{version} does not apply: {reason}. Re-run `lpm patch {name}` and commit an updated patch, or remove the [patches] entry"
+        "Patch for {name}@{version} does not apply: {reason}. Re-run `embr patch {name}` and commit an updated patch, or remove the [patches] entry"
     )]
     PatchDrift {
         name: String,
@@ -104,7 +104,7 @@ pub enum Error {
     },
 
     #[error(
-        "Patch {path} recorded in lpm.lock for {name} {reason}; run `lpm install` without --locked to re-lock it"
+        "Patch {path} recorded in ember.lock for {name} {reason}; run `embr install` without --locked to re-lock it"
     )]
     PatchLockInvalid {
         name: String,
@@ -117,7 +117,7 @@ pub enum Error {
     )]
     PatchCopyExists { key: String, path: String },
 
-    #[error("No patch working copy for '{0}' under .lpm-patch/; run `lpm patch {0}` first")]
+    #[error("No patch working copy for '{0}' under .ember-patch/; run `embr patch {0}` first")]
     PatchCopyMissing(String),
 
     #[error("'{spec}' matches more than one {what} ({matches}); add @version to pick one")]
@@ -141,7 +141,7 @@ pub enum Error {
         stderr: String,
     },
 
-    #[error("No lpm.toml manifest found in the current directory")]
+    #[error("No ember.toml manifest found in the current directory")]
     ManifestMissing,
 
     #[error("No tool exists with name '{0}'")]
@@ -157,7 +157,7 @@ pub enum Error {
     NoExecutableInAsset(String),
 
     #[error(
-        "Release asset {asset} is {format} compressed, which lpm can't unpack; ask the tool's authors for a .zip, .tar.gz or .tar.xz build"
+        "Release asset {asset} is {format} compressed, which embr can't unpack; ask the tool's authors for a .zip, .tar.gz or .tar.xz build"
     )]
     AssetCompression { asset: String, format: &'static str },
 
@@ -169,14 +169,14 @@ pub enum Error {
     },
 
     #[error(
-        "Tool '{0}' is not managed in this directory; run `lpm tool add {0}` here or add it globally with --global"
+        "Tool '{0}' is not managed in this directory; run `embr tool add {0}` here or add it globally with --global"
     )]
     ToolNotManaged(String),
 
-    #[error("Tool '{0}' is not installed; run `lpm install` to install it")]
+    #[error("Tool '{0}' is not installed; run `embr install` to install it")]
     ToolNotInstalled(String),
 
-    #[error("Alias '{0}' is reserved for lpm itself and can't name a tool")]
+    #[error("Alias '{0}' is reserved for embr itself and can't name a tool")]
     ReservedToolAlias(String),
 
     #[error("Invalid spec '{0}': expected a name or 'owner/repo', optionally with '@version'")]
@@ -205,14 +205,14 @@ pub enum Error {
     #[error("No version of {name} matches requirement '{req}'")]
     NoMatchingVersion { name: String, req: String },
 
-    #[error("Index '{0}' is not defined under [indices] in lpm.toml")]
+    #[error("Index '{0}' is not defined under [indices] in ember.toml")]
     UnknownIndex(String),
 
     #[error("Unsupported environment '{0}'")]
     UnsupportedEnvironment(String),
 
     #[error(
-        "Could not determine the environment of {0}; set `environment` under [target] in lpm.toml"
+        "Could not determine the environment of {0}; set `environment` under [target] in ember.toml"
     )]
     UnknownPackageEnvironment(String),
 
@@ -250,7 +250,7 @@ pub enum Error {
     DependencyTargetInvalid { alias: String, target: String },
 
     #[error(
-        "No [package] table in lpm.toml; publishing needs one with a name and version (run `lpm init` and choose 'package', or add it by hand)"
+        "No [package] table in ember.toml; publishing needs one with a name and version (run `embr init` and choose 'package', or add it by hand)"
     )]
     PackageMissing,
 
@@ -266,21 +266,21 @@ pub enum Error {
     #[error("Failed to fetch index {url}: {reason}")]
     IndexFetch { url: String, reason: String },
 
-    #[error("lpm.lock is missing; run `lpm install` without --locked to create it")]
+    #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,
 
     #[error(
-        "lpm.lock is version {0}, from before self-contained environment roots; run `lpm install` once without --locked to regenerate it"
+        "ember.lock is version {0}, from before self-contained environment roots; run `embr install` once without --locked to regenerate it"
     )]
     LockfileOutdated(u32),
 
-    #[error("Invalid lpm.toml: {0}")]
+    #[error("Invalid ember.toml: {0}")]
     ManifestInvalid(String),
 
-    #[error("No script named '{0}' under [scripts] in lpm.toml")]
+    #[error("No script named '{0}' under [scripts] in ember.toml")]
     ScriptMissing(String),
 
-    #[error("Script '{0}' in lpm.toml is an empty list; give it at least one command to run")]
+    #[error("Script '{0}' in ember.toml is an empty list; give it at least one command to run")]
     ScriptEmpty(String),
 
     /** a `pre<event>`/`post<event>` script exited non-zero. only hooks land
@@ -300,37 +300,41 @@ pub enum Error {
     #[error("Two [overrides] keys both cover the path '{0}'")]
     OverrideDuplicatePath(String),
 
-    #[error("No [studio] table in lpm.toml; run `lpm studio init` to create one")]
+    #[error("No [studio] table in ember.toml; run `embr studio init` to create one")]
     StudioMissing,
 
     #[error(
-        "A [studio] table already exists in lpm.toml; edit it there, or remove it and re-run `lpm studio init`"
+        "A [studio] table already exists in ember.toml; edit it there, or remove it and re-run `embr studio init`"
     )]
     StudioExists,
 
-    #[error("[studio] in lpm.toml sets both `file` and `universe`/`place`; remove one of the two")]
+    #[error(
+        "[studio] in ember.toml sets both `file` and `universe`/`place`; remove one of the two"
+    )]
     StudioConflict,
 
     #[error(
-        "[studio] in lpm.toml sets `{has}` but not `{needs}`; opening a published place needs both IDs"
+        "[studio] in ember.toml sets `{has}` but not `{needs}`; opening a published place needs both IDs"
     )]
     StudioIncomplete {
         has: &'static str,
         needs: &'static str,
     },
 
-    #[error("[studio] in lpm.toml is empty; run `lpm studio init` to fill it in")]
+    #[error("[studio] in ember.toml is empty; run `embr studio init` to fill it in")]
     StudioUnconfigured,
 
-    #[error("`{0}` under [studio] in lpm.toml must be a non-zero ID")]
+    #[error("`{0}` under [studio] in ember.toml must be a non-zero ID")]
     StudioInvalidId(&'static str),
 
     #[error(
-        "Unknown key `{0}` under [studio] in lpm.toml; expected `universe`, `place`, or `file`"
+        "Unknown key `{0}` under [studio] in ember.toml; expected `universe`, `place`, or `file`"
     )]
     StudioUnknownKey(String),
 
-    #[error("`file` under [studio] in lpm.toml is empty; point it at a .rbxl or .rbxlx place file")]
+    #[error(
+        "`file` under [studio] in ember.toml is empty; point it at a .rbxl or .rbxlx place file"
+    )]
     StudioEmptyFile,
 
     #[error("Place file {0} does not exist")]
@@ -383,9 +387,9 @@ pub enum Error {
 }
 
 impl Error {
-    /** The status lpm should exit with. 1 for anything lpm itself decided,
+    /** The status embr should exit with. 1 for anything embr itself decided,
     but a hook failure forwards the child's own code, so a `preinstall` that
-    exits 3 makes `lpm install` exit 3 and CI reads the real reason rather
+    exits 3 makes `embr install` exit 3 and CI reads the real reason rather
     than a flattened "something went wrong". */
     pub fn exit_code(&self) -> i32 {
         match self {

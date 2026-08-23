@@ -1,6 +1,6 @@
-# G3 fixture manifest -- copied to lpm.toml in a temp workdir by
+# G3 fixture manifest -- copied to ember.toml in a temp workdir by
 # scripts/install-fixture.ps1. Named .fixture because .gitignore drops every
-# lpm.toml/lpm.lock in the tree, and this pair has to be committed: the whole
+# ember.toml/ember.lock in the tree, and this pair has to be committed: the whole
 # point of the gate is that the resolution is pinned and cannot drift.
 #
 # Same five wally packages scripts/bench.ps1 uses, so the two gates exercise the

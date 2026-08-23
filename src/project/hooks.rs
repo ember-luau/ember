@@ -1,33 +1,33 @@
 /*! Lifecycle hooks: the `pre<name>` and `post<name>` entries under [scripts].
 
 npm's model, kept deliberately. A hook is not a new kind of thing, it is an
-ordinary [scripts] entry that lpm looks up by name, so there is no second
+ordinary [scripts] entry that embr looks up by name, so there is no second
 table to learn and no fixed list of hooks to be allowed into -- whatever a
 user writes under [scripts] can hook whatever they run.
 
-Two sources of names. Commands hook their own verb, so `lpm install` runs
+Two sources of names. Commands hook their own verb, so `embr install` runs
 `preinstall` and `postinstall` (see the consts below), and every script
-hooks its own name, so `lpm run build` runs `prebuild`, `build`, `postbuild`.
+hooks its own name, so `embr run build` runs `prebuild`, `build`, `postbuild`.
 `prebuild` therefore costs nothing to support: it falls out of the same rule.
 
 Hooks never nest. Running `prebuild` does not look for `preprebuild`, so a
-hook is free to call `lpm run` without lpm walking into itself. */
+hook is free to call `embr run` without embr walking into itself. */
 
 use crate::error::Error;
 use crate::project::manifest::{Manifest, Script};
 use crate::sys::process;
 use crate::ui;
 
-/// hooked by `lpm install`, as `preinstall` / `postinstall`.
+/// hooked by `embr install`, as `preinstall` / `postinstall`.
 pub const INSTALL: &str = "install";
-/// hooked by `lpm add`, as `preadd` / `postadd`.
+/// hooked by `embr add`, as `preadd` / `postadd`.
 pub const ADD: &str = "add";
-/// hooked by `lpm publish`, as `prepublish` / `postpublish`.
+/// hooked by `embr publish`, as `prepublish` / `postpublish`.
 pub const PUBLISH: &str = "publish";
 
 /** Every event a command hooks. Scripts hook their own names on top of
 these, so this is not the set of hookable names, just the ones that come
-from a command rather than from [scripts] itself. `lpm run` reads it to
+from a command rather than from [scripts] itself. `embr run` reads it to
 tell a real hook from a script that merely starts with "pre". */
 pub const EVENTS: [&str; 3] = [INSTALL, ADD, PUBLISH];
 
@@ -148,7 +148,7 @@ mod tests {
         it: running `prebuild` as a hook goes straight to the shell. */
         let manifest = manifest("preprebuild = \"never\"\nprebuild = \"echo before\"\n");
         let lifecycle = Lifecycle::of(&manifest, "prebuild");
-        // only reachable by typing `lpm run prebuild` yourself
+        // only reachable by typing `embr run prebuild` yourself
         assert_eq!(commands(lifecycle.pre.as_ref()), ["never"]);
 
         let build = Lifecycle::of(&manifest, "build");

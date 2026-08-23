@@ -1,10 +1,10 @@
-/*! points a wally package's requires at where lpm actually put things.
+/*! points a wally package's requires at where embr actually put things.
 
 two shapes arrive needing it. wally-era code says require(script.Parent.Foo),
 and there's no instance tree in our layout, so that has to become a "./Foo"
 style path. code that already used strings was still written for wally's
 layout, where a dependency sits beside the package folder, so it says
-require("../Charm") and lands on nothing once lpm links dependencies under the
+require("../Charm") and lands on nothing once embr links dependencies under the
 package. both end up at the same place through the same arithmetic. anything
 we can't map safely just stays as it was. */
 
@@ -55,14 +55,14 @@ under the pre-rename folder name.
 
 a package's own dependencies are linked at `packages/<env>/<alias>`, so a
 package published before `shared` became `roblox` has
-`require('../packages/shared/core')` compiled into it while lpm now
+`require('../packages/shared/core')` compiled into it while embr now
 writes `packages/roblox/core.luau`. chief/lifecycles, chief/traits and
 chief/dependencies are all in that state today; rewriting the stored copy
 fixes every such package without anyone republishing anything, and does
 nothing at all to a package published since.
 
 `aliases` is what the nested-link pass just linked, alias -> environment
-folder, so only a dependency lpm itself put in the roblox folder can be
+folder, so only a dependency embr itself put in the roblox folder can be
 retargeted -- a package vendoring its own `packages/shared` directory is
 left alone. only the path inside a `require(...)` is considered, so the
 same words in a comment stay as they are. */
@@ -549,7 +549,7 @@ fn escape_target(context: &FileContext, alias: &str) -> Option<String> {
 
 a wally package's dependencies sit beside the package folder, so source
 written for that layout says `require("../Charm")` from inside `src/`, one
-level above the module root. lpm links dependencies under the package
+level above the module root. embr links dependencies under the package
 instead, at `packages/<env>/<alias>`, so as written those paths point at
 nothing. same mapping `parse_chain` gives an instance chain, for the packages
 that arrived with strings already.
@@ -826,7 +826,7 @@ mod tests {
     /** littensy/charm-sync@0.4.0, verbatim. it was written for wally's layout,
     where a dependency sits beside the package folder, so `src/client.luau`
     reaches for it as `../Charm` -- one level above the module root, pointing
-    at nothing once lpm links dependencies under the package instead. */
+    at nothing once embr links dependencies under the package instead. */
     #[test]
     fn string_escapes_land_on_the_nested_link() {
         let aliases = linked(&[("Charm", "roblox")]);
@@ -919,7 +919,7 @@ mod tests {
     }
 
     /** chief/lifecycles@0.3.0, verbatim. published before the rename, so it
-    requires its dependency through `packages/shared`, while lpm now links
+    requires its dependency through `packages/shared`, while embr now links
     it under `packages/roblox` -- the require resolves to nothing until
     this pass retargets it. */
     #[test]
@@ -940,7 +940,7 @@ mod tests {
         let aliases = linked(&[("core", "roblox"), ("net", "server")]);
         let replacements = replacements(&aliases);
 
-        // an alias lpm never linked, and a dependency that really is elsewhere
+        // an alias embr never linked, and a dependency that really is elsewhere
         let source = "\
             local Chief = require('../packages/shared/core')\n\
             local Other = require('../packages/shared/mystery')\n\
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn a_vendored_folder_of_the_same_name_is_never_retargeted() {
-        /* the guard that matters: `aliases` is what lpm itself linked, so a
+        /* the guard that matters: `aliases` is what embr itself linked, so a
         package shipping its own packages/shared directory keeps it */
         let aliases = linked(&[("core", "roblox")]);
         assert_eq!(
@@ -1020,27 +1020,27 @@ mod tests {
 
     #[test]
     fn retargets_on_disk_under_the_module_root() {
-        let base = std::env::temp_dir().join("lpm-test-legacy-requires");
+        let base = std::env::temp_dir().join("embr-test-legacy-requires");
         let _ = fs::remove_dir_all(&base);
         let write = |file: &str, contents: &str| {
             let path = base.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, contents).unwrap();
         };
-        write("lpm.toml", "[target]\nmain = \"out/lpm\"\n");
+        write("ember.toml", "[target]\nmain = \"out/embr\"\n");
         write(
-            "out/lpm/init.luau",
+            "out/embr/init.luau",
             "local Chief = require('../packages/shared/core')\n",
         );
         // outside the module root, not mounted, not ours
         write("tests/spec.luau", "require('../packages/shared/core')\n");
 
         let aliases = linked(&[("core", "roblox")]);
-        let rewritten = rewrite_legacy_environment_requires(&base, "out/lpm", &aliases).unwrap();
+        let rewritten = rewrite_legacy_environment_requires(&base, "out/embr", &aliases).unwrap();
 
         assert_eq!(rewritten, 1);
         assert_eq!(
-            fs::read_to_string(base.join("out/lpm/init.luau")).unwrap(),
+            fs::read_to_string(base.join("out/embr/init.luau")).unwrap(),
             "local Chief = require('../packages/roblox/core')\n"
         );
         assert_eq!(
@@ -1050,7 +1050,7 @@ mod tests {
 
         // and it settles: a second install over a warm tree changes nothing
         assert_eq!(
-            rewrite_legacy_environment_requires(&base, "out/lpm", &aliases).unwrap(),
+            rewrite_legacy_environment_requires(&base, "out/embr", &aliases).unwrap(),
             0
         );
 
@@ -1110,7 +1110,7 @@ mod tests {
 
     #[test]
     fn rewrites_files_on_disk_under_the_module_root() {
-        let base = std::env::temp_dir().join("lpm-test-instance-requires");
+        let base = std::env::temp_dir().join("embr-test-instance-requires");
         let _ = fs::remove_dir_all(&base);
         let write = |file: &str, contents: &str| {
             let path = base.join(file);

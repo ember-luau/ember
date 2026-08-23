@@ -351,6 +351,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "embr"
+version = "0.5.4"
+dependencies = [
+ "clap",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "full_moon",
+ "globset",
+ "indicatif",
+ "inquire",
+ "jsonc-parser",
+ "libc",
+ "lzma-rs",
+ "self-replace",
+ "semver",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "ureq",
+ "windows-sys 0.61.2",
+ "winreg",
+ "zip",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -758,35 +787,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "luaupm"
-version = "0.5.4"
-dependencies = [
- "clap",
- "crossterm",
- "dirs",
- "flate2",
- "full_moon",
- "globset",
- "indicatif",
- "inquire",
- "jsonc-parser",
- "libc",
- "lzma-rs",
- "self-replace",
- "semver",
- "serde",
- "serde_json",
- "tar",
- "thiserror",
- "toml",
- "toml_edit",
- "ureq",
- "windows-sys 0.61.2",
- "winreg",
- "zip",
-]
 
 [[package]]
 name = "lzma-rs"

@@ -1,6 +1,6 @@
 /*!
 Remote services. The HTTP wrapper, GitHub's REST API, the OAuth device flow
-layered on them, and lpm's own registry API.
+layered on them, and embr's own registry API.
 */
 
 pub mod auth;

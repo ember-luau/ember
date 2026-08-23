@@ -1,12 +1,12 @@
-/*! How a tool alias becomes a running binary. shims are copies of lpm named
-after their alias, aftman-style. invoked under such a name, lpm looks
+/*! How a tool alias becomes a running binary. shims are copies of embr named
+after their alias, aftman-style. invoked under such a name, embr looks
 up which repo@version the surrounding project pins the alias to and
 hands off to the stored binary. that lookup is what scopes tools to
 their projects. */
 
 use super::stored_executable;
 use crate::error::Error;
-use crate::project::manifest::{MANIFEST_FILE, Tool};
+use crate::project::manifest::{Tool, manifest_in};
 use crate::sys::paths;
 use crate::sys::process;
 use serde::Deserialize;
@@ -16,9 +16,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /** The alias this process was invoked under, or None when running as the
-real CLI. "lpm" itself and "lpm-*" stems count as the CLI because
-release assets are named "lpm-{os}-{arch}". "lpx" counts too, it's the
-`lpm execute` launcher, routed separately in main. */
+real CLI. "embr" itself and "embr-*" stems count as the CLI because
+release assets are named "embr-{os}-{arch}". "embx" counts too, it's the
+`embr execute` launcher, routed separately in main. */
 pub fn shim_alias() -> Option<String> {
     let exe = env::current_exe().ok()?;
     alias_from_stem(exe.file_stem()?.to_str()?)
@@ -26,23 +26,23 @@ pub fn shim_alias() -> Option<String> {
 
 fn alias_from_stem(stem: &str) -> Option<String> {
     let lower = stem.to_ascii_lowercase();
-    if lower == "lpm" || lower.starts_with("lpm-") || lower == "lpx" {
+    if lower == "embr" || lower.starts_with("embr-") || lower == "embx" {
         None
     } else {
         Some(stem.to_string())
     }
 }
 
-/** whether this process was started as the lpx launcher, a copy of lpm
-that `self install` drops in ~/.lpm/bin, in which case every CLI
-argument belongs to `lpm execute`. */
-pub fn invoked_as_lpx() -> bool {
+/** whether this process was started as the embx launcher, a copy of embr
+that `self install` drops in ~/.ember/bin, in which case every CLI
+argument belongs to `embr execute`. */
+pub fn invoked_as_embx() -> bool {
     let Ok(exe) = env::current_exe() else {
         return false;
     };
     exe.file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("lpx"))
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("embx"))
 }
 
 /** Runs `alias` as a tool shim. on unix the tool replaces this process. the
@@ -59,12 +59,12 @@ pub fn run(alias: &str) -> Result<i32, Error> {
     process::exec(command)
 }
 
-/// the shim an alias is invoked through, e.g. ~/.lpm/bin/stylua.
+/// the shim an alias is invoked through, e.g. ~/.ember/bin/stylua.
 pub fn path(alias: &str) -> Result<PathBuf, Error> {
     Ok(paths::bin_dir()?.join(format!("{alias}{}", env::consts::EXE_SUFFIX)))
 }
 
-/// writes the alias shim, a copy of the running lpm executable.
+/// writes the alias shim, a copy of the running embr executable.
 pub fn write(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
     fs::copy(env::current_exe()?, shim)?;
@@ -73,8 +73,8 @@ pub fn write(shim: &Path) -> Result<(), Error> {
 
 /** What `alias` currently resolves to on PATH when that is NOT our shim.
 another toolchain manager like aftman, rokit, foreman, or a stray copy
-shadowing the lpm-managed tool, so users get that manager's errors
-instead of what lpm installed. */
+shadowing the embr-managed tool, so users get that manager's errors
+instead of what embr installed. */
 pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
     let bin = paths::bin_dir().ok()?;
     let file = format!("{alias}{}", env::consts::EXE_SUFFIX);
@@ -95,12 +95,12 @@ pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
     None
 }
 
-/** Which tool an alias means. the nearest lpm.toml walking up from `start`
+/** Which tool an alias means. the nearest ember.toml walking up from `start`
 whose [tools] lists it wins, then the global tools file. None when
-nothing pins it, what `lpm execute` asks before trying shorthands. */
+nothing pins it, what `embr execute` asks before trying shorthands. */
 pub fn find_alias(alias: &str, start: &Path, global: &Path) -> Result<Option<Tool>, Error> {
     for dir in start.ancestors() {
-        if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))?
+        if let Some(tools) = tools_in(&manifest_in(dir))?
             && let Some(tool) = get_tool(&tools, alias)
         {
             return Ok(Some(tool.clone()));
@@ -120,12 +120,12 @@ fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error
 }
 
 /** Tools visible from `start` through project manifests, the union over
-ancestor lpm.tomls, nearest manifest winning per alias. same scope `run`
+ancestor ember.tomls, nearest manifest winning per alias. same scope `run`
 resolves aliases against. */
 pub fn project_tools(start: &Path) -> Result<BTreeMap<String, Tool>, Error> {
     let mut merged = BTreeMap::new();
     for dir in start.ancestors() {
-        if let Some(tools) = tools_in(&dir.join(MANIFEST_FILE))? {
+        if let Some(tools) = tools_in(&manifest_in(dir))? {
             for (alias, tool) in tools {
                 merged.entry(alias).or_insert(tool);
             }
@@ -168,23 +168,24 @@ fn get_tool<'a>(tools: &'a BTreeMap<String, Tool>, alias: &str) -> Option<&'a To
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::manifest::MANIFEST_FILE;
 
     #[test]
-    fn shim_aliases_exclude_lpm_itself() {
-        assert_eq!(alias_from_stem("lpm"), None);
-        assert_eq!(alias_from_stem("LPM"), None);
+    fn shim_aliases_exclude_embr_itself() {
+        assert_eq!(alias_from_stem("embr"), None);
+        assert_eq!(alias_from_stem("EMBR"), None);
         // release assets run before `self install` renames them.
-        assert_eq!(alias_from_stem("lpm-windows-x86_64"), None);
-        // the lpx launcher is the CLI too, never a tool shim.
-        assert_eq!(alias_from_stem("lpx"), None);
-        assert_eq!(alias_from_stem("LPX"), None);
+        assert_eq!(alias_from_stem("embr-windows-x86_64"), None);
+        // the embx launcher is the CLI too, never a tool shim.
+        assert_eq!(alias_from_stem("embx"), None);
+        assert_eq!(alias_from_stem("EMBX"), None);
         assert_eq!(alias_from_stem("rojo"), Some("rojo".to_string()));
         assert_eq!(alias_from_stem("StyLua"), Some("StyLua".to_string()));
     }
 
     #[test]
     fn resolves_aliases_from_nearest_manifest_then_global() {
-        let base = std::env::temp_dir().join("lpm-test-resolve-alias");
+        let base = std::env::temp_dir().join("embr-test-resolve-alias");
         let _ = fs::remove_dir_all(&base);
 
         let project = base.join("project");
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn project_tools_merge_with_nearest_manifest_winning() {
-        let base = std::env::temp_dir().join("lpm-test-project-tools");
+        let base = std::env::temp_dir().join("embr-test-project-tools");
         let _ = fs::remove_dir_all(&base);
 
         let inner = base.join("project");

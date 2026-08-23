@@ -1,6 +1,6 @@
 /target
-lpm.toml
-lpm.lock
+ember.toml
+ember.lock
 packages/
 
 *.md
@@ -9,4 +9,4 @@ packages/
 
 # capture dirs written by scripts/golden-cli.ps1 and scripts/install-fixture.ps1
 .golden/
-.lpm-patch/
+.ember-patch/

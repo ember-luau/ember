@@ -30,7 +30,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     /* `preadd` runs before anything else, the index prompt included -- it is
     the hook for setting up whatever adding a package needs, so it has to be
-    able to run before lpm goes near an index */
+    able to run before embr goes near an index */
     let lifecycle = Lifecycle::of(&manifest, hooks::ADD);
     lifecycle.before()?;
 
@@ -66,7 +66,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     };
 
     /* edit the raw document instead of re-serializing `manifest`,
-    so comments and formatting in lpm.toml survive */
+    so comments and formatting in ember.toml survive */
     let mut document = ManifestDoc::open(Scope::Project)?;
 
     let mut entry = toml_edit::InlineTable::new();
@@ -92,28 +92,28 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     document.save()?;
 
     ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
-    println!("Run `lpm install` to install it");
+    println!("Run `embr install` to install it");
 
     // `postadd` sees the written manifest, so it can go straight to installing
     lifecycle.after()
 }
 
 /** asks which index to search. empty input means the default index,
-the `default` key under [indices] if set, else lpm's. anything else
+the `default` key under [indices] if set, else embr's. anything else
 has to be a key under [indices]. */
 fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
     inquire::set_global_render_config(crate::ui::render_config());
 
     let known_keys: Vec<String> = manifest.indices.keys().cloned().collect();
     let key = inquire::Text::new("index:")
-        .with_help_message("Key from [indices] in lpm.toml; press enter to use LPM's index")
+        .with_help_message("Key from [indices] in ember.toml; press enter to use EMBR's index")
         .with_validator(move |input: &str| {
             let input = input.trim();
             if input.is_empty() || known_keys.iter().any(|key| key == input) {
                 Ok(Validation::Valid)
             } else {
                 Ok(Validation::Invalid(
-                    format!("'{input}' is not defined under [indices] in lpm.toml").into(),
+                    format!("'{input}' is not defined under [indices] in ember.toml").into(),
                 ))
             }
         })

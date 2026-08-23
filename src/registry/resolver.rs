@@ -55,7 +55,7 @@ struct Ask {
     read only where the entry is a seed, i.e. a direct dependency of the
     manifest being installed, since that is the only kind whose tree is
     still open. an entry that reaches the queue with a context already
-    inherited ignores it, and so `target` on a specifier lpm only ever sees
+    inherited ignores it, and so `target` on a specifier embr only ever sees
     transitively -- an `[overrides]` value, or a workspace member's own
     dependency resolved from the root -- does nothing there. */
     target: Option<Environment>,
@@ -91,7 +91,7 @@ enum Requirer {
 impl Requirer {
     fn label(&self) -> String {
         match self {
-            Requirer::Manifest(alias) => format!("lpm.toml (as '{alias}')"),
+            Requirer::Manifest(alias) => format!("ember.toml (as '{alias}')"),
             Requirer::Package { id, alias } => format!("{id} (as '{alias}')"),
         }
     }
@@ -596,24 +596,24 @@ mod tests {
 
     #[test]
     fn workspace_dependencies_resolve_to_local_members() {
-        let base = std::env::temp_dir().join("lpm-test-resolver-workspace");
+        let base = std::env::temp_dir().join("embr-test-resolver-workspace");
         let _ = fs::remove_dir_all(&base);
 
         write(
             &base,
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
              [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n",
         );
         write(
             &base.join("packages/core"),
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/core\"\nversion = \"1.2.0\"\n\n\
              [target]\nenvironment = \"roblox\"\n",
         );
         write(
             &base.join("packages/extra"),
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/extra\"\nversion = \"0.3.0\"\n\n\
              [target]\nenvironment = \"roblox\"\n\n\
              [dependencies]\ncore = { workspace = \"acme/core\", version = \"^\" }\n",
@@ -622,7 +622,7 @@ mod tests {
         /* Resolving from a member, its workspace dep and that dep's own
         workspace dep all land in the install set, linked in place. */
         let member_dir = base.join("packages/extra");
-        let manifest = Manifest::load_from(&member_dir.join("lpm.toml")).unwrap();
+        let manifest = Manifest::load_from(&member_dir.join("ember.toml")).unwrap();
         let installs = resolve(&manifest, &member_dir, Refresh::Never, &mut Vec::new()).unwrap();
 
         assert_eq!(installs.len(), 1);
@@ -643,8 +643,8 @@ mod tests {
         let root_manifest_text = "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
              [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n\n\
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";
-        write(&base, "lpm.toml", root_manifest_text);
-        let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
+        write(&base, "ember.toml", root_manifest_text);
+        let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
         let installs = resolve(&manifest, &base, Refresh::Never, &mut Vec::new()).unwrap();
         let names: Vec<_> = installs
             .iter()
@@ -710,7 +710,7 @@ mod tests {
             }
         }
 
-        let origin = std::env::temp_dir().join("lpm-test-contexts-origin");
+        let origin = std::env::temp_dir().join("embr-test-contexts-origin");
         let _ = fs::remove_dir_all(&origin);
         fs::create_dir_all(origin.join("acme")).unwrap();
         let url = origin.to_string_lossy().replace('\\', "/");
@@ -757,9 +757,9 @@ mod tests {
                 "-C",
                 origin.to_str().unwrap(),
                 "-c",
-                "user.name=lpm-test",
+                "user.name=embr-test",
                 "-c",
-                "user.email=lpm-test@localhost",
+                "user.email=embr-test@localhost",
             ];
             full.extend(args);
             crate::sys::git::run(&full).unwrap();
@@ -835,8 +835,8 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(named.contains("acme/svc"), "{named}");
-        assert!(named.contains("lpm.toml (as 'svc')"), "{named}");
-        assert!(named.contains("lpm.toml (as 'later')"), "{named}");
+        assert!(named.contains("ember.toml (as 'svc')"), "{named}");
+        assert!(named.contains("ember.toml (as 'later')"), "{named}");
 
         let _ = fs::remove_dir_all(&cache);
     }
@@ -857,7 +857,7 @@ mod tests {
             }
         }
 
-        let origin = std::env::temp_dir().join("lpm-test-dep-target-origin");
+        let origin = std::env::temp_dir().join("embr-test-dep-target-origin");
         let _ = fs::remove_dir_all(&origin);
         fs::create_dir_all(origin.join("acme")).unwrap();
         let url = origin.to_string_lossy().replace('\\', "/");
@@ -894,9 +894,9 @@ mod tests {
                 "-C",
                 origin.to_str().unwrap(),
                 "-c",
-                "user.name=lpm-test",
+                "user.name=embr-test",
                 "-c",
-                "user.email=lpm-test@localhost",
+                "user.email=embr-test@localhost",
             ];
             full.extend(args);
             crate::sys::git::run(&full).unwrap();
@@ -946,7 +946,7 @@ mod tests {
             .collect();
         assert_eq!(contexts, [Environment::Roblox, Environment::Server]);
 
-        // a target lpm can't move a package into is refused before any network
+        // a target embr can't move a package into is refused before any network
         assert!(matches!(
             resolve_with("Core = { name = \"acme/core\", version = \"^1\", target = \"lune\" }\n"),
             Err(Error::DependencyTargetInvalid { .. })
@@ -998,7 +998,7 @@ mod tests {
             conflict.contains("acme/core@1.0.0 (as 'lib')"),
             "{conflict}"
         );
-        assert!(conflict.contains("lpm.toml (as 'Lib')"), "{conflict}");
+        assert!(conflict.contains("ember.toml (as 'Lib')"), "{conflict}");
         assert!(conflict.contains("in the roblox tree"), "{conflict}");
 
         assert!(
@@ -1028,8 +1028,8 @@ mod tests {
             }
         }
 
-        let origin = std::env::temp_dir().join("lpm-test-shadow-origin");
-        let project = std::env::temp_dir().join("lpm-test-shadow-project");
+        let origin = std::env::temp_dir().join("embr-test-shadow-origin");
+        let project = std::env::temp_dir().join("embr-test-shadow-project");
         let _ = fs::remove_dir_all(&origin);
         let _ = fs::remove_dir_all(&project);
         fs::create_dir_all(origin.join("acme")).unwrap();
@@ -1083,9 +1083,9 @@ mod tests {
                 "-C",
                 origin.to_str().unwrap(),
                 "-c",
-                "user.name=lpm-test",
+                "user.name=embr-test",
                 "-c",
-                "user.email=lpm-test@localhost",
+                "user.email=embr-test@localhost",
             ];
             full.extend(args);
             crate::sys::git::run(&full).unwrap();
@@ -1093,14 +1093,14 @@ mod tests {
 
         write(
             &project.join("packages/core"),
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/core\"\nversion = \"1.2.0\"\n\n\
              [target]\nenvironment = \"roblox\"\n",
         );
         let resolve_with = |server_dep: &str| {
             write(
                 &project,
-                "lpm.toml",
+                "ember.toml",
                 &format!(
                     "[package]\nname = \"acme/root\"\nversion = \"0.0.0\"\nprivate = true\n\n\
                      [target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n\n\
@@ -1109,7 +1109,7 @@ mod tests {
                      {server_dep} = {{ name = \"acme/{server_dep}\", version = \"^1\" }}\n"
                 ),
             );
-            let manifest = Manifest::load_from(&project.join("lpm.toml")).unwrap();
+            let manifest = Manifest::load_from(&project.join("ember.toml")).unwrap();
             resolve(&manifest, &project, Refresh::Never, &mut Vec::new())
         };
 
@@ -1165,7 +1165,7 @@ mod tests {
             }
         }
 
-        let origin = std::env::temp_dir().join("lpm-test-overrides-origin");
+        let origin = std::env::temp_dir().join("embr-test-overrides-origin");
         let _ = fs::remove_dir_all(&origin);
         fs::create_dir_all(origin.join("acme")).unwrap();
         let url = origin.to_string_lossy().replace('\\', "/");
@@ -1198,9 +1198,9 @@ mod tests {
             "-C",
             origin.to_str().unwrap(),
             "-c",
-            "user.name=lpm-test",
+            "user.name=embr-test",
             "-c",
-            "user.email=lpm-test@localhost",
+            "user.email=embr-test@localhost",
             "init",
         ])
         .unwrap();
@@ -1209,9 +1209,9 @@ mod tests {
             "-C",
             origin.to_str().unwrap(),
             "-c",
-            "user.name=lpm-test",
+            "user.name=embr-test",
             "-c",
-            "user.email=lpm-test@localhost",
+            "user.email=embr-test@localhost",
             "commit",
             "-m",
             "fixture",
@@ -1361,16 +1361,16 @@ mod tests {
 
     #[test]
     fn workspace_dependency_outside_a_workspace_fails() {
-        let base = std::env::temp_dir().join("lpm-test-resolver-no-workspace");
+        let base = std::env::temp_dir().join("embr-test-resolver-no-workspace");
         let _ = fs::remove_dir_all(&base);
         write(
             &base,
-            "lpm.toml",
+            "ember.toml",
             "[package]\nname = \"acme/lonely\"\nversion = \"0.1.0\"\n\n\
              [dependencies]\ncore = { workspace = \"acme/core\" }\n",
         );
 
-        let manifest = Manifest::load_from(&base.join("lpm.toml")).unwrap();
+        let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
         assert!(matches!(
             resolve(&manifest, &base, Refresh::Never, &mut Vec::new()),
             Err(Error::NotInWorkspace(_))

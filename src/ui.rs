@@ -5,8 +5,8 @@ use clap::builder::styling;
 use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
 
-/// theme accent #e61048. the only place the color lives, everything derives from it.
-pub const ACCENT: (u8, u8, u8) = (0xe6, 0x10, 0x48);
+/// theme accent #F23C1B. the only place the color lives, everything derives from it.
+pub const ACCENT: (u8, u8, u8) = (0xF2, 0x3C, 0x1B);
 
 fn accent() -> crossterm::style::Color {
     let (r, g, b) = ACCENT;
@@ -122,7 +122,7 @@ command line it expands to.
 > rojo build -o game.rbxl --watch
 ```
 
-Printed for every script lpm runs, hooks included, because the whole point
+Printed for every script embr runs, hooks included, because the whole point
 is that output arriving next has an attributable source -- doubly so for a
 hook, which nobody typed. `package` is "scope/name@version", or None in a
 project that declares no [package] and so has no such name. */
@@ -191,7 +191,7 @@ pub fn print_heading(heading: &str, hint: &str) {
     println!("\n{heading} {}", hint.dark_grey());
 }
 
-/** One `<name>` and what it runs, how `lpm run` lists a script. The name is
+/** One `<name>` and what it runs, how `embr run` lists a script. The name is
 what you type, so it takes the accent; the commands are reference material
 and stay out of the way. A parallel script shows every command under the
 `[n]` tag its output will carry. */
@@ -269,10 +269,10 @@ pub fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
-/** prints "timing: <label> <elapsed>" to stderr when LPM_TIMINGS is set,
+/** prints "timing: <label> <elapsed>" to stderr when EMBR_TIMINGS is set,
 free when it isn't. labels end up in benchmark diffs, so keep them stable. */
 pub fn timing(label: &str, started: std::time::Instant) {
-    if std::env::var_os("LPM_TIMINGS").is_some() {
+    if std::env::var_os("EMBR_TIMINGS").is_some() {
         eprintln!("timing: {label} {}", format_duration(started.elapsed()));
     }
 }

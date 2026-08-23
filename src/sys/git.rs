@@ -1,4 +1,4 @@
-/*! Shelling out to git. the index cache clones and pulls with it, `lpm
+/*! Shelling out to git. the index cache clones and pulls with it, `embr
 init` reads the surrounding repo for prompt defaults. */
 
 use std::process::Command;
@@ -123,16 +123,16 @@ mod tests {
     #[test]
     fn normalizes_remote_urls_to_https() {
         assert_eq!(
-            remote_https_url("https://github.com/luaupm/lpm.git").as_deref(),
-            Some("https://github.com/luaupm/lpm")
+            remote_https_url("https://github.com/luaupm/embr.git").as_deref(),
+            Some("https://github.com/luaupm/embr")
         );
         assert_eq!(
-            remote_https_url("git@github.com:luaupm/lpm.git").as_deref(),
-            Some("https://github.com/luaupm/lpm")
+            remote_https_url("git@github.com:luaupm/embr.git").as_deref(),
+            Some("https://github.com/luaupm/embr")
         );
         assert_eq!(
-            remote_https_url("ssh://git@github.com/luaupm/lpm").as_deref(),
-            Some("https://github.com/luaupm/lpm")
+            remote_https_url("ssh://git@github.com/luaupm/embr").as_deref(),
+            Some("https://github.com/luaupm/embr")
         );
         assert_eq!(remote_https_url("ftp://example.com/a/b"), None);
     }
@@ -156,7 +156,7 @@ mod tests {
 
         /* exit 1 is the differences-exist case, diff two files that differ.
         --no-index needs no repo */
-        let dir = std::env::temp_dir().join("lpm-test-capture-diff");
+        let dir = std::env::temp_dir().join("embr-test-capture-diff");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();

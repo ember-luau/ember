@@ -1,4 +1,4 @@
-//! Shapes of the GitHub responses lpm deserializes.
+//! Shapes of the GitHub responses embr deserializes.
 
 use serde::Deserialize;
 
@@ -45,8 +45,8 @@ mod tests {
     #[test]
     fn deserializes_github_release() {
         let json = r#"{
-            "url": "https://api.github.com/repos/luaupm/lpm/releases/213371337213",
-            "html_url": "https://github.com/luaupm/lpm/releases/tag/v0.1.0",
+            "url": "https://api.github.com/repos/embr/embr/releases/213371337213",
+            "html_url": "https://github.com/luaupm/embr/releases/tag/v0.1.0",
             "id": 213371337213,
             "node_id": "RE_kwDOLxAmM84MK9bd",
             "tag_name": "v0.1.0",
@@ -59,16 +59,16 @@ mod tests {
             "body": "Release notes here",
             "assets": [
                 {
-                    "url": "https://api.github.com/repos/luaupm/lpm/releases/assets/1",
+                    "url": "https://api.github.com/repos/embr/embr/releases/assets/1",
                     "id": 1,
-                    "name": "lpm-windows-x86_64.exe",
+                    "name": "embr-windows-x86_64.exe",
                     "content_type": "application/octet-stream",
                     "size": 4200000,
-                    "browser_download_url": "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-windows-x86_64.exe"
+                    "browser_download_url": "https://github.com/luaupm/embr/releases/download/v0.1.0/embr-windows-x86_64.exe"
                 },
                 {
-                    "name": "lpm-linux-x86_64",
-                    "browser_download_url": "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-linux-x86_64"
+                    "name": "embr-linux-x86_64",
+                    "browser_download_url": "https://github.com/luaupm/embr/releases/download/v0.1.0/embr-linux-x86_64"
                 }
             ]
         }"#;
@@ -76,12 +76,12 @@ mod tests {
         let release: Release = serde_json::from_str(json).unwrap();
         assert_eq!(release.tag_name, "v0.1.0");
         assert_eq!(release.assets.len(), 2);
-        assert_eq!(release.assets[0].name, "lpm-windows-x86_64.exe");
+        assert_eq!(release.assets[0].name, "embr-windows-x86_64.exe");
         assert_eq!(
             release.assets[0].browser_download_url,
-            "https://github.com/luaupm/lpm/releases/download/v0.1.0/lpm-windows-x86_64.exe"
+            "https://github.com/luaupm/embr/releases/download/v0.1.0/embr-windows-x86_64.exe"
         );
-        assert_eq!(release.assets[1].name, "lpm-linux-x86_64");
+        assert_eq!(release.assets[1].name, "embr-linux-x86_64");
     }
 
     #[test]

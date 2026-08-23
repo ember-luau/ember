@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # `lpm self update` compares the release tag against the version compiled into
+  # `embr self update` compares the release tag against the version compiled into
   # the binary, so a tag that doesn't match Cargo.toml would make every install
   # report an update forever. Refuse to release on mismatch.
   verify-version:
@@ -32,7 +32,7 @@ jobs:
   # replaced or re-uploaded. So it waits for the binaries, which is where a
   # broken build actually shows up, and it runs once rather than per platform.
   # Needs the CRATES_SECRET repo secret, a crates.io token with publish-update
-  # scope on luaupm. cargo only reads it as CARGO_REGISTRY_TOKEN, hence the
+  # scope on embr. cargo only reads it as CARGO_REGISTRY_TOKEN, hence the
   # rename on the way in.
   publish-crate:
     name: Publish to crates.io
@@ -60,11 +60,11 @@ jobs:
           # uncommitted file in the working tree, and the log is one
           log="$RUNNER_TEMP/publish.log"
           if cargo publish --locked 2>&1 | tee "$log"; then
-            echo "Published luaupm $version"
+            echo "Published embr $version"
             exit 0
           fi
           if grep -qE "already (uploaded|exists)" "$log"; then
-            echo "luaupm $version is already on crates.io, nothing to do"
+            echo "embr $version is already on crates.io, nothing to do"
             exit 0
           fi
           exit 1
@@ -75,22 +75,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Asset names must stay in the form lpm-{os}-{arch}[.exe] that
-        # `lpm self update` derives from std::env::consts. The zip staged
+        # Asset names must stay in the form embr-{os}-{arch}[.exe] that
+        # `embr self update` derives from std::env::consts. The zip staged
         # below is named from the same base -- see the Stage assets step.
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: lpm-windows-x86_64.exe
+            asset: embr-windows-x86_64.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: lpm-linux-x86_64
+            asset: embr-linux-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: lpm-macos-aarch64
+            asset: embr-macos-aarch64
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: lpm-macos-x86_64
+            asset: embr-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -102,11 +102,11 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
       # Two assets per platform, on purpose:
       #
-      #   lpm-{os}-{arch}.zip   holding a bare lpm[.exe]. What `lpm self
+      #   embr-{os}-{arch}.zip   holding a bare embr[.exe]. What `embr self
       #                         update` reads, and the only shape rokit and
-      #                         mise will install lpm from -- they take
+      #                         mise will install embr from -- they take
       #                         archives, not loose binaries.
-      #   lpm-{os}-{arch}[.exe] the bare binary. Kept ONLY so an lpm from
+      #   embr-{os}-{arch}[.exe] the bare binary. Kept ONLY so an embr from
       #                         before the zip existed, which matches this
       #                         name exactly and cannot be taught otherwise,
       #                         can still update into a release that has one.
@@ -117,12 +117,12 @@ jobs:
         run: |
           set -euo pipefail
           asset="${{ matrix.asset }}"
-          if [[ "$asset" == *.exe ]]; then binary="lpm.exe"; else binary="lpm"; fi
+          if [[ "$asset" == *.exe ]]; then binary="embr.exe"; else binary="embr"; fi
           mkdir -p dist pack
           cp "target/${{ matrix.target }}/release/$binary" "dist/$asset"
           cp "target/${{ matrix.target }}/release/$binary" "pack/$binary"
           # the archive must hold the binary at its root under its plain
-          # name, which is what `lpm self update` looks for inside it.
+          # name, which is what `embr self update` looks for inside it.
           # Compress-Archive on Windows and zip elsewhere: both ship with
           # the runner images, and zip preserves the executable bit that
           # rokit and mise need on unix.
@@ -143,5 +143,5 @@ jobs:
           # and posts them to Discord once they land.
           # Semver pre-release tags (v0.1.0-alpha.1, v1.0.0-rc.2, ...) get GitHub's
           # pre-release badge and are skipped by the releases/latest API that
-          # `lpm self update` polls.
+          # `embr self update` polls.
           prerelease: ${{ contains(github.ref_name, '-') }}

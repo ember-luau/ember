@@ -23,7 +23,7 @@ pub struct Exports {
     pub types: Vec<String>,
     /// `(binding, package-root-relative module path)` for each module the lines name, first use first.
     pub imports: Vec<(String, String)>,
-    /// `type __lpm_X_T = Types.Default` lines, one per generic default that had to be hoisted.
+    /// `type __ember_X_T = Types.Default` lines, one per generic default that had to be hoisted.
     pub aliases: Vec<String>,
 }
 
@@ -31,10 +31,10 @@ pub struct Exports {
 exported types, e.g.
 
 ```luau
-local module = require("./.lpm/scope_pkg/lib")
-local Types = require("./.lpm/scope_pkg/lib/Types")
-type __lpm_Result_E = Types.Default
-export type Result<T, E = __lpm_Result_E> = module.Result<T, E>
+local module = require("./.ember/scope_pkg/lib")
+local Types = require("./.ember/scope_pkg/lib/Types")
+type __ember_Result_E = Types.Default
+export type Result<T, E = __ember_Result_E> = module.Result<T, E>
 return module
 ```
 
@@ -42,12 +42,12 @@ the require and the alias only appear when a default needs them, see
 [`exported_types`]. no exported types at all = the compact
 `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, exports: &Exports) -> String {
-    link_contents_at(&format!("./.lpm/{folder}"), entry, exports)
+    link_contents_at(&format!("./.ember/{folder}"), entry, exports)
 }
 
 /** like [`link_contents`] but rooted anywhere. workspace members link straight
 to their source, like `../../packages/core` + `src`, instead of an extracted
-copy under `.lpm/`. `root` is the package, `entry` the module inside it, kept
+copy under `.ember/`. `root` is the package, `entry` the module inside it, kept
 apart because imports are relative to the package, not to the module. */
 pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
     // empty entry = the package root itself is the module, a root init file
@@ -396,7 +396,7 @@ impl SourceVisitor {
         if hoisting_would_escape(export, generic, default) {
             return parameter.clone();
         }
-        let alias = format!("__lpm_{}_{}", export.name, parameter);
+        let alias = format!("__ember_{}_{}", export.name, parameter);
         exports
             .aliases
             .push(format!("type {alias} = {}", default.body));
@@ -559,11 +559,11 @@ fn reexport(name: &str, declared: &[String], used: &[String]) -> String {
 }
 
 /** finds a package's entry point relative to its root, extensionless since Luau
-string requires reject extensions. checked in order, lpm.toml `[target].main`,
+string requires reject extensions. checked in order, ember.toml `[target].main`,
 pesde.toml `[target].lib`, a Rojo default.project.json tree `$path`, then
 conventional init file locations. */
 pub fn entry_point(dir: &Path) -> Option<String> {
-    if let Some(main) = toml_string(dir, "lpm.toml", &["target", "main"]) {
+    if let Some(main) = toml_string(dir, "ember.toml", &["target", "main"]) {
         return Some(normalize_entry(&main));
     }
     if let Some(lib) = toml_string(dir, "pesde.toml", &["target", "lib"]) {
@@ -635,10 +635,12 @@ fn project_tree_path(tree: &serde_json::Value) -> Option<String> {
     }
 }
 
-/** folders a guess never looks in. output roots lpm or the package itself
+/** folders a guess never looks in. output roots embr or the package itself
 wrote, and the places a repo keeps code that isn't the library. */
 const GUESS_SKIPS: &[&str] = &[
     ".git",
+    ".ember",
+    // a store left by an install from before the ember rename
     ".lpm",
     PACKAGES_DIR,
     "node_modules",
@@ -652,7 +654,7 @@ const GUESS_SKIPS: &[&str] = &[
 ];
 
 /** last resort for a package that names no entry point anywhere, `synttx/vow`
-being one: a single `src/vow.luau` with no lpm.toml, pesde.toml, project file
+being one: a single `src/vow.luau` with no ember.toml, pesde.toml, project file
 or init file to say so.
 
 two things are worth guessing from. a package that ships exactly one Luau
@@ -722,17 +724,17 @@ fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(
 
 /// what a package calls itself, from whichever manifest it shipped.
 fn package_name(dir: &Path) -> Option<String> {
-    ["lpm.toml", "pesde.toml", "wally.toml"]
+    ["ember.toml", "pesde.toml", "wally.toml"]
         .into_iter()
         .find_map(|file| toml_string(dir, file, &["package", "name"]))
 }
 
-/** reads an extracted package's own manifest for its environment. lpm.toml
+/** reads an extracted package's own manifest for its environment. ember.toml
 `[target].environment` first, then pesde.toml's, then wally.toml
 `[package].realm`, the last two translated. */
 pub fn environment(dir: &Path) -> Option<Environment> {
-    if let Some(name) = toml_string(dir, "lpm.toml", &["target", "environment"]) {
-        return Environment::from_lpm(&name).ok();
+    if let Some(name) = toml_string(dir, "ember.toml", &["target", "environment"]) {
+        return Environment::from_embr(&name).ok();
     }
     if let Some(name) = toml_string(dir, "pesde.toml", &["target", "environment"]) {
         return Environment::from_pesde(&name).ok();
@@ -746,7 +748,7 @@ pub fn environment(dir: &Path) -> Option<Environment> {
 /** an extracted package's declared runtime dependencies, as (alias,
 lowercased package name) pairs, what install's nested-link pass consumes.
 the first manifest with a matching table wins, same priority order as the
-other readers here. lpm.toml reads each entry's `name` key, pesde.toml
+other readers here. ember.toml reads each entry's `name` key, pesde.toml
 `name` or `wally` for wally-sourced entries, wally.toml
 `alias = "scope/name@req"`. wally splits runtime deps by realm, so its
 [server-dependencies] count too. the resolver installs them, wally.rs
@@ -760,7 +762,7 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
     type DependencyName = fn(&toml::Value) -> Option<String>;
 
     let manifests: [(&str, &[&str], DependencyName); 3] = [
-        ("lpm.toml", &["dependencies"], |entry| {
+        ("ember.toml", &["dependencies"], |entry| {
             Some(entry.get("name")?.as_str()?.to_string())
         }),
         ("pesde.toml", &["dependencies"], |entry| {
@@ -869,12 +871,12 @@ mod tests {
 
     #[test]
     fn detects_environment_from_manifests() {
-        let base = std::env::temp_dir().join("lpm-test-detect-env");
+        let base = std::env::temp_dir().join("embr-test-detect-env");
         let _ = fs::remove_dir_all(&base);
 
-        let lpm = base.join("lpm");
-        write_package(&lpm, "lpm.toml", "[target]\nenvironment = \"lune\"");
-        assert_eq!(environment(&lpm), Some(Environment::Lune));
+        let embr = base.join("embr");
+        write_package(&embr, "ember.toml", "[target]\nenvironment = \"lune\"");
+        assert_eq!(environment(&embr), Some(Environment::Lune));
 
         let pesde = base.join("pesde");
         write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");
@@ -892,12 +894,12 @@ mod tests {
     }
 
     #[test]
-    fn lpm_manifest_takes_priority_over_wally() {
-        let base = std::env::temp_dir().join("lpm-test-detect-priority");
+    fn embr_manifest_takes_priority_over_wally() {
+        let base = std::env::temp_dir().join("embr-test-detect-priority");
         let _ = fs::remove_dir_all(&base);
 
         write_package(&base, "wally.toml", "[package]\nrealm = \"server\"");
-        write_package(&base, "lpm.toml", "[target]\nenvironment = \"luau\"");
+        write_package(&base, "ember.toml", "[target]\nenvironment = \"luau\"");
         assert_eq!(environment(&base), Some(Environment::Luau));
 
         let _ = fs::remove_dir_all(&base);
@@ -905,20 +907,20 @@ mod tests {
 
     #[test]
     fn reads_declared_dependencies_per_manifest_flavor() {
-        let base = std::env::temp_dir().join("lpm-test-declared-deps");
+        let base = std::env::temp_dir().join("embr-test-declared-deps");
         let _ = fs::remove_dir_all(&base);
 
-        // lpm.toml reads `name` keys, lowercased. entries without one, like
+        // ember.toml reads `name` keys, lowercased. entries without one, like
         // workspace specifiers, are skipped.
-        let lpm = base.join("lpm");
+        let embr = base.join("embr");
         write_package(
-            &lpm,
-            "lpm.toml",
+            &embr,
+            "ember.toml",
             "[dependencies]\ncore = { name = \"Chief/Core\", version = \"^0.2.0\" }\n\
              local = { workspace = \"chief/dev\", version = \"^\" }\n",
         );
         assert_eq!(
-            declared_dependencies(&lpm),
+            declared_dependencies(&embr),
             [("core".to_string(), "chief/core".to_string())]
         );
 
@@ -989,13 +991,13 @@ mod tests {
 
     #[test]
     fn declared_dependencies_follow_reader_priority() {
-        let base = std::env::temp_dir().join("lpm-test-declared-deps-priority");
+        let base = std::env::temp_dir().join("embr-test-declared-deps-priority");
         let _ = fs::remove_dir_all(&base);
 
-        // an lpm.toml [dependencies] table wins outright over wally.toml...
+        // an ember.toml [dependencies] table wins outright over wally.toml...
         write_package(
             &base,
-            "lpm.toml",
+            "ember.toml",
             "[dependencies]\ncore = { name = \"acme/core\", version = \"^\" }\n",
         );
         write_package(&base, "wally.toml", "[dependencies]\nOther = \"a/b@^1\"\n");
@@ -1004,8 +1006,12 @@ mod tests {
             [("core".to_string(), "acme/core".to_string())]
         );
 
-        // ...but an lpm.toml without one falls through to the next manifest.
-        fs::write(base.join("lpm.toml"), "[package]\nname = \"acme/thing\"\n").unwrap();
+        // ...but an ember.toml without one falls through to the next manifest.
+        fs::write(
+            base.join("ember.toml"),
+            "[package]\nname = \"acme/thing\"\n",
+        )
+        .unwrap();
         assert_eq!(
             declared_dependencies(&base),
             [("Other".to_string(), "a/b".to_string())]
@@ -1016,7 +1022,7 @@ mod tests {
 
     #[test]
     fn flattens_single_wrapper_directory() {
-        let base = std::env::temp_dir().join("lpm-test-flatten");
+        let base = std::env::temp_dir().join("embr-test-flatten");
         let _ = fs::remove_dir_all(&base);
         let wrapper = base.join("pkg-1.0.0");
         fs::create_dir_all(wrapper.join("src")).unwrap();
@@ -1031,12 +1037,12 @@ mod tests {
     }
 
     /** synttx/vow's shape: one `src/vow.luau` and nothing that names it, no
-    lpm.toml, no pesde.toml, no project file, no init file. detection has
+    ember.toml, no pesde.toml, no project file, no init file. detection has
     nothing to go on, so the guess is all that stands between it and no link
     file at all. */
     #[test]
     fn guesses_an_entry_from_what_a_package_ships() {
-        let base = std::env::temp_dir().join("lpm-test-guess-entry");
+        let base = std::env::temp_dir().join("embr-test-guess-entry");
         let _ = fs::remove_dir_all(&base);
 
         // the only Luau file it ships, whatever it happens to be called
@@ -1068,7 +1074,7 @@ mod tests {
 
     #[test]
     fn refuses_to_guess_when_the_answer_is_a_coin_flip() {
-        let base = std::env::temp_dir().join("lpm-test-guess-refuses");
+        let base = std::env::temp_dir().join("embr-test-guess-refuses");
         let _ = fs::remove_dir_all(&base);
 
         // two files, neither named for the package
@@ -1095,12 +1101,12 @@ mod tests {
 
     #[test]
     fn detects_entry_points_in_priority_order() {
-        let base = std::env::temp_dir().join("lpm-test-detect-entry");
+        let base = std::env::temp_dir().join("embr-test-detect-entry");
         let _ = fs::remove_dir_all(&base);
 
-        // lpm.toml main wins over everything.
+        // ember.toml main wins over everything.
         let a = base.join("a");
-        write_package(&a, "lpm.toml", "[target]\nmain = \"src/main.luau\"");
+        write_package(&a, "ember.toml", "[target]\nmain = \"src/main.luau\"");
         write_package(&a, "init.luau", "");
         assert_eq!(entry_point(&a).as_deref(), Some("src/main"));
 
@@ -1135,7 +1141,7 @@ mod tests {
         /* install mirrors a shipped project file onto the disk layout after
         reading the entry. later passes, nested links, read it again, so
         both shapes have to answer the same */
-        let base = std::env::temp_dir().join("lpm-test-entry-after-rewrite");
+        let base = std::env::temp_dir().join("embr-test-entry-after-rewrite");
         let _ = fs::remove_dir_all(&base);
         let rewrite = |dir: &Path| {
             crate::project::rojo::mirror_disk_layout(dir, &mut |message| {
@@ -1185,7 +1191,7 @@ mod tests {
         dependent reads this entry back afterwards to link against it. a
         package that is both dependency and dependent is read on both sides
         of its own mount, so the answer has to hold across it */
-        let base = std::env::temp_dir().join("lpm-test-entry-after-mount");
+        let base = std::env::temp_dir().join("embr-test-entry-after-mount");
         let _ = fs::remove_dir_all(&base);
 
         /* `out` is roblox-ts shaped and `Maid.lua` a single file package:
@@ -1251,7 +1257,7 @@ mod tests {
     fn link_files_require_the_stored_package() {
         assert_eq!(
             link_contents("evaera_promise", "lib", &Exports::default()),
-            "return require(\"./.lpm/evaera_promise/lib\")\n"
+            "return require(\"./.ember/evaera_promise/lib\")\n"
         );
         assert_eq!(
             link_contents(
@@ -1259,7 +1265,7 @@ mod tests {
                 "lib",
                 &type_lines(["export type Status = module.Status"])
             ),
-            "local module = require(\"./.lpm/evaera_promise/lib\")\n\
+            "local module = require(\"./.ember/evaera_promise/lib\")\n\
              export type Status = module.Status\n\
              return module\n"
         );
@@ -1378,7 +1384,7 @@ mod tests {
         /* pinned, not bounded. `<= MAX_NESTING_DEPTH` would also hold for a
         fixture nested five levels deep, and the whole point is to sit exactly
         where the guard stops refusing. it refuses `>`, so the ceiling itself
-        gets through and is the most expensive input lpm will ever parse */
+        gets through and is the most expensive input embr will ever parse */
         assert_eq!(bracket_depth(&deep), MAX_NESTING_DEPTH);
         assert_eq!(
             exported_types(&deep, &RequireFrame::init(""))
@@ -1445,12 +1451,12 @@ mod tests {
         );
         assert_eq!(
             exports.aliases,
-            ["type __lpm_Signal_Signature = Types.DefaultSignature"]
+            ["type __ember_Signal_Signature = Types.DefaultSignature"]
         );
         assert_eq!(
             exports.types,
             [
-                "export type Signal<Signature = __lpm_Signal_Signature> = module.Signal<Signature>",
+                "export type Signal<Signature = __ember_Signal_Signature> = module.Signal<Signature>",
                 // no default, nothing to hoist, and no second import either
                 "export type Wrap<Other> = module.Wrap<Other>",
             ]
@@ -1458,10 +1464,10 @@ mod tests {
 
         assert_eq!(
             link_contents("nowoshire_namedsignal", "src", &exports),
-            "local module = require(\"./.lpm/nowoshire_namedsignal/src\")\n\
-             local Types = require(\"./.lpm/nowoshire_namedsignal/src/Types\")\n\
-             type __lpm_Signal_Signature = Types.DefaultSignature\n\
-             export type Signal<Signature = __lpm_Signal_Signature> = module.Signal<Signature>\n\
+            "local module = require(\"./.ember/nowoshire_namedsignal/src\")\n\
+             local Types = require(\"./.ember/nowoshire_namedsignal/src/Types\")\n\
+             type __ember_Signal_Signature = Types.DefaultSignature\n\
+             export type Signal<Signature = __ember_Signal_Signature> = module.Signal<Signature>\n\
              export type Wrap<Other> = module.Wrap<Other>\n\
              return module\n"
         );
@@ -1482,7 +1488,7 @@ mod tests {
                 "#,
                 "export type Signal<S> = module.Signal<S>",
             ),
-            // a module lpm can't resolve to a path of its own
+            // a module embr can't resolve to a path of its own
             (
                 r#"
                 local Task = require("@lune/task")
@@ -1552,7 +1558,7 @@ mod tests {
     /// which frames a package's entry actually gets, read off the file it resolves to.
     #[test]
     fn frames_come_from_the_resolved_entry_file() {
-        let base = std::env::temp_dir().join("lpm-test-require-frames");
+        let base = std::env::temp_dir().join("embr-test-require-frames");
         let _ = fs::remove_dir_all(&base);
 
         let init = base.join("init-style");
@@ -1592,7 +1598,7 @@ mod tests {
 
     #[test]
     fn entry_source_resolves_like_a_string_require() {
-        let base = std::env::temp_dir().join("lpm-test-entry-source");
+        let base = std::env::temp_dir().join("embr-test-entry-source");
         let _ = fs::remove_dir_all(&base);
 
         write_package(&base, "lib.luau", "return {}");

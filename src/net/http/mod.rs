@@ -7,7 +7,7 @@ use std::time::Duration;
 pub mod error;
 pub mod responses;
 
-pub const USER_AGENT: &str = concat!("lpm/", env!("CARGO_PKG_VERSION"));
+pub const USER_AGENT: &str = concat!("embr/", env!("CARGO_PKG_VERSION"));
 
 /** the client for small exchanges like index metadata, auth, and JSON
 APIs. an agent pools connections, bare `ureq::get` opens a fresh TCP+TLS

@@ -1,8 +1,8 @@
-/*! `lpm execute`, alias `x`. downloads a GitHub-released executable if
-needed and hands the terminal to it, npx-style. `lpx` is this command under
-its own name. `self install` drops a copy of lpm called lpx beside the
+/*! `embr execute`, alias `x`. downloads a GitHub-released executable if
+needed and hands the terminal to it, npx-style. `embx` is this command under
+its own name. `self install` drops a copy of embr called embx beside the
 tool shims, and main routes that argv[0] here. nothing is ever written to
-a manifest. repeat runs inside the TTL come from ~/.lpm/tools with zero
+a manifest. repeat runs inside the TTL come from ~/.ember/tools with zero
 network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
@@ -19,28 +19,28 @@ What <SPEC> can be, first match winning:
   a [tools] alias   stylua                 runs the exact version pinned by
                                            the surrounding project or the
                                            global tools file
-  a shorthand       create-chief-project,  the curated names lpm knows,
-                    rojo, stylua, ...      the same list `lpm tool add`
+  a shorthand       create-chief-project,  the curated names embr knows,
+                    rojo, stylua, ...      the same list `embr tool add`
                                            accepts
   a repository      JohnnyMorganz/StyLua   any GitHub repo with releases
 Add @version for an exact release: stylua@2.0.2.
 
 Unpinned names without @version run the latest release. That answer is
-cached and re-checked at the index TTL cadence (LPM_INDEX_TTL_SECS,
+cached and re-checked at the index TTL cadence (EMBER_INDEX_TTL_SECS,
 default 300s); --refresh asks GitHub now, and does nothing for pinned or
 @version specs, those are already exact. Binaries live under
-~/.lpm/tools and are reused; no manifest is touched.
+~/.ember/tools and are reused; no manifest is touched.
 
 Everything after <SPEC> is passed to the executable, hyphens included;
-lpm's own flags go before it. The exit code is the executable's.
+embr's own flags go before it. The exit code is the executable's.
 
-lpx runs code fetched from GitHub by name, the same trust decision as
+embx runs code fetched from GitHub by name, the same trust decision as
 installing a dependency.
 
 Examples:
-  lpx create-chief-project my-game
-  lpx stylua --check .
-  lpm x JohnnyMorganz/wally-package-types@1.2.0 sourcemap.json";
+  embx create-chief-project my-game
+  embx stylua --check .
+  embr x JohnnyMorganz/wally-package-types@1.2.0 sourcemap.json";
 
 #[derive(Args, Debug)]
 #[command(after_long_help = AFTER_LONG_HELP)]

@@ -15,11 +15,11 @@ const PACKAGE: &str = "package";
 /** the whole manifest a `project` answer produces. a project consumes
 packages and never publishes, so it needs no [package] table and nothing
 else has to be asked -- see [`Manifest::package`]. the empty table is there
-so `lpm add` has somewhere obvious to write, and so the file doesn't read
+so `embr add` has somewhere obvious to write, and so the file doesn't read
 as an accident. */
 const PROJECT_MANIFEST: &str = "\
 # Manifest for this project. See https://luaupm.com/docs
-# Add dependencies with `lpm add <scope/name>`, then run `lpm install`.
+# Add dependencies with `embr add <scope/name>`, then run `embr install`.
 
 [dependencies]
 ";
@@ -42,10 +42,10 @@ const LICENSES: &[&str] = &[
 ];
 
 const INTRO: &str = "\
-This utility will walk you through creating an lpm.toml file
+This utility will walk you through creating an ember.toml file
 It only covers the most common items, and tries to guess sensible defaults
 
-See `lpm help init` for documentation on these fields and what they do
+See `embr help init` for documentation on these fields and what they do
 
 Press ^C at any time to quit";
 
@@ -75,7 +75,7 @@ impl Defaults {
 
         /* authors must be GitHub usernames, the registry makes them scope
         co-owners on publish and rejects anything else. so only guess from
-        sources that actually hold one, the login a previous `lpm publish`
+        sources that actually hold one, the login a previous `embr publish`
         stored, then the owner of a github.com origin remote. never git
         user.name or user.email, those are display identities not usernames */
         let authors = auth::load()
@@ -119,7 +119,7 @@ fn sanitize_name_part(part: &str) -> String {
 }
 
 pub fn run() -> Result<(), Error> {
-    let manifest_path = Path::new("lpm.toml");
+    let manifest_path = Path::new("ember.toml");
     if manifest_path.exists() {
         return Err(Error::ManifestExists);
     }
@@ -208,7 +208,7 @@ pub fn run() -> Result<(), Error> {
             license: Some(license.to_string()),
         }),
         target: Some(Target {
-            environment: Environment::from_lpm(environment)?,
+            environment: Environment::from_embr(environment)?,
             main: non_empty(main),
             includes: Vec::new(),
             excludes: Vec::new(),
@@ -230,20 +230,20 @@ pub fn run() -> Result<(), Error> {
 /// writes the new manifest and git-ignores what installs generate, the tail both answers share.
 fn write_manifest(path: &Path, contents: &str) -> Result<(), Error> {
     std::fs::write(path, contents)?;
-    crate::ui::print_success("Created lpm.toml");
+    crate::ui::print_success("Created ember.toml");
 
-    if let Some(message) = gitignore_lpm(Path::new(".gitignore"))? {
+    if let Some(message) = gitignore_embr(Path::new(".gitignore"))? {
         crate::ui::print_success(&message);
     }
 
     Ok(())
 }
 
-/** git-ignores lpm's generated folders, the packages output and patch
+/** git-ignores embr's generated folders, the packages output and patch
 working copies, creating .gitignore if missing. returns a message saying
 what changed, None when everything was already covered. */
-fn gitignore_lpm(path: &Path) -> Result<Option<String>, Error> {
-    const ENTRIES: [&str; 2] = ["packages/", ".lpm-patch/"];
+fn gitignore_embr(path: &Path) -> Result<Option<String>, Error> {
+    const ENTRIES: [&str; 2] = ["packages/", ".ember-patch/"];
 
     // any common spelling counts, bare, trailing slash, leading slash
     let ignored = |contents: &str, entry: &str| {
@@ -338,14 +338,14 @@ mod tests {
 
     /** the `project` answer writes this verbatim and asks nothing else, so
     nothing else validates it. it has to parse, declare no package, and be
-    somewhere `lpm add` can write. */
+    somewhere `embr add` can write. */
     #[test]
     fn the_project_template_is_a_package_less_manifest() {
         let manifest: Manifest = toml::from_str(PROJECT_MANIFEST).unwrap();
         assert!(manifest.package.is_none());
         assert!(manifest.dependencies.is_empty());
 
-        // `lpm add` edits the raw document, so [dependencies] must be there
+        // `embr add` edits the raw document, so [dependencies] must be there
         let document: toml_edit::DocumentMut = PROJECT_MANIFEST.parse().unwrap();
         assert!(
             document
@@ -355,9 +355,9 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_choices_are_the_ones_lpm_parses() {
+    fn the_environment_choices_are_the_ones_embr_parses() {
         for environment in ENVIRONMENTS {
-            let parsed = Environment::from_lpm(environment).unwrap();
+            let parsed = Environment::from_embr(environment).unwrap();
             // and each offers its own canonical spelling, not an alias
             assert_eq!(parsed.dir_name(), *environment);
         }
@@ -417,7 +417,7 @@ mod tests {
             Some("Luau-PM")
         );
         assert_eq!(
-            github_owner("https://github.com/savruun/lpm-cli").as_deref(),
+            github_owner("https://github.com/savruun/embr-cli").as_deref(),
             Some("savruun")
         );
         assert_eq!(github_owner("https://gitlab.com/owner/repo"), None);
@@ -433,8 +433,8 @@ mod tests {
     #[test]
     fn derives_scoped_name_from_remote_url() {
         assert_eq!(
-            owner_repo_from_url("https://github.com/luaupm/lpm").as_deref(),
-            Some("luaupm/lpm")
+            owner_repo_from_url("https://github.com/luaupm/embr").as_deref(),
+            Some("luaupm/embr")
         );
         assert_eq!(
             owner_repo_from_url("https://github.com/Luau-PM/My_Repo").as_deref(),
@@ -445,47 +445,47 @@ mod tests {
 
     #[test]
     fn sanitizes_name_parts() {
-        assert_eq!(sanitize_name_part("Luau-LPM_2"), "luaulpm2");
+        assert_eq!(sanitize_name_part("Luau-EMBR_2"), "luauembr2");
         assert_eq!(sanitize_name_part("---"), "");
     }
 
     #[test]
-    fn gitignores_lpm_directory() {
-        let dir = std::env::temp_dir().join("lpm-test-gitignore");
+    fn gitignores_ember_directory() {
+        let dir = std::env::temp_dir().join("embr-test-gitignore");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".gitignore");
 
         // missing file gets created with both entries
         assert_eq!(
-            gitignore_lpm(&path).unwrap().as_deref(),
-            Some("Created .gitignore with packages/ and .lpm-patch/")
+            gitignore_embr(&path).unwrap().as_deref(),
+            Some("Created .gitignore with packages/ and .ember-patch/")
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "packages/\n.lpm-patch/\n"
+            "packages/\n.ember-patch/\n"
         );
 
         // both there in any common spelling leaves the file alone
-        assert_eq!(gitignore_lpm(&path).unwrap(), None);
-        std::fs::write(&path, "/target\npackages\n/.lpm-patch\n").unwrap();
-        assert_eq!(gitignore_lpm(&path).unwrap(), None);
+        assert_eq!(gitignore_embr(&path).unwrap(), None);
+        std::fs::write(&path, "/target\npackages\n/.ember-patch\n").unwrap();
+        assert_eq!(gitignore_embr(&path).unwrap(), None);
 
         /* file missing entries gets exactly the missing ones appended,
         even with no trailing newline */
         std::fs::write(&path, "/target").unwrap();
         assert_eq!(
-            gitignore_lpm(&path).unwrap().as_deref(),
-            Some("Added packages/ and .lpm-patch/ to .gitignore")
+            gitignore_embr(&path).unwrap().as_deref(),
+            Some("Added packages/ and .ember-patch/ to .gitignore")
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "/target\npackages/\n.lpm-patch/\n"
+            "/target\npackages/\n.ember-patch/\n"
         );
         std::fs::write(&path, "packages/\n").unwrap();
         assert_eq!(
-            gitignore_lpm(&path).unwrap().as_deref(),
-            Some("Added .lpm-patch/ to .gitignore")
+            gitignore_embr(&path).unwrap().as_deref(),
+            Some("Added .ember-patch/ to .gitignore")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
