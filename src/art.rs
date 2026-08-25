@@ -15,10 +15,10 @@ pub fn logo(color: bool) -> String {
 }
 
 /** the gradient colour of one row: gold at the top, through the brand accent
-in the middle, down to a deep ember.
+in the middle, down to a crimson.
 
 The hue travels, it is not one colour getting darker. A flame runs gold where
-it is hottest and deep red where it is spent, and the mark is a flame above a
+it is hottest and red where it is spent, and the mark is a flame above a
 crate, so the ramp reads down the artwork the way heat does. A single-hue run
 from a pale tint to a dark shade renders the top rows as pastel, which is what
 this replaces.
@@ -31,7 +31,7 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
     text is painted with this same ramp, and its first and last lines have to
     stay readable on a light terminal as well as a dark one */
     const TOP: (u8, u8, u8) = (0xFF, 0xC2, 0x4A); // gold, the hot tip
-    const BOTTOM: (u8, u8, u8) = (0x8C, 0x16, 0x07); // deep ember, the coal
+    const BOTTOM: (u8, u8, u8) = (0xD9, 0x1E, 0x36); // crimson, the coal
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let position = row.min(rows.saturating_sub(1)) as u32 * 1000 / last; // 0..=1000
@@ -138,14 +138,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_gradient_runs_pale_through_the_accent_to_deep() {
+    fn the_gradient_runs_gold_through_the_accent_to_crimson() {
         let rows = 21;
         let top = row_color(0, rows);
         let middle = row_color(rows / 2, rows);
         let bottom = row_color(rows - 1, rows);
 
         assert_eq!(top, (0xFF, 0xC2, 0x4A));
-        assert_eq!(bottom, (0x8C, 0x16, 0x07));
+        assert_eq!(bottom, (0xD9, 0x1E, 0x36));
         // the middle is the brand colour itself, near enough to see it
         let (r, g, b) = middle;
         assert!(
