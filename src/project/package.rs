@@ -4,7 +4,7 @@ understand foreign manifests, pesde.toml, wally.toml, Rojo project files, since
 that's all a published package carries. */
 
 use crate::error::Error;
-use crate::project::manifest::Environment;
+use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE};
 use crate::project::rojo::{PACKAGES_DIR, PROJECT_FILE};
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
@@ -13,6 +13,21 @@ use std::path::{Path, PathBuf};
 
 /// what the link file calls the package it wraps. a package binding of the same name loses its imports rather than shadow this.
 const MODULE_BINDING: &str = "module";
+
+/** the names embr's own manifest goes by, current one first. a package
+published before the ember rename ships lpm.toml, and no republish reaches the
+versions already on the registry, so every reader here accepts both. chief/core
+and the rest of the chief scope are in that state today: read only ember.toml
+and they declare no entry point, no environment and no dependencies, so their
+nested links never get written and their requires land on nothing. */
+const OWN_MANIFESTS: [&str; 2] = [MANIFEST_FILE, LEGACY_MANIFEST_FILE];
+
+/// string at `keys` in the package's own manifest, under whichever name it ships.
+fn own_manifest_string(dir: &Path, keys: &[&str]) -> Option<String> {
+    OWN_MANIFESTS
+        .into_iter()
+        .find_map(|file| toml_string(dir, file, keys))
+}
 
 /** what a link file has to restate about one module: its exported types, the
 modules those types reach through, and the aliases that make the reaching
@@ -559,11 +574,11 @@ fn reexport(name: &str, declared: &[String], used: &[String]) -> String {
 }
 
 /** finds a package's entry point relative to its root, extensionless since Luau
-string requires reject extensions. checked in order, ember.toml `[target].main`,
-pesde.toml `[target].lib`, a Rojo default.project.json tree `$path`, then
-conventional init file locations. */
+string requires reject extensions. checked in order, ember.toml (or lpm.toml)
+`[target].main`, pesde.toml `[target].lib`, a Rojo default.project.json tree
+`$path`, then conventional init file locations. */
 pub fn entry_point(dir: &Path) -> Option<String> {
-    if let Some(main) = toml_string(dir, "ember.toml", &["target", "main"]) {
+    if let Some(main) = own_manifest_string(dir, &["target", "main"]) {
         return Some(normalize_entry(&main));
     }
     if let Some(lib) = toml_string(dir, "pesde.toml", &["target", "lib"]) {
@@ -724,16 +739,21 @@ fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(
 
 /// what a package calls itself, from whichever manifest it shipped.
 fn package_name(dir: &Path) -> Option<String> {
-    ["ember.toml", "pesde.toml", "wally.toml"]
-        .into_iter()
-        .find_map(|file| toml_string(dir, file, &["package", "name"]))
+    [
+        MANIFEST_FILE,
+        LEGACY_MANIFEST_FILE,
+        "pesde.toml",
+        "wally.toml",
+    ]
+    .into_iter()
+    .find_map(|file| toml_string(dir, file, &["package", "name"]))
 }
 
 /** reads an extracted package's own manifest for its environment. ember.toml
-`[target].environment` first, then pesde.toml's, then wally.toml
+(or lpm.toml) `[target].environment` first, then pesde.toml's, then wally.toml
 `[package].realm`, the last two translated. */
 pub fn environment(dir: &Path) -> Option<Environment> {
-    if let Some(name) = toml_string(dir, "ember.toml", &["target", "environment"]) {
+    if let Some(name) = own_manifest_string(dir, &["target", "environment"]) {
         return Environment::from_embr(&name).ok();
     }
     if let Some(name) = toml_string(dir, "pesde.toml", &["target", "environment"]) {
@@ -748,7 +768,7 @@ pub fn environment(dir: &Path) -> Option<Environment> {
 /** an extracted package's declared runtime dependencies, as (alias,
 lowercased package name) pairs, what install's nested-link pass consumes.
 the first manifest with a matching table wins, same priority order as the
-other readers here. ember.toml reads each entry's `name` key, pesde.toml
+other readers here. ember.toml and lpm.toml read each entry's `name` key, pesde.toml
 `name` or `wally` for wally-sourced entries, wally.toml
 `alias = "scope/name@req"`. wally splits runtime deps by realm, so its
 [server-dependencies] count too. the resolver installs them, wally.rs
@@ -761,10 +781,12 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
     /// how one manifest flavor names the package a dependency entry means
     type DependencyName = fn(&toml::Value) -> Option<String>;
 
-    let manifests: [(&str, &[&str], DependencyName); 3] = [
-        ("ember.toml", &["dependencies"], |entry| {
-            Some(entry.get("name")?.as_str()?.to_string())
-        }),
+    // how an ember.toml or lpm.toml entry names its package
+    let own: DependencyName = |entry| Some(entry.get("name")?.as_str()?.to_string());
+
+    let manifests: [(&str, &[&str], DependencyName); 4] = [
+        (MANIFEST_FILE, &["dependencies"], own),
+        (LEGACY_MANIFEST_FILE, &["dependencies"], own),
         ("pesde.toml", &["dependencies"], |entry| {
             let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
             // pesde serializes wally package names with a "wally#" prefix
@@ -901,6 +923,39 @@ mod tests {
         write_package(&base, "wally.toml", "[package]\nrealm = \"server\"");
         write_package(&base, "ember.toml", "[target]\nenvironment = \"luau\"");
         assert_eq!(environment(&base), Some(Environment::Luau));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** chief/traits@0.2.0's manifest, verbatim. every package published
+    before the ember rename ships lpm.toml, so a reader that knows only
+    ember.toml finds no entry point, no environment and no dependencies,
+    and the nested links that carry the package's own requires never get
+    written. */
+    #[test]
+    fn a_pre_rename_manifest_reads_like_the_current_one() {
+        let base = std::env::temp_dir().join("embr-test-legacy-manifest");
+        let _ = fs::remove_dir_all(&base);
+
+        write_package(
+            &base,
+            "lpm.toml",
+            "[package]\nname = \"chief/traits\"\nversion = \"0.2.0\"\n\
+             [target]\nenvironment = \"shared\"\nmain = \"out/lpm\"\n\
+             [dependencies.core]\nname = \"chief/core\"\nversion = \"^0.2.0\"\n",
+        );
+
+        assert_eq!(environment(&base), Some(Environment::Roblox));
+        assert_eq!(entry_point(&base).as_deref(), Some("out/lpm"));
+        assert_eq!(package_name(&base).as_deref(), Some("chief/traits"));
+        assert_eq!(
+            declared_dependencies(&base),
+            vec![("core".to_string(), "chief/core".to_string())]
+        );
+
+        // a package carrying both is read from the current name
+        write_package(&base, "ember.toml", "[target]\nenvironment = \"lune\"\n");
+        assert_eq!(environment(&base), Some(Environment::Lune));
 
         let _ = fs::remove_dir_all(&base);
     }
