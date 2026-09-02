@@ -2,7 +2,7 @@
 # The crate and the binary share one name: cargo install embr, then run embr.
 # `ember` itself is not used, to stay clear of the ember.js CLI on PATH.
 name = "embr"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
