@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn path_matching_ignores_case_and_padding() {
-        let path = r"C:\Windows;c:\users\me\.EMBR\BIN ; C:\Tools";
+        let path = r"C:\Windows;c:\users\me\.EMBER\BIN ; C:\Tools";
         assert!(path_contains(path, r"C:\Users\Me\.ember\bin"));
         assert!(path_contains(path, r"C:\Tools"));
         assert!(!path_contains(path, r"C:\Users\Me\.ember"));
