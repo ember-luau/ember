@@ -83,6 +83,17 @@ pub fn post_form<T: DeserializeOwned>(
 301/302/303, and some hosts like pesde's registry and GitHub asset
 redirects answer 307. */
 pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
+    get_bytes_with(url, headers, &mut |_, _| {})
+}
+
+/** [`get_bytes`], and `on_bytes` hears how far the body is, with the whole
+size when the server sends a Content-Length. the install display draws a
+package's download from it. */
+pub fn get_bytes_with(
+    url: &str,
+    headers: &[(&str, &str)],
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, HttpError> {
     let mut url = url.to_string();
     for _ in 0..5 {
         let response = with_headers(bulk_agent().get(&url), headers).call()?;
@@ -96,8 +107,21 @@ pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpErr
             }
         }
 
-        let mut bytes = Vec::new();
-        response.into_reader().read_to_end(&mut bytes)?;
+        let total = response
+            .header("content-length")
+            .and_then(|length| length.parse::<u64>().ok());
+        let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
+        let mut reader = response.into_reader();
+        let mut chunk = [0u8; 64 * 1024];
+        on_bytes(0, total);
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            on_bytes(bytes.len() as u64, total);
+        }
         return Ok(bytes);
     }
 

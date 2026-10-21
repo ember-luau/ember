@@ -2,6 +2,7 @@ mod art;
 mod commands;
 mod error;
 mod net;
+mod progress;
 mod project;
 mod registry;
 mod sys;

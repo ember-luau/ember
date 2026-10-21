@@ -30,8 +30,8 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
     /* the ends stay off pure white and off near black on purpose: the help
     text is painted with this same ramp, and its first and last lines have to
     stay readable on a light terminal as well as a dark one */
-    const TOP: (u8, u8, u8) = (0xFF, 0xC2, 0x4A); // gold, the hot tip
-    const BOTTOM: (u8, u8, u8) = (0xD9, 0x1E, 0x36); // crimson, the coal
+    const TOP: (u8, u8, u8) = crate::ui::GOLD; // the hot tip
+    const BOTTOM: (u8, u8, u8) = crate::ui::CRIMSON; // the coal
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let position = row.min(rows.saturating_sub(1)) as u32 * 1000 / last; // 0..=1000
