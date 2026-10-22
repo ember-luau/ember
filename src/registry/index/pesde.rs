@@ -37,6 +37,7 @@ struct Candidate {
     environment: Option<Environment>,
     language: Language,
     yanked: bool,
+    deprecated: Option<String>,
     entry: Value,
 }
 
@@ -69,6 +70,16 @@ pub fn resolve(
             index: index_url.to_string(),
         })?,
     };
+
+    /* pesde writes an empty string for "not deprecated", so only a
+    non-empty reason counts, on the file's [meta] and on an entry alike */
+    let reason = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.trim().is_empty())
+            .map(str::to_string)
+    };
+    let package_deprecated = reason(file.get("meta").and_then(|meta| meta.get("deprecated")));
 
     let mut candidates: Vec<Candidate> = Vec::new();
     for (key, entry) in entries {
@@ -117,6 +128,7 @@ pub fn resolve(
             environment,
             language,
             yanked,
+            deprecated: reason(entry.get("deprecated")),
             entry: entry.clone(),
         });
     }
@@ -151,6 +163,8 @@ pub fn resolve(
         environment: candidate.environment,
         language: candidate.language,
         yanked: candidate.yanked,
+        deprecated: candidate.deprecated,
+        package_deprecated,
         dependencies,
         source,
     })
@@ -410,6 +424,7 @@ mod tests {
             environment: Some(Environment::Luau),
             language: Language::Luau,
             yanked: false,
+            deprecated: None,
             entry: parse_entries(""),
         };
 
@@ -443,6 +458,7 @@ mod tests {
             environment: Some(Environment::Roblox),
             language: Language::Luau,
             yanked: false,
+            deprecated: None,
             entry: parse_entries(r#"download = "https://cdn.luaupm.com/scope/pkg/1.2.3.tar.gz""#),
         };
 
@@ -471,6 +487,7 @@ mod tests {
             environment: Some(Environment::Luau),
             language: Language::Luau,
             yanked: false,
+            deprecated: None,
             entry: parse_entries(""),
         };
 
@@ -697,5 +714,54 @@ mod tests {
         // a language this embr does not know is skipped like an unknown target
         assert_eq!(resolved.version, semver::Version::new(0, 1, 0));
         assert_eq!(resolved.language, Language::Alloy);
+    }
+
+    #[test]
+    fn deprecations_come_from_meta_and_from_entries() {
+        let index = TempIndex::new("deprecated", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/old",
+            r#"
+            [meta]
+            deprecated = "use acme/new"
+
+            ["1.0.0 luau"]
+            target = "luau"
+            deprecated = "1.0.0 leaks connections"
+            download = "https://cdn.example.com/acme/old/1.0.0.tar.gz"
+            "#,
+        );
+        // pesde's empty string means "not deprecated"
+        index.write_package(
+            "acme/fine",
+            r#"
+            [meta]
+            deprecated = ""
+
+            ["1.0.0 luau"]
+            target = "luau"
+            download = "https://cdn.example.com/acme/fine/1.0.0.tar.gz"
+            "#,
+        );
+        let config = load_config(&index.root).unwrap();
+        let pick = |name: &str| {
+            resolve(
+                &index.root,
+                "https://example.com/index",
+                &config,
+                name,
+                &semver::VersionReq::STAR,
+                None,
+                &[],
+            )
+            .unwrap()
+        };
+
+        let old = pick("acme/old");
+        assert_eq!(old.package_deprecated.as_deref(), Some("use acme/new"));
+        assert_eq!(old.deprecated.as_deref(), Some("1.0.0 leaks connections"));
+        let fine = pick("acme/fine");
+        assert_eq!(fine.package_deprecated, None);
+        assert_eq!(fine.deprecated, None);
     }
 }

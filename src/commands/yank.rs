@@ -31,25 +31,11 @@ pub fn run(args: YankArgs) -> Result<(), Error> {
         .map(Environment::from_embr)
         .transpose()?;
 
-    let credentials = match auth::load()? {
-        Some(credentials) => credentials,
-        None => auth::login(&crate::commands::publish::oauth_client_id()?)?,
-    };
-    let send = |token: &str| {
+    as_owner(|token| {
         ui::with_spinner("Contacting the registry", || {
             registry::yank(token, name, &version, environment, args.undo)
         })
-    };
-    match send(&credentials.token) {
-        // same as publish: a revoked token earns one fresh login
-        Err(Error::YankFailed { status: 401, .. }) => {
-            auth::clear()?;
-            eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
-            let credentials = auth::login(&crate::commands::publish::oauth_client_id()?)?;
-            send(&credentials.token)?;
-        }
-        other => other?,
-    }
+    })?;
 
     let what = match environment {
         Some(environment) => format!("{name}@{version} ({environment})"),
@@ -62,4 +48,23 @@ pub fn run(args: YankArgs) -> Result<(), Error> {
         println!("New installs skip it. Projects whose ember.lock pins it keep it.");
     }
     Ok(())
+}
+
+/** runs `send` with the stored GitHub token, logging in first when none is
+stored. a 401 means the token was revoked, not that the call is doomed, so
+it earns one fresh login and one retry, as publish does. */
+pub(crate) fn as_owner(send: impl Fn(&str) -> Result<(), Error>) -> Result<(), Error> {
+    let credentials = match auth::load()? {
+        Some(credentials) => credentials,
+        None => auth::login(&crate::commands::publish::oauth_client_id()?)?,
+    };
+    match send(&credentials.token) {
+        Err(Error::OwnerActionFailed { status: 401, .. }) => {
+            auth::clear()?;
+            eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
+            let credentials = auth::login(&crate::commands::publish::oauth_client_id()?)?;
+            send(&credentials.token)
+        }
+        other => other,
+    }
 }

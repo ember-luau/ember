@@ -39,12 +39,19 @@ pub enum Error {
     #[error("Publishing failed: {message}")]
     PublishFailed { status: u16, message: String },
 
-    /// same shape as `PublishFailed`, from the yank endpoint.
-    #[error("The registry refused the yank: {message}")]
-    YankFailed { status: u16, message: String },
+    /// same shape as `PublishFailed`, from an owner's call: a yank or a deprecation.
+    #[error("The registry refused the {action}: {message}")]
+    OwnerActionFailed {
+        action: &'static str,
+        status: u16,
+        message: String,
+    },
 
     #[error("'{0}' is not a version to yank; write it as scope/name@version")]
     YankSpec(String),
+
+    #[error("{0}")]
+    DeprecateArgs(&'static str),
 
     #[error(
         "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"

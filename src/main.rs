@@ -88,6 +88,9 @@ enum Commands {
     /// Mark a published version so new installs skip it
     Yank(commands::yank::YankArgs),
 
+    /// Mark a package, or one version, as deprecated, with a reason
+    Deprecate(commands::deprecate::DeprecateArgs),
+
     /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
@@ -157,6 +160,7 @@ fn main() {
         Commands::Patch(args) => commands::patch::run(args),
         Commands::Publish(args) => commands::publish::run(args),
         Commands::Yank(args) => commands::yank::run(args),
+        Commands::Deprecate(args) => commands::deprecate::run(args),
         Commands::Cache(command) => commands::cache::run(command),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),

@@ -85,6 +85,10 @@ pub struct ResolvedPackage {
     /** the entry is yanked. only a version in `pinned` can come back
     yanked, a fresh pick skips them. */
     pub yanked: bool,
+    /// the version's own deprecation reason, `deprecated` on its entry.
+    pub deprecated: Option<String>,
+    /// the whole package's deprecation reason, pesde's `[meta] deprecated`.
+    pub package_deprecated: Option<String>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
 }

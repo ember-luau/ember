@@ -11,6 +11,7 @@ index entry. The API is the index repo's only writer.
 use crate::error::Error;
 use crate::net::http;
 use crate::net::http::error::HttpError;
+use crate::project::manifest::Environment;
 use serde::Deserialize;
 
 pub const API_URL: &str = "https://api.luaupm.com";
@@ -69,23 +70,59 @@ pub fn yank(
     token: &str,
     name: &str,
     version: &semver::Version,
-    environment: Option<crate::project::manifest::Environment>,
+    environment: Option<Environment>,
     undo: bool,
 ) -> Result<(), Error> {
-    let mut url = format!("{API_URL}/v1/packages/{name}/{version}/yank");
+    let path = format!("/v1/packages/{name}/{version}/yank");
+    owner_call(token, "yank", &path, environment, (!undo).then_some(None))
+}
+
+/** sets or clears a deprecation through `PUT`/`DELETE` on
+`/v1/packages/{scope}/{name}/deprecate`, or on `.../{version}/deprecate` for
+one version. `reason` None clears it. the package's reason is pesde's
+`[meta] deprecated`, a version's is `deprecated` on its entries. */
+pub fn deprecate(
+    token: &str,
+    name: &str,
+    version: Option<&semver::Version>,
+    environment: Option<Environment>,
+    reason: Option<&str>,
+) -> Result<(), Error> {
+    let path = match version {
+        Some(version) => format!("/v1/packages/{name}/{version}/deprecate"),
+        None => format!("/v1/packages/{name}/deprecate"),
+    };
+    let body = reason.map(|reason| Some(serde_json::json!({ "reason": reason })));
+    owner_call(token, "deprecation", &path, environment, body)
+}
+
+/** one call an owner makes. `body` None sends a DELETE, Some a PUT with
+that JSON, or with no body at all. */
+fn owner_call(
+    token: &str,
+    action: &'static str,
+    path: &str,
+    environment: Option<Environment>,
+    body: Option<Option<serde_json::Value>>,
+) -> Result<(), Error> {
+    let mut url = format!("{API_URL}{path}");
     if let Some(environment) = environment {
         url.push_str(&format!("?target={environment}"));
     }
-    let method = if undo { "DELETE" } else { "PUT" };
-    let response = http::agent()
+    let method = if body.is_some() { "PUT" } else { "DELETE" };
+    let request = http::agent()
         .request(method, &url)
         .set("User-Agent", http::USER_AGENT)
-        .set("Authorization", &format!("Bearer {token}"))
-        .call();
+        .set("Authorization", &format!("Bearer {token}"));
+    let response = match body.flatten() {
+        Some(json) => request.send_json(json),
+        None => request.call(),
+    };
 
     match response {
         Ok(_) => Ok(()),
-        Err(ureq::Error::Status(status, response)) => Err(Error::YankFailed {
+        Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {
+            action,
             status,
             message: error_message(status, response.into_string().ok().as_deref()),
         }),

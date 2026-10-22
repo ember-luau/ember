@@ -546,6 +546,12 @@ fn warn_on_fit(
             "warning: {id} is yanked; ember.lock pins it, so it stays"
         ));
     }
+    if let Some(reason) = &package.package_deprecated {
+        warnings.push(format!("warning: {name} is deprecated: {reason}"));
+    }
+    if let Some(reason) = &package.deprecated {
+        warnings.push(format!("warning: {id} is deprecated: {reason}"));
+    }
     let Some(project) = manifest.target.as_ref() else {
         return;
     };
@@ -1481,6 +1487,8 @@ mod tests {
             environment: Some(environment),
             language,
             yanked,
+            deprecated: None,
+            package_deprecated: None,
             dependencies: Vec::new(),
             source: DownloadSource::TarGz { url: String::new() },
         };
@@ -1511,6 +1519,18 @@ mod tests {
         assert!(
             yanked.len() == 1 && yanked[0].contains("is yanked"),
             "{yanked:?}"
+        );
+
+        // a deprecated package still resolves, and says why on every resolve
+        let mut old = package(Environment::Roblox, Language::Luau, false);
+        old.package_deprecated = Some("use acme/new".to_string());
+        old.deprecated = Some("leaks".to_string());
+        assert_eq!(
+            warn(old, true),
+            [
+                "warning: acme/thing is deprecated: use acme/new",
+                "warning: acme/thing@1.0.0 is deprecated: leaks",
+            ]
         );
     }
 }

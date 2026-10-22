@@ -1,5 +1,6 @@
 pub mod add;
 pub mod cache;
+pub mod deprecate;
 pub mod execute;
 pub mod index;
 pub mod init;
