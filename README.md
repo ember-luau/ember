@@ -80,6 +80,83 @@ hands your terminal straight to it — nothing is added to any manifest. Names
 pinned under `[tools]` run their pinned version; other bare names come from
 embr's shorthand list; anything else is `owner/repo`.
 
+## One package, several targets
+
+A package can ship one release for each target. Write one `[[target]]`
+table for each target in place of the single `[target]` table:
+
+```toml
+[package]
+name = "acme/signal"
+version = "1.0.0"
+
+[[target]]
+environment = "roblox"
+main = "lib/init.luau"
+includes = ["lib"]
+
+[[target]]
+environment = "roblox"
+language = "alloy"
+main = "build/init.luau"
+includes = ["src", "build"]
+
+[[target]]
+environment = "luau"
+language = "luwu"
+main = "luwu/init.luwu"
+includes = ["luwu"]
+```
+
+Each target has an ID. For Luau, the ID is the environment. For another
+language, the ID is the environment and the language: `roblox`,
+`roblox-alloy`, `luau-luwu`. Two targets with the same ID are an error.
+
+- `embr publish` uploads one archive for each target. Each archive holds
+  the files, the `main`, and the build output of its target only.
+- `embr publish --target roblox-alloy` publishes only that target. Repeat
+  `--target` to publish more than one.
+- `embr yank` and `embr deprecate` take `--target <id>` to change one
+  target of a version.
+
+The first target is the project's own. `embr add` and `embr install` use
+it to pick a target of each dependency. They prefer the same environment
+and language, then the same environment in plain Luau.
+
+## `embr mcp`: package search for coding agents
+
+`embr mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio. A coding agent uses it to find ember packages. The server
+only reads. It does not change files, install packages, or publish.
+
+It gives the agent two tools:
+
+- `search_packages` finds packages by name or description. It can filter by
+  environment and language. Each result gives the latest version, the
+  download count, and the `embr add` command that installs the package.
+- `package_info` shows one package. It lists every version with its target,
+  its language, and yanked or deprecated marks. It also gives the
+  dependencies of the newest version that is not yanked.
+
+To register it with Claude Code:
+
+```sh
+claude mcp add ember -- embr mcp
+```
+
+Other clients read an `mcpServers` block like this one:
+
+```json
+{
+  "mcpServers": {
+    "ember": {
+      "command": "embr",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
 ## Docs
 
 Commands, the manifest, workspaces, publishing — everything lives at

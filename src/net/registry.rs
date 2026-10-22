@@ -19,6 +19,9 @@ pub const API_URL: &str = "https://api.luaupm.com";
 so an oversized archive fails before uploading. */
 pub const MAX_ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 
+/// The API's cap on a `[package] logo` file, 400 above it.
+pub const MAX_LOGO_BYTES: u64 = 512 * 1024;
+
 /// The API rejects [package] descriptions longer than this with a 400.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 
@@ -54,6 +57,74 @@ pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<
             message: error_message(status, response.into_string().ok().as_deref()),
         }),
         // Transport errors like DNS or TLS have no response body to read.
+        Err(other) => Err(HttpError::from(other).into()),
+    }
+}
+
+/** sets or clears `yanked` on a version's index entries through
+`PUT`/`DELETE /v1/packages/{scope}/{name}/{version}/yank`. without a
+`target` ID every target of the version changes. owners only, the same
+auth as publish. both calls are idempotent. */
+pub fn yank(
+    token: &str,
+    name: &str,
+    version: &semver::Version,
+    target: Option<&str>,
+    undo: bool,
+) -> Result<(), Error> {
+    let path = format!("/v1/packages/{name}/{version}/yank");
+    owner_call(token, "yank", &path, target, (!undo).then_some(None))
+}
+
+/** sets or clears a deprecation through `PUT`/`DELETE` on
+`/v1/packages/{scope}/{name}/deprecate`, or on `.../{version}/deprecate` for
+one version. `reason` None clears it. the package's reason is pesde's
+`[meta] deprecated`, a version's is `deprecated` on its entries. */
+pub fn deprecate(
+    token: &str,
+    name: &str,
+    version: Option<&semver::Version>,
+    target: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), Error> {
+    let path = match version {
+        Some(version) => format!("/v1/packages/{name}/{version}/deprecate"),
+        None => format!("/v1/packages/{name}/deprecate"),
+    };
+    let body = reason.map(|reason| Some(serde_json::json!({ "reason": reason })));
+    owner_call(token, "deprecation", &path, target, body)
+}
+
+/** one call an owner makes. `body` None sends a DELETE, Some a PUT with
+that JSON, or with no body at all. */
+fn owner_call(
+    token: &str,
+    action: &'static str,
+    path: &str,
+    target: Option<&str>,
+    body: Option<Option<serde_json::Value>>,
+) -> Result<(), Error> {
+    let mut url = format!("{API_URL}{path}");
+    if let Some(target) = target {
+        url.push_str(&format!("?target={target}"));
+    }
+    let method = if body.is_some() { "PUT" } else { "DELETE" };
+    let request = http::agent()
+        .request(method, &url)
+        .set("User-Agent", http::USER_AGENT)
+        .set("Authorization", &format!("Bearer {token}"));
+    let response = match body.flatten() {
+        Some(json) => request.send_json(json),
+        None => request.call(),
+    };
+
+    match response {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {
+            action,
+            status,
+            message: error_message(status, response.into_string().ok().as_deref()),
+        }),
         Err(other) => Err(HttpError::from(other).into()),
     }
 }

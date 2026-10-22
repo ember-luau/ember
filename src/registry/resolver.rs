@@ -1,12 +1,103 @@
 use crate::error::Error;
 use crate::project::manifest::{
-    Dependency, Environment, Manifest, Override, dependency_target, override_paths,
+    Dependency, Environment, Language, Manifest, Override, dependency_target, override_paths,
     parse_version_req,
 };
 use crate::project::workspace::{self, Workspace};
-use crate::registry::index::{DownloadSource, Index, Refresh};
+use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
+
+/** what a project may install, set by its own environment and language,
+so runtimes and languages do not reach into each other. a project takes
+packages in its own language or in plain Luau, the base every language
+reads. it takes packages for its own environment or portable Luau, and a
+Roblox server takes shared Roblox packages too, wally's realm rule. */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Allow {
+    pub environment: Environment,
+    pub language: Language,
+}
+
+impl Allow {
+    /// the rule `manifest`'s own target sets. a manifest with no [target] only consumes, and sets none.
+    pub fn for_project(manifest: &Manifest) -> Option<Allow> {
+        let target = manifest.target()?;
+        Some(Allow {
+            environment: target.environment,
+            language: target.language,
+        })
+    }
+
+    /** whether a package in `language` for `environment` may install into
+    the tree rooted at `tree`. None skips the environment: a direct
+    dependency whose `target` says the crossing is on purpose. */
+    pub fn admits(
+        &self,
+        language: Language,
+        environment: Option<Environment>,
+        tree: Option<Environment>,
+    ) -> bool {
+        self.language.accepts(language)
+            && match (tree, environment) {
+                (Some(tree), Some(environment)) => tree.accepts(environment),
+                _ => true,
+            }
+    }
+
+    /// the refusal for `package`, a resolved `name@version`.
+    pub fn refusal(
+        &self,
+        package: String,
+        language: Language,
+        environment: Option<Environment>,
+    ) -> Error {
+        let what = match environment {
+            Some(environment) => format!("a {} package for {environment}", language.title()),
+            None => format!("a {} package with no environment", language.title()),
+        };
+        /* a language cannot be crossed, a project cannot run what it does
+        not read. an environment can, on purpose, the way a Lute project
+        might vendor Roblox code it never runs */
+        let what = if self.language.accepts(language) {
+            format!("{what}. Set `target` on the dependency to take it on purpose")
+        } else {
+            what
+        };
+        Error::NotAllowed {
+            project: format!("{} project for {}", self.language.title(), self.environment),
+            takes: self.takes(),
+            package,
+            what,
+        }
+    }
+
+    /// "Alloy or Luau packages for roblox or portable Luau", for the refusal.
+    fn takes(&self) -> String {
+        let languages = match self.language {
+            Language::Luau => "Luau".to_string(),
+            language => format!("{} or Luau", language.title()),
+        };
+        let mut environments = vec![self.environment.to_string()];
+        if matches!(self.environment, Environment::Server | Environment::Lune) {
+            environments.push(Environment::Roblox.to_string());
+        }
+        if self.environment != Environment::Luau {
+            environments.push("portable Luau".to_string());
+        }
+        let environments = match environments.as_slice() {
+            [one] => one.clone(),
+            [first, second] => format!("{first} or {second}"),
+            [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+            [] => unreachable!("a project has an environment"),
+        };
+        format!("{languages} packages for {environments}")
+    }
+}
+
+/** the versions an existing lockfile holds, by lowercase package name.
+a yanked version stays installable while it is in here. */
+pub type Pinned = HashMap<String, Vec<semver::Version>>;
 
 /// A package ready to download, the flattened result of resolution.
 #[derive(Debug)]
@@ -106,10 +197,20 @@ pub fn resolve(
     manifest: &Manifest,
     project_dir: &Path,
     refresh: Refresh,
+    pinned: &Pinned,
+    allow: Option<&Allow>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let mut ttl_skipped = false;
-    match resolve_once(manifest, project_dir, refresh, &mut ttl_skipped, warnings) {
+    match resolve_once(
+        manifest,
+        project_dir,
+        refresh,
+        pinned,
+        allow,
+        &mut ttl_skipped,
+        warnings,
+    ) {
         /* an index whose pull was skipped by the TTL can be stale, and most
         resolver errors don't say which index they came from, so any
         failure after a skip earns one full forced refresh and a re-run.
@@ -121,6 +222,8 @@ pub fn resolve(
                 manifest,
                 project_dir,
                 Refresh::Force,
+                pinned,
+                allow,
                 &mut ignored,
                 warnings,
             )
@@ -133,10 +236,16 @@ fn resolve_once(
     manifest: &Manifest,
     project_dir: &Path,
     refresh: Refresh,
+    pinned: &Pinned,
+    allow: Option<&Allow>,
     ttl_skipped: &mut bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
-    let prefer_environment = manifest.target.as_ref().map(|target| target.environment);
+    let prefer_environment = manifest.target().map(|target| target.environment);
+    let language = manifest
+        .target()
+        .map(|target| target.language)
+        .unwrap_or_default();
     let mut indices: HashMap<String, Index> = HashMap::new();
     /* Only walk up looking for a claiming workspace root once a workspace
     dep actually appears. */
@@ -268,7 +377,28 @@ fn resolve_once(
                     Some(context) => Some(context),
                     None => target.or(prefer_environment),
                 };
-                let package = index.resolve(&name, &req, preferred)?;
+                let pins = pinned.get(&name).map(Vec::as_slice).unwrap_or_default();
+                let preferred = preferred.map(|environment| (environment, language));
+                let package = index.resolve(&name, &req, preferred, pins)?;
+                /* a transitive package is judged by its tree's environment.
+                a seed's `target` crosses environments on purpose, so a
+                seed with one skips the environment, and its subtree is
+                judged by the tree it chose */
+                let tree = match context {
+                    Some(context) => Some(context),
+                    None if target.is_some() => None,
+                    None => allow.map(|allow| allow.environment),
+                };
+                if let Some(allow) = allow
+                    && !allow.admits(package.language, package.environment, tree)
+                {
+                    return Err(allow.refusal(
+                        format!("{name}@{}", package.version),
+                        package.language,
+                        package.environment,
+                    ));
+                }
+                warn_on_marks(&name, &package, warnings);
 
                 for dependency in &package.dependencies {
                     let mut child_path = alias_path.clone();
@@ -319,8 +449,7 @@ fn resolve_once(
                 let version = semver::Version::parse(&member_package.version)?;
                 let environment = member
                     .manifest
-                    .target
-                    .as_ref()
+                    .target()
                     .map(|target| target.environment)
                     .ok_or_else(|| Error::UnknownPackageEnvironment(name.clone()))?;
 
@@ -513,6 +642,22 @@ environment, else the project's `[target]` one. placement is decided at
 resolve time since children queue with it, so unlike a package's own
 environment it can never wait for the archive to be extracted and
 inspected. */
+/// says when a picked package is yanked or deprecated. it still installs.
+fn warn_on_marks(name: &str, package: &ResolvedPackage, warnings: &mut Vec<String>) {
+    let id = format!("{name}@{}", package.version);
+    if package.yanked {
+        warnings.push(format!(
+            "warning: {id} is yanked; ember.lock pins it, so it stays"
+        ));
+    }
+    if let Some(reason) = &package.package_deprecated {
+        warnings.push(format!("warning: {name} is deprecated: {reason}"));
+    }
+    if let Some(reason) = &package.deprecated {
+        warnings.push(format!("warning: {id} is deprecated: {reason}"));
+    }
+}
+
 fn seed_context(
     target: Option<Environment>,
     environment: Option<Environment>,
@@ -623,7 +768,15 @@ mod tests {
         workspace dep all land in the install set, linked in place. */
         let member_dir = base.join("packages/extra");
         let manifest = Manifest::load_from(&member_dir.join("ember.toml")).unwrap();
-        let installs = resolve(&manifest, &member_dir, Refresh::Never, &mut Vec::new()).unwrap();
+        let installs = resolve(
+            &manifest,
+            &member_dir,
+            Refresh::Never,
+            &Pinned::new(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(installs.len(), 1);
         let core = &installs[0];
@@ -645,7 +798,15 @@ mod tests {
              [dependencies]\nextra = { workspace = \"acme/extra\" }\n";
         write(&base, "ember.toml", root_manifest_text);
         let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
-        let installs = resolve(&manifest, &base, Refresh::Never, &mut Vec::new()).unwrap();
+        let installs = resolve(
+            &manifest,
+            &base,
+            Refresh::Never,
+            &Pinned::new(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
         let names: Vec<_> = installs
             .iter()
             .map(|install| install.name.as_str())
@@ -771,7 +932,14 @@ mod tests {
                  [indices]\ndefault = \"{url}\"\n\n[dependencies]\n{dependencies}"
             ))
             .unwrap();
-            resolve(&manifest, &origin, Refresh::Never, &mut Vec::new())
+            resolve(
+                &manifest,
+                &origin,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                &mut Vec::new(),
+            )
         };
 
         /* svc, a server package, pulls lib and pin into the server context.
@@ -790,7 +958,7 @@ mod tests {
                     "{}@{} {}/{}",
                     install.name,
                     install.version,
-                    install.context,
+                    install.context.dir_name(),
                     install.link.as_deref().unwrap_or("-")
                 )
             })
@@ -909,7 +1077,14 @@ mod tests {
                  [indices]\ndefault = \"{url}\"\n\n[dependencies]\n{dependencies}"
             ))
             .unwrap();
-            resolve(&manifest, &origin, Refresh::Never, &mut Vec::new())
+            resolve(
+                &manifest,
+                &origin,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                &mut Vec::new(),
+            )
         };
 
         // without a target, a roblox package lands in the roblox tree
@@ -946,9 +1121,9 @@ mod tests {
             .collect();
         assert_eq!(contexts, [Environment::Roblox, Environment::Server]);
 
-        // a target embr can't move a package into is refused before any network
+        // a target that names no environment is refused before any network
         assert!(matches!(
-            resolve_with("Core = { name = \"acme/core\", version = \"^1\", target = \"lune\" }\n"),
+            resolve_with("Core = { name = \"acme/core\", version = \"^1\", target = \"sever\" }\n"),
             Err(Error::DependencyTargetInvalid { .. })
         ));
 
@@ -975,7 +1150,7 @@ mod tests {
         and edit, not the override path, which is nobody's dependency */
         let mislabeled = resolve_with(
             "Core = { name = \"acme/core\", version = \"^1\" }\n\
-             Lib = { name = \"acme/lib\", version = \"^2\", target = \"lune\" }\n\n\
+             Lib = { name = \"acme/lib\", version = \"^2\", target = \"sever\" }\n\n\
              [overrides]\n\"Core.lib\" = \"Lib\"\n",
         )
         .unwrap_err();
@@ -1110,7 +1285,14 @@ mod tests {
                 ),
             );
             let manifest = Manifest::load_from(&project.join("ember.toml")).unwrap();
-            resolve(&manifest, &project, Refresh::Never, &mut Vec::new())
+            resolve(
+                &manifest,
+                &project,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                &mut Vec::new(),
+            )
         };
 
         /* svc's server-tree edge to acme/core binds to the member. same
@@ -1224,7 +1406,14 @@ mod tests {
                  [indices]\ndefault = \"{url}\"\n\n{extra}"
             ))
             .unwrap();
-            resolve(&manifest, &origin, Refresh::Never, warnings)
+            resolve(
+                &manifest,
+                &origin,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                warnings,
+            )
         };
         let summary = |installs: &[ResolvedInstall]| -> Vec<String> {
             installs
@@ -1372,10 +1561,104 @@ mod tests {
 
         let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
         assert!(matches!(
-            resolve(&manifest, &base, Refresh::Never, &mut Vec::new()),
+            resolve(
+                &manifest,
+                &base,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                &mut Vec::new()
+            ),
             Err(Error::NotInWorkspace(_))
         ));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn yanks_and_deprecations_warn_without_failing() {
+        let package = ResolvedPackage {
+            version: semver::Version::new(1, 0, 0),
+            environment: Some(Environment::Roblox),
+            language: Language::Luau,
+            yanked: true,
+            deprecated: Some("leaks".to_string()),
+            package_deprecated: Some("use acme/new".to_string()),
+            dependencies: Vec::new(),
+            source: DownloadSource::TarGz { url: String::new() },
+        };
+        let mut warnings = Vec::new();
+        warn_on_marks("acme/thing", &package, &mut warnings);
+        assert_eq!(
+            warnings,
+            [
+                "warning: acme/thing@1.0.0 is yanked; ember.lock pins it, so it stays",
+                "warning: acme/thing is deprecated: use acme/new",
+                "warning: acme/thing@1.0.0 is deprecated: leaks",
+            ]
+        );
+    }
+
+    #[test]
+    fn projects_do_not_reach_into_each_other() {
+        use Language::*;
+        let rule = |environment, language| Allow {
+            environment,
+            language,
+        };
+
+        let alloy = rule(Environment::Roblox, Alloy);
+        let tree = Some(Environment::Roblox);
+        // its own language and plain Luau, for its environment or portable
+        assert!(alloy.admits(Alloy, Some(Environment::Roblox), tree));
+        assert!(alloy.admits(Luau, Some(Environment::Roblox), tree));
+        assert!(alloy.admits(Luau, Some(Environment::Luau), tree));
+        // not another runtime, and not another language
+        assert!(!alloy.admits(Alloy, Some(Environment::Lune), tree));
+        assert!(!alloy.admits(Loom, Some(Environment::Roblox), tree));
+        assert!(!alloy.admits(Luwu, Some(Environment::Luau), tree));
+
+        let lute = rule(Environment::Lute, Luau);
+        let tree = Some(Environment::Lute);
+        assert!(lute.admits(Luau, Some(Environment::Lute), tree));
+        assert!(!lute.admits(Luau, Some(Environment::Roblox), tree));
+        assert!(!lute.admits(Alloy, Some(Environment::Lute), tree));
+        // a seed's `target` crosses the environment on purpose
+        assert!(lute.admits(Luau, Some(Environment::Roblox), None));
+        // Lune runs Roblox code through its DOM
+        let lune = rule(Environment::Lune, Luau);
+        assert!(lune.admits(Luau, Some(Environment::Roblox), Some(Environment::Lune)));
+
+        // a Roblox server takes shared Roblox packages, wally's realm rule
+        let server = rule(Environment::Server, Luau);
+        assert!(server.admits(Luau, Some(Environment::Roblox), Some(Environment::Server)));
+
+        assert_eq!(
+            alloy
+                .refusal("acme/fs@1.0.0".to_string(), Luau, Some(Environment::Lune))
+                .to_string(),
+            "This Alloy project for roblox takes Alloy or Luau packages for roblox or portable Luau; acme/fs@1.0.0 is a Luau package for lune. Set `target` on the dependency to take it on purpose"
+        );
+        assert_eq!(
+            server
+                .refusal("acme/x@1.0.0".to_string(), Loom, Some(Environment::Roblox))
+                .to_string(),
+            "This Luau project for roblox_server takes Luau packages for roblox_server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
+        );
+    }
+
+    #[test]
+    fn every_project_with_a_target_sets_a_rule() {
+        let alloy: Manifest =
+            toml::from_str("[target]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\n").unwrap();
+        assert_eq!(
+            Allow::for_project(&alloy),
+            Some(Allow {
+                environment: Environment::Roblox,
+                language: Language::Alloy
+            })
+        );
+        let consumer: Manifest = toml::from_str("[dependencies]\n").unwrap();
+        assert_eq!(Allow::for_project(&consumer), None);
     }
 }

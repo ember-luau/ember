@@ -39,10 +39,53 @@ pub enum Error {
     #[error("Publishing failed: {message}")]
     PublishFailed { status: u16, message: String },
 
+    /// same shape as `PublishFailed`, from an owner's call: a yank or a deprecation.
+    #[error("The registry refused the {action}: {message}")]
+    OwnerActionFailed {
+        action: &'static str,
+        status: u16,
+        message: String,
+    },
+
+    #[error("'{0}' is not a version to yank; write it as scope/name@version")]
+    YankSpec(String),
+
+    #[error("{0}")]
+    DeprecateArgs(&'static str),
+
     #[error(
         "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"
     )]
     PublishTooLarge { size_mb: f64, limit_mb: u64 },
+
+    #[error("`{program} build` runs before publish, and {reason}")]
+    LanguageBuild {
+        program: &'static str,
+        reason: String,
+    },
+
+    #[error("`main` must name the Luau file that `{program} build` writes, and {detail}")]
+    MainNotBuilt {
+        program: &'static str,
+        detail: String,
+    },
+
+    #[error("This {project} takes {takes}; {package} is {what}")]
+    NotAllowed {
+        project: String,
+        takes: String,
+        package: String,
+        what: String,
+    },
+
+    #[error("[package] logo {0}")]
+    LogoInvalid(String),
+
+    #[error(
+        "Tool shims are copies of embr, and embr is not at {}; install embr, then run this again",
+        .0.display()
+    )]
+    EmbrMissing(PathBuf),
 
     #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
     PublishNotSupported(String),
@@ -63,6 +106,12 @@ pub enum Error {
 
     #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]
     WorkspacePublishFailed(Vec<String>),
+
+    #[error("Publishing failed for {} target{}: {}", .0.len(), if .0.len() == 1 { "" } else { "s" }, .0.join(", "))]
+    TargetPublishFailed(Vec<String>),
+
+    #[error("No target has the ID '{id}'; the targets in ember.toml are {valid}")]
+    UnknownTarget { id: String, valid: String },
 
     #[error("Invalid [patches] key '{key}': {reason}")]
     PatchKeyInvalid { key: String, reason: String },
@@ -208,6 +257,12 @@ pub enum Error {
     #[error("Index '{0}' is not defined under [indices] in ember.toml")]
     UnknownIndex(String),
 
+    #[error("'{0}' names no index; use ember, wally, pesde, a key under [indices], or a URL")]
+    IndexName(String),
+
+    #[error("No GitHub login is stored; run `embr auth login`")]
+    NotLoggedIn,
+
     #[error("Unsupported environment '{0}'")]
     UnsupportedEnvironment(String),
 
@@ -245,7 +300,7 @@ pub enum Error {
     },
 
     #[error(
-        "Invalid target '{target}' for dependency '{alias}': only 'roblox' and 'server' can be targeted"
+        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'roblox_server', or 'lune'"
     )]
     DependencyTargetInvalid { alias: String, target: String },
 
@@ -263,8 +318,31 @@ pub enum Error {
         path: String,
     },
 
+    #[error(
+        "Dependency key '{0}' can't name a link file; use a plain name, or the package's lowercase scope/name"
+    )]
+    LinkAliasInvalid(String),
+
+    #[error(
+        "Dependency keys '{plain}' and '{scoped}' collide in the {context} tree: '{plain}.luau' and the '{plain}' scope folder share a name; rename one of them"
+    )]
+    LinkScopeCollision {
+        plain: String,
+        scoped: String,
+        context: Environment,
+    },
+
     #[error("Failed to fetch index {url}: {reason}")]
     IndexFetch { url: String, reason: String },
+
+    #[error(
+        "The host of index {url} failed {attempts} times with a server error or a stalled transfer ({reason}); it may be down, so try again later"
+    )]
+    IndexUnavailable {
+        url: String,
+        attempts: u32,
+        reason: String,
+    },
 
     #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,

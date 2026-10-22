@@ -4,7 +4,8 @@ understand foreign manifests, pesde.toml, wally.toml, Rojo project files, since
 that's all a published package carries. */
 
 use crate::error::Error;
-use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE};
+use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE, RequireStyle};
+use crate::project::requires;
 use crate::project::rojo::{PACKAGES_DIR, PROJECT_FILE};
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
@@ -57,14 +58,24 @@ the require and the alias only appear when a default needs them, see
 [`exported_types`]. no exported types at all = the compact
 `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, exports: &Exports) -> String {
-    link_contents_at(&format!("./.ember/{folder}"), entry, exports)
+    link_contents_at(
+        &format!("./.ember/{folder}"),
+        entry,
+        exports,
+        RequireStyle::String,
+    )
 }
 
 /** like [`link_contents`] but rooted anywhere. workspace members link straight
 to their source, like `../../packages/core` + `src`, instead of an extracted
 copy under `.ember/`. `root` is the package, `entry` the module inside it, kept
-apart because imports are relative to the package, not to the module. */
-pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
+apart because imports are relative to the package, not to the module.
+`style` writes each require as a string or as a Roblox instance chain. */
+pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: RequireStyle) -> String {
+    let require = |path: &str| match style {
+        RequireStyle::String => format!("require(\"{path}\")"),
+        RequireStyle::Instance => format!("require({})", requires::instance_chain(path)),
+    };
     // empty entry = the package root itself is the module, a root init file
     let module_path = if entry.is_empty() {
         root.to_string()
@@ -72,15 +83,18 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
         format!("{root}/{entry}")
     };
     if exports.types.is_empty() {
-        return format!("return require(\"{module_path}\")\n");
+        return format!("return {}\n", require(&module_path));
     }
 
-    let mut contents = format!("local {MODULE_BINDING} = require(\"{module_path}\")\n");
+    let mut contents = format!("local {MODULE_BINDING} = {}\n", require(&module_path));
     /* the aliases below name these the way the source did, so the bindings
     have to exist here too, pointing at the same modules through the link
     file's own path */
     for (name, path) in &exports.imports {
-        contents.push_str(&format!("local {name} = require(\"{root}/{path}\")\n"));
+        contents.push_str(&format!(
+            "local {name} = {}\n",
+            require(&format!("{root}/{path}"))
+        ));
     }
     for line in &exports.aliases {
         contents.push_str(line);
@@ -175,22 +189,38 @@ fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
+/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, `<entry>.luwu`, then the folder's init file. empty entry = the root's own init.
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     let candidates = if entry.is_empty() {
-        vec!["init.luau".to_string(), "init.lua".to_string()]
+        vec![
+            "init.luau".to_string(),
+            "init.lua".to_string(),
+            "init.luwu".to_string(),
+        ]
     } else {
         vec![
             format!("{entry}.luau"),
             format!("{entry}.lua"),
+            format!("{entry}.luwu"),
             format!("{entry}/init.luau"),
             format!("{entry}/init.lua"),
+            format!("{entry}/init.luwu"),
         ]
     };
     candidates
         .into_iter()
         .map(|candidate| dir.join(candidate))
         .find(|path| path.is_file())
+}
+
+/** the entry's source for the type parse. full_moon reads Luau only, so a
+`.luwu` entry links without types, and without a warning about it. */
+pub fn entry_luau_source(dir: &Path, entry: &str) -> Option<String> {
+    let path = entry_source(dir, entry)?;
+    if path.extension().is_some_and(|ext| ext == "luwu") {
+        return None;
+    }
+    fs::read_to_string(path).ok()
 }
 
 /// full_moon recurses per nesting level, so deep sources need serious stack. parsing gets its own thread with this much.
@@ -595,10 +625,13 @@ pub fn entry_point(dir: &Path) -> Option<String> {
     for candidate in [
         "init.luau",
         "init.lua",
+        "init.luwu",
         "src/init.luau",
         "src/init.lua",
+        "src/init.luwu",
         "lib/init.luau",
         "lib/init.lua",
+        "lib/init.luwu",
     ] {
         if dir.join(candidate).exists() {
             return Some(normalize_entry(candidate));
@@ -722,7 +755,7 @@ fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(
             collect_sources(root, &path, found)?;
         } else if matches!(
             path.extension().and_then(|ext| ext.to_str()),
-            Some("luau" | "lua")
+            Some("luau" | "lua" | "luwu")
         ) {
             let relative = path.strip_prefix(root).unwrap_or(&path);
             found.push(
@@ -855,7 +888,13 @@ pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
 fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     let mut value: toml::Value = fs::read_to_string(dir.join(file)).ok()?.parse().ok()?;
     for key in keys {
-        value = value.get(key)?.clone();
+        value = match value.get(key)? {
+            // `[[target]]`: the first table is the project's own
+            toml::Value::Array(tables) if tables.first().is_some_and(toml::Value::is_table) => {
+                tables[0].clone()
+            }
+            found => found.clone(),
+        };
     }
     value.as_str().map(str::to_string)
 }
@@ -867,6 +906,7 @@ pub(crate) fn normalize_entry(path: &str) -> String {
     let path = path
         .strip_suffix(".luau")
         .or_else(|| path.strip_suffix(".lua"))
+        .or_else(|| path.strip_suffix(".luwu"))
         .unwrap_or(path);
     /* init files are the folder's module, mod.rs style, so the require has to
     point at the folder. pesde manifests like lib = "/src/init.luau" hit this. */
@@ -899,6 +939,17 @@ mod tests {
         let embr = base.join("embr");
         write_package(&embr, "ember.toml", "[target]\nenvironment = \"lune\"");
         assert_eq!(environment(&embr), Some(Environment::Lune));
+
+        // a workspace member with several targets reads as its first one
+        let several = base.join("several");
+        write_package(
+            &several,
+            "ember.toml",
+            "[[target]]\nenvironment = \"zune\"\nmain = \"src/init.luau\"\n\n\
+             [[target]]\nenvironment = \"zune\"\nlanguage = \"alloy\"\nmain = \"out/init.luau\"\n",
+        );
+        assert_eq!(environment(&several), Some(Environment::Zune));
+        assert_eq!(entry_point(&several).as_deref(), Some("src"));
 
         let pesde = base.join("pesde");
         write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");
@@ -1308,6 +1359,22 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// #43: a project that asks for instance requires gets dot chains in its links.
+    #[test]
+    fn link_files_take_the_require_style() {
+        assert_eq!(
+            link_contents_at(
+                "../.ember/evaera_promise",
+                "lib",
+                &type_lines(["export type Status = module.Status"]),
+                RequireStyle::Instance,
+            ),
+            "local module = require(script.Parent.Parent[\".ember\"].evaera_promise.lib)\n\
+             export type Status = module.Status\n\
+             return module\n"
+        );
+    }
+
     #[test]
     fn link_files_require_the_stored_package() {
         assert_eq!(
@@ -1662,6 +1729,25 @@ mod tests {
         write_package(&base.join("src"), "init.lua", "return {}");
         assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.lua")));
         assert_eq!(entry_source(&base, "missing"), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn luwu_entries_resolve_but_skip_the_type_parse() {
+        let base = std::env::temp_dir().join("embr-test-luwu-entry");
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base.join("src"),
+            "init.luwu",
+            "export type T = number\nreturn {}",
+        );
+
+        assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.luwu")));
+        assert_eq!(guess_entry(&base).as_deref(), Some("src"));
+        // full_moon reads Luau only, so a Luwu entry links without types
+        assert_eq!(entry_luau_source(&base, "src"), None);
+        assert_eq!(normalize_entry("lib/vec.luwu"), "lib/vec");
 
         let _ = fs::remove_dir_all(&base);
     }

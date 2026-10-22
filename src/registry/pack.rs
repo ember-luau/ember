@@ -5,8 +5,10 @@ use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
 
 /// Never published, matched by name at any depth.
-const SKIP_NAMES: [&str; 6] = [
+const SKIP_NAMES: [&str; 7] = [
     ".git",
+    // Alloy's local folder: downloaded ingot executables and their lock
+    ".alloy",
     ".ember-staging",
     ".ember-patch",
     "ember.lock",
@@ -35,14 +37,20 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     walk(root, root, &out_dirs, &mut files)?;
 
     let empty = Vec::new();
-    let (includes, excludes) = match &manifest.target {
+    let (includes, excludes) = match manifest.target() {
         Some(target) => (&target.includes, &target.excludes),
         None => (&empty, &empty),
     };
     let includes = PathFilter::new(includes)?;
     let excludes = PathFilter::new(excludes)?;
+    // the logo ships like ember.toml does: the registry reads it from the archive
+    let logo = manifest
+        .package
+        .as_ref()
+        .and_then(|package| package.logo.as_deref())
+        .map(|logo| PathBuf::from(logo.replace('\\', "/").trim_start_matches("./")));
     files.retain(|file| {
-        if is_manifest(file) {
+        if is_manifest(file) || logo.as_deref() == Some(file.as_path()) {
             return true;
         }
         if !includes.is_empty() && !includes.matches(file) {
@@ -210,6 +218,7 @@ mod tests {
         write(&base, "ember.lock", "version = 1");
         write(&base, "target/debug/embr", "");
         write(&base, "node_modules/left-pad/index.js", "");
+        write(&base, ".alloy/ingots/enamel/enamel", "");
         write(&base, "packages/luau/Core.luau", "");
         write(&base, "Packages/Chief.luau", "");
         /* the pre-rename roblox output folder. [config] here repoints that
@@ -332,6 +341,39 @@ mod tests {
         assert_eq!(unpacked["ember.toml"], toml::to_string(&manifest).unwrap());
         assert_eq!(unpacked["src/init.luau"], "return 1\n");
         assert_eq!(unpacked["docs/guide.md"], "# rocket\n");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_logo_ships_whatever_includes_says() {
+        let base = std::env::temp_dir().join("embr-test-pack-logo");
+        let _ = fs::remove_dir_all(&base);
+        write(&base, "ember.toml", "");
+        write(&base, "src/init.luau", "return {}");
+        write(&base, "assets/logo.png", "");
+        write(&base, "assets/banner.png", "");
+
+        let manifest = parse_manifest(
+            r#"
+            [package]
+            name = "acme/rocket"
+            version = "1.0.0"
+            logo = "./assets/logo.png"
+
+            [target]
+            environment = "luau"
+            includes = ["src"]
+            "#,
+        );
+        assert_eq!(
+            packed_files(&base, &manifest).unwrap(),
+            vec![
+                PathBuf::from("assets/logo.png"),
+                PathBuf::from("ember.toml"),
+                PathBuf::from("src/init.luau"),
+            ]
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

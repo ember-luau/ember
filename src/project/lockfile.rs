@@ -234,6 +234,28 @@ mod tests {
     }
 
     #[test]
+    fn server_locks_still_load_and_write_roblox_server() {
+        let old: Lockfile = toml::from_str(
+            "version = 2\n\n\
+             [[package]]\n\
+             name = \"acme/svc\"\n\
+             version = \"1.0.0\"\n\
+             environment = \"server\"\n\
+             context = \"server\"\n\
+             index = \"https://example.com/index\"\n\
+             type = \"tar-gz\"\n\
+             url = \"https://example.com/svc/1.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.packages[0].environment, Environment::Server);
+        assert_eq!(old.packages[0].context(), Environment::Server);
+
+        let text = toml::to_string(&old).unwrap();
+        assert!(text.contains(r#"environment = "roblox_server""#), "{text}");
+        assert!(!text.contains(r#""server""#), "{text}");
+    }
+
+    #[test]
     fn v1_lockfiles_still_load() {
         /* the pre-context format, version 1, `link` on every entry, no
         `context` anywhere. context() falls back to the environment. */

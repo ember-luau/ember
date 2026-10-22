@@ -1,12 +1,17 @@
 pub mod add;
+pub mod auth;
 pub mod cache;
+pub mod deprecate;
 pub mod execute;
 pub mod index;
 pub mod init;
 pub mod install;
+pub mod mcp;
+pub mod outdated;
 pub mod patch;
 pub mod publish;
 pub mod run;
 pub mod self_cmd;
 pub mod studio;
 pub mod tool;
+pub mod yank;

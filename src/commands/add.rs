@@ -10,19 +10,22 @@ use inquire::validator::Validation;
 #[derive(Args, Debug)]
 pub struct AddArgs {
     /// Package to add, as scope/name
-    package: String,
+    pub package: String,
     /// Version requirement, defaults to "^" meaning latest
     #[arg(long)]
-    version: Option<String>,
+    pub version: Option<String>,
     /// Index key from [indices], skips the prompt
     #[arg(long)]
-    index: Option<String>,
+    pub index: Option<String>,
     /// Key written to [dependencies], defaults to the package short name
     #[arg(long)]
-    alias: Option<String>,
+    pub alias: Option<String>,
+    /// Key the dependency by its full scope/name; its link file goes in a folder named after the scope
+    #[arg(long, conflicts_with = "alias")]
+    pub scoped: bool,
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
-    refresh: bool,
+    pub refresh: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -36,7 +39,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let name = args.package.to_lowercase();
     let (_, short_name) = split_package_name(&name)?;
-    let alias = args.alias.unwrap_or_else(|| short_name.to_string());
+    let alias = match args.alias {
+        Some(alias) => alias,
+        // `mayari/core` and `chief/core` can then both be dependencies (#45)
+        None if args.scoped => name.clone(),
+        None => short_name.to_string(),
+    };
 
     let index_key = match args.index {
         Some(key) => Some(key),
@@ -53,17 +61,32 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     } else {
         Refresh::Ttl
     };
-    let prefer = manifest.target.as_ref().map(|target| target.environment);
+    let prefer = manifest
+        .target()
+        .map(|target| (target.environment, target.language));
     let index = Index::open(&index_url, mode)?;
-    let package = match index.resolve(&name, &req, prefer) {
+    let package = match index.resolve(&name, &req, prefer, &[]) {
         Ok(package) => package,
         /* the TTL may have kept us on a stale index that just hasn't
         seen this package or version yet, so one forced refresh, one retry */
         Err(_) if index.ttl_skipped() => {
-            Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer)?
+            Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer, &[])?
         }
         Err(error) => return Err(error),
     };
+    if let Some(allow) = crate::registry::resolver::Allow::for_project(&manifest)
+        && !allow.admits(
+            package.language,
+            package.environment,
+            Some(allow.environment),
+        )
+    {
+        return Err(allow.refusal(
+            format!("{name}@{}", package.version),
+            package.language,
+            package.environment,
+        ));
+    }
 
     /* edit the raw document instead of re-serializing `manifest`,
     so comments and formatting in ember.toml survive */

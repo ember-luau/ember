@@ -3,7 +3,7 @@ pub mod wally;
 
 use crate::error::Error;
 use crate::net::http;
-use crate::project::manifest::Environment;
+use crate::project::manifest::{Environment, Language};
 use crate::sys::git;
 use crate::sys::hash::{fnv1a, fnv1a_parts};
 use crate::sys::paths;
@@ -80,6 +80,15 @@ pub struct ResolvedPackage {
     /** Known from index metadata. None means inspect the archive after
     extraction, ember.toml -> pesde.toml -> wally.toml. */
     pub environment: Option<Environment>,
+    /// from the entry's `language`, luau when it has none.
+    pub language: Language,
+    /** the entry is yanked. only a version in `pinned` can come back
+    yanked, a fresh pick skips them. */
+    pub yanked: bool,
+    /// the version's own deprecation reason, `deprecated` on its entry.
+    pub deprecated: Option<String>,
+    /// the whole package's deprecation reason, pesde's `[meta] deprecated`.
+    pub package_deprecated: Option<String>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
 }
@@ -153,18 +162,33 @@ impl Index {
     }
 
     /** Finds the highest version of `name` matching `req`. For pesde
-    indices, `prefer_environment` picks between a version's targets. */
+    indices, `prefer`, a project's environment and language, picks between
+    a version's targets, see [`pesde::resolve`]. */
     pub fn resolve(
         &self,
         name: &str,
         req: &semver::VersionReq,
-        prefer_environment: Option<Environment>,
+        prefer: Option<(Environment, Language)>,
+        pinned: &[semver::Version],
     ) -> Result<ResolvedPackage, Error> {
         match &self.kind {
             Kind::Wally(config) => wally::resolve(&self.root, &self.url, config, name, req),
             Kind::Pesde(config) => {
-                pesde::resolve(&self.root, &self.url, config, name, req, prefer_environment)
+                pesde::resolve(&self.root, &self.url, config, name, req, prefer, pinned)
             }
+        }
+    }
+
+    /** every entry of `name`, yanked ones included, and the package-wide
+    deprecation reason. it reads pesde-format indices only, which the ember
+    index is. */
+    pub fn read(&self, name: &str) -> Result<(Vec<pesde::Candidate>, Option<String>), Error> {
+        match &self.kind {
+            Kind::Pesde(_) => pesde::read(&self.root, &self.url, name),
+            Kind::Wally(_) => Err(Error::IndexFetch {
+                url: self.url.clone(),
+                reason: "a wally index lists no versions this way".to_string(),
+            }),
         }
     }
 }
@@ -175,6 +199,17 @@ registries are public too. If credentialed downloads ever come back, restore
 the old restraint of tokens only to GitHub-owned hosts, so an arbitrary
 registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
+    download_with(source, dest, cache, &mut |_, _| {})
+}
+
+/** [`download`], and `on_bytes` hears the archive arrive: bytes so far and
+the whole size when known. a cached archive reports itself whole at once. */
+pub fn download_with(
+    source: &DownloadSource,
+    dest: &Path,
+    cache: CachePolicy,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), Error> {
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
         // Workspace members are linked in place, install never gets here.
         return Err(Error::IndexFetch {
@@ -189,7 +224,7 @@ pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Res
     }
 
     std::fs::create_dir_all(dest)?;
-    let (bytes, from_cache) = fetch_archive(url, &headers, cache)?;
+    let (bytes, from_cache) = fetch_archive(url, &headers, cache, on_bytes)?;
     match extract(source, &bytes, dest) {
         Ok(()) => Ok(()),
         /* cached bytes that no longer extract are poison, bitrot the
@@ -199,7 +234,7 @@ pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Res
             evict_archive(url);
             fs::remove_dir_all(dest)?;
             fs::create_dir_all(dest)?;
-            let (bytes, _) = fetch_archive(url, &headers, CachePolicy::Bypass)?;
+            let (bytes, _) = fetch_archive(url, &headers, CachePolicy::Bypass, on_bytes)?;
             extract(source, &bytes, dest)
         }
         Err(error) => Err(error),
@@ -245,6 +280,7 @@ fn fetch_archive(
     url: &str,
     headers: &[(&str, &str)],
     cache: CachePolicy,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(Vec<u8>, bool), Error> {
     let entry = archive_entry(url);
 
@@ -252,11 +288,13 @@ fn fetch_archive(
         && let Some(entry) = &entry
         && let Some(bytes) = load_archive(entry, url)
     {
+        let size = bytes.len() as u64;
+        on_bytes(size, Some(size));
         return Ok((bytes, true));
     }
 
     let started = std::time::Instant::now();
-    let bytes = http::get_bytes(url, headers)?;
+    let bytes = http::get_bytes_with(url, headers, on_bytes)?;
     crate::ui::timing(&format!("download {url}"), started);
 
     /* caching is best-effort, a full disk or permission problem must not
@@ -391,13 +429,17 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
         }
         if wanted {
             let started = std::time::Instant::now();
-            let result = git::run(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"]);
+            let result = fetch(
+                url,
+                &["-C", &dir.to_string_lossy(), "pull", "--ff-only"],
+                STALL_SECS,
+            );
             crate::ui::timing(&format!("index-refresh {url}"), started);
             /* stamp the attempt, success or not. an unreachable remote
             should warn once per TTL window, not hang every install */
             touch(&stamp);
-            if let Err(reason) = result {
-                eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
+            if let Err(error) = result {
+                eprintln!("warning: embr uses the cached copy of the index. {error}");
             }
         }
         return Ok((dir, false));
@@ -405,15 +447,56 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
 
     std::fs::create_dir_all(dir.parent().expect("cache dir has a parent"))?;
     let started = std::time::Instant::now();
-    git::run(&["clone", "--depth", "1", url, &dir.to_string_lossy()]).map_err(|reason| {
-        Error::IndexFetch {
-            url: url.to_string(),
-            reason,
-        }
-    })?;
+    fetch(
+        url,
+        &["clone", "--depth", "1", url, &dir.to_string_lossy()],
+        STALL_SECS,
+    )?;
     crate::ui::timing(&format!("index-clone {url}"), started);
     touch(&stamp);
     Ok((dir, false))
+}
+
+/** git sets no deadline of its own. a host that holds the connection open,
+as GitHub can in an outage, kept resolution waiting forever (#34). a
+transfer slower than one byte a second for this long fails instead. */
+const STALL_SECS: u32 = 30;
+
+/// how many tries a clone or a pull gets when the host fails.
+const FETCH_ATTEMPTS: u32 = 3;
+
+/** runs a git clone or pull against the index at `url`. a server error or
+a stall can pass, so it gets FETCH_ATTEMPTS tries with a short wait between
+them. any other failure, a 404 or a bad url, fails at once. */
+fn fetch(url: &str, args: &[&str], stall_secs: u32) -> Result<(), Error> {
+    let stall = format!("http.lowSpeedTime={stall_secs}");
+    let mut full = vec!["-c", "http.lowSpeedLimit=1", "-c", &stall];
+    full.extend_from_slice(args);
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let Err(reason) = git::run(&full) else {
+            return Ok(());
+        };
+        // a 503 reads "returned error: 503", a stall "Operation too slow"
+        let host_failed = reason.contains("returned error: 5") || reason.contains("too slow");
+        if !host_failed {
+            return Err(Error::IndexFetch {
+                url: url.to_string(),
+                reason,
+            });
+        }
+        if attempt == FETCH_ATTEMPTS {
+            return Err(Error::IndexUnavailable {
+                url: url.to_string(),
+                attempts: FETCH_ATTEMPTS,
+                // git's last line holds the cause, the lines above it are progress
+                reason: reason.lines().last().unwrap_or_default().to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+    }
 }
 
 /** whether `url`'s index cache was refreshed within the TTL, what
@@ -591,7 +674,10 @@ mod tests {
         assert!(!index.ttl_skipped());
         let any = semver::VersionReq::STAR;
         assert_eq!(
-            index.resolve("acme/thing", &any, None).unwrap().version,
+            index
+                .resolve("acme/thing", &any, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(1, 0, 0)
         );
 
@@ -604,11 +690,14 @@ mod tests {
         let index = Index::open(&url, Refresh::Ttl).unwrap();
         assert!(index.ttl_skipped());
         assert_eq!(
-            index.resolve("acme/thing", &any, None).unwrap().version,
+            index
+                .resolve("acme/thing", &any, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(1, 0, 0)
         );
         let two = semver::VersionReq::parse("^2.0.0").unwrap();
-        assert!(index.resolve("acme/thing", &two, None).is_err());
+        assert!(index.resolve("acme/thing", &two, None, &[]).is_err());
 
         /* the resolver-level guardrail, a failing resolve on a skipped
         index earns one forced refresh and then succeeds */
@@ -619,9 +708,15 @@ mod tests {
         ))
         .unwrap();
         // project_dir only matters for workspace deps, origin keeps it hermetic
-        let resolved =
-            crate::registry::resolver::resolve(&manifest, &origin, Refresh::Ttl, &mut Vec::new())
-                .unwrap();
+        let resolved = crate::registry::resolver::resolve(
+            &manifest,
+            &origin,
+            Refresh::Ttl,
+            &Default::default(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].version, semver::Version::new(2, 0, 0));
 
@@ -629,9 +724,75 @@ mod tests {
         let index = Index::open(&url, Refresh::Force).unwrap();
         assert!(!index.ttl_skipped());
         assert_eq!(
-            index.resolve("acme/thing", &two, None).unwrap().version,
+            index
+                .resolve("acme/thing", &two, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(2, 0, 0)
         );
+    }
+
+    /** a local index host. it answers every request with `reply`, or with
+    no reply it holds the connection open and says nothing. the count is
+    the number of connections it took. */
+    fn host(
+        reply: Option<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/index", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for mut stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.read(&mut [0u8; 4096]);
+                match reply {
+                    Some(reply) => drop(stream.write_all(reply.as_bytes())),
+                    None => held.push(stream),
+                }
+            }
+        });
+        (url, hits)
+    }
+
+    /// #34: a 503 gets three tries, then an error that names the host.
+    #[test]
+    fn a_failing_host_gets_bounded_tries() {
+        let (url, hits) = host(Some(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ));
+        if cache_dir(&url).is_err() {
+            return; // no home directory on this machine
+        }
+
+        let Err(error) = Index::open(&url, Refresh::Ttl) else {
+            panic!("a host that answers 503 opened as an index");
+        };
+        assert!(
+            matches!(error, Error::IndexUnavailable { attempts: 3, .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("503"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// #34: a host that never answers fails the clone, it does not hang it.
+    #[test]
+    fn a_stalled_host_fails_instead_of_hanging() {
+        let (url, hits) = host(None);
+        let dir = std::env::temp_dir().join("embr-test-stalled-clone");
+        let _ = fs::remove_dir_all(&dir);
+
+        let started = std::time::Instant::now();
+        let clone: [&str; 5] = ["clone", "--depth", "1", &url, &dir.to_string_lossy()];
+        let error = fetch(&url, &clone, 1).unwrap_err();
+        assert!(matches!(error, Error::IndexUnavailable { .. }), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(started.elapsed() < Duration::from_secs(60));
     }
 
     #[test]

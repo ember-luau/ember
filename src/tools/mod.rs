@@ -95,8 +95,14 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
 
 /** Installs a manifest tool, skipping the network when the version is
 already stored. true = downloaded, false = cache reused. the bin shim
-gets refreshed either way. */
-pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool, Error> {
+gets refreshed either way. `on_bytes` hears the asset download, see
+[`http::get_bytes_with`]. */
+pub fn install_tool(
+    alias: &str,
+    tool: &Tool,
+    github: &GithubAPI,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
         return Err(Error::ReservedToolAlias(alias.to_string()));
     }
@@ -107,15 +113,20 @@ pub fn install_tool(alias: &str, tool: &Tool, github: &GithubAPI) -> Result<bool
     }
 
     let release = github.get_release(&tool.repository, &tool.version)?;
-    install_release(alias, &tool.repository, &release)
+    install_release(alias, &tool.repository, &release, on_bytes)
 }
 
 /** Downloads the platform asset of a fetched release, extracts it, stores
 the executable under `storage_dir`, and writes a bin shim named after
 the alias. true = downloaded, false = version already stored. the shim
 gets refreshed either way. */
-pub fn install_release(alias: &str, repository: &str, release: &Release) -> Result<bool, Error> {
-    let (_, downloaded) = store_release(repository, release, alias)?;
+pub fn install_release(
+    alias: &str,
+    repository: &str,
+    release: &Release,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<bool, Error> {
+    let (_, downloaded) = store_release(repository, release, alias, on_bytes)?;
     shim::write(&shim::path(alias)?)?;
     Ok(downloaded)
 }
@@ -129,6 +140,7 @@ pub fn store_release(
     repository: &str,
     release: &Release,
     name_hint: &str,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(PathBuf, bool), Error> {
     let version = release.tag_name.trim_start_matches('v');
     let storage = storage_dir(repository, version)?;
@@ -144,7 +156,7 @@ pub fn store_release(
             tool: repository.to_string(),
             version: version.to_string(),
         })?;
-    let bytes = http::get_bytes(&asset.browser_download_url, &[])?;
+    let bytes = http::get_bytes_with(&asset.browser_download_url, &[], on_bytes)?;
 
     /* extract into a staging sibling first so a failed install never
     leaves a half-written storage dir behind, same dance as install.rs.
@@ -200,7 +212,13 @@ pub fn ensure_stored(
         return Ok(stored);
     }
     let release = github.get_release(repository, version)?;
-    Ok(store_release(repository, &release, repo_short_name(repository))?.0)
+    Ok(store_release(
+        repository,
+        &release,
+        repo_short_name(repository),
+        &mut |_, _| {},
+    )?
+    .0)
 }
 
 /** the stored executable for a repo's latest release, asking GitHub at
@@ -236,7 +254,13 @@ pub fn ensure_latest(
             return Err(error);
         }
     };
-    let stored = store_release(repository, &release, repo_short_name(repository))?.0;
+    let stored = store_release(
+        repository,
+        &release,
+        repo_short_name(repository),
+        &mut |_, _| {},
+    )?
+    .0;
 
     /* stamped only after a successful store, so a failed download is
     retried next run instead of being remembered as the answer */
@@ -469,7 +493,7 @@ mod tests {
             Err(Error::ReservedToolAlias(_))
         ));
         assert!(matches!(
-            install_tool("EMBR", &tool, &GithubAPI::new()),
+            install_tool("EMBR", &tool, &GithubAPI::new(), &mut |_, _| {}),
             Err(Error::ReservedToolAlias(_))
         ));
     }

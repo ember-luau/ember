@@ -5,7 +5,15 @@ use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
 
-const ENVIRONMENTS: &[&str] = &["roblox", "server", "lune", "luau", "lute"];
+const ENVIRONMENTS: &[&str] = &[
+    "roblox",
+    "roblox_server",
+    "lune",
+    "luau",
+    "lute",
+    "seal",
+    "zune",
+];
 
 /// what the first question offers, in the order it offers them.
 const KINDS: &[&str] = &[PROJECT, PACKAGE];
@@ -192,6 +200,11 @@ pub fn run() -> Result<(), Error> {
     let environment = Select::new("environment:", ENVIRONMENTS.to_vec())
         .with_help_message("Where this package's Luau code runs")
         .prompt()?;
+    /* seal resolves `.luau` only, so a dependency with `.lua` files breaks
+    there at require time. better said now than in the first bug report. */
+    if environment == "seal" {
+        eprintln!("note: seal loads .luau files only, and its @std is not lute's @std");
+    }
     let main = Text::new("main:")
         .with_help_message("Entry point of your package")
         .with_default("src/init.luau")
@@ -206,14 +219,16 @@ pub fn run() -> Result<(), Error> {
             authors: parse_authors(&authors_input),
             repository: non_empty(repository),
             license: Some(license.to_string()),
+            logo: None,
         }),
-        target: Some(Target {
+        targets: vec![Target {
             environment: Environment::from_embr(environment)?,
             main: non_empty(main),
             includes: Vec::new(),
             excludes: Vec::new(),
             workspace: Vec::new(),
-        }),
+            language: Default::default(),
+        }],
         config: Default::default(),
         indices: Default::default(),
         dependencies: Default::default(),
@@ -359,7 +374,7 @@ mod tests {
         for environment in ENVIRONMENTS {
             let parsed = Environment::from_embr(environment).unwrap();
             // and each offers its own canonical spelling, not an alias
-            assert_eq!(parsed.dir_name(), *environment);
+            assert_eq!(parsed.as_str(), *environment);
         }
         assert_eq!(KINDS, [PROJECT, PACKAGE]);
     }

@@ -7,7 +7,7 @@ the curl inside the flame and the gap between the crate panels, so the art
 places none by hand. the two spark diamonds are the one thing dropped: each
 covers about one cell at this size, and renders as stray punctuation. */
 
-use crate::ui::{ACCENT, RESET, fg};
+use crate::ui::{ACCENT, CRIMSON, GOLD, RESET, fg};
 
 /// the logo, painted with the gradient unless `color` is off.
 pub fn logo(color: bool) -> String {
@@ -27,11 +27,7 @@ the help text beside the logo uses the same ramp for the same row, so the two
 columns read as one object lit from above rather than two things that happen
 to sit next to each other. */
 pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
-    /* the ends stay off pure white and off near black on purpose: the help
-    text is painted with this same ramp, and its first and last lines have to
-    stay readable on a light terminal as well as a dark one */
-    const TOP: (u8, u8, u8) = (0xFF, 0xC2, 0x4A); // gold, the hot tip
-    const BOTTOM: (u8, u8, u8) = (0xD9, 0x1E, 0x36); // crimson, the coal
+    let (accent, top, bottom) = (ACCENT, GOLD, CRIMSON);
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let position = row.min(rows.saturating_sub(1)) as u32 * 1000 / last; // 0..=1000
@@ -44,15 +40,15 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
     // two legs, top -> accent for the first half, accent -> bottom for the second
     if position <= 500 {
         (
-            mix(TOP.0, ACCENT.0, position, 500),
-            mix(TOP.1, ACCENT.1, position, 500),
-            mix(TOP.2, ACCENT.2, position, 500),
+            mix(top.0, accent.0, position, 500),
+            mix(top.1, accent.1, position, 500),
+            mix(top.2, accent.2, position, 500),
         )
     } else {
         (
-            mix(ACCENT.0, BOTTOM.0, position - 500, 500),
-            mix(ACCENT.1, BOTTOM.1, position - 500, 500),
-            mix(ACCENT.2, BOTTOM.2, position - 500, 500),
+            mix(accent.0, bottom.0, position - 500, 500),
+            mix(accent.1, bottom.1, position - 500, 500),
+            mix(accent.2, bottom.2, position - 500, 500),
         )
     }
 }
@@ -150,7 +146,8 @@ mod tests {
         let (r, g, b) = middle;
         assert!(
             r.abs_diff(ACCENT.0) < 12 && g.abs_diff(ACCENT.1) < 12 && b.abs_diff(ACCENT.2) < 12,
-            "middle row {middle:?} should land on the accent {ACCENT:?}"
+            "middle row {middle:?} should land on the accent {:?}",
+            ACCENT
         );
 
         // and it only ever moves one way down the logo
