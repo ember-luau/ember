@@ -13,7 +13,7 @@ pub enum IndexCommand {
         /// Name dependencies reference the index by, e.g. wally
         name: Option<String>,
 
-        /// Git URL of the index, well-known names fill this in automatically
+        /// Git URL of the index, or Forest's API URL; well-known names fill this in automatically
         url: Option<String>,
     },
 
@@ -27,6 +27,7 @@ pub enum IndexCommand {
 /** autocomplete suggestions only. any name and url the user
 types is accepted as-is. */
 const KNOWN_INDICES: &[(&str, &str)] = &[
+    ("forest", crate::registry::index::forest::API_URL),
     ("pesde", "https://github.com/pesde-pkg/index"),
     ("wally", "https://github.com/UpliftGames/wally-index"),
 ];
@@ -38,8 +39,8 @@ fn known_url(name: &str) -> Option<&'static str> {
         .map(|(_, url)| *url)
 }
 
-/** the index an argument names: `ember`, a known name like `wally` or
-`pesde`, a key of the project's [indices], or a URL. the commands that
+/** the index an argument names: `ember`, a known name like `wally`,
+`pesde` or `forest`, a key of the project's [indices], or a URL. the commands that
 take `--index` on the command line read it through here. */
 pub(crate) fn index_url_for(manifest: Option<&Manifest>, name: &str) -> Result<String, Error> {
     let name = name.trim();
@@ -109,7 +110,7 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
                     .map(|(key, _)| key.to_string())
                     .collect(),
             ))
-            .with_help_message("pesde and wally are suggested; any name works")
+            .with_help_message("forest, pesde and wally are suggested; any name works")
             .prompt()?,
     };
     let name = name.trim().to_string();
@@ -131,7 +132,7 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
                         .map(|(_, url)| url.to_string())
                         .collect(),
                 ))
-                .with_help_message("git repository of the index")
+                .with_help_message("git repository of the index, or Forest's API URL")
                 .prompt()?,
         },
     };
@@ -226,6 +227,7 @@ mod tests {
             known_url("pesde"),
             Some("https://github.com/pesde-pkg/index")
         );
+        assert_eq!(known_url("forest"), Some("https://api.forest.dev"));
         assert_eq!(known_url("custom"), None);
     }
 
