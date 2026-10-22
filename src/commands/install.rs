@@ -94,7 +94,7 @@ fn build_alloy_packages(
     stored: &[StoredPackage],
     warn: &mut impl FnMut(String),
 ) {
-    if manifest.target.as_ref().map(|target| target.language) != Some(Language::Alloy) {
+    if manifest.target().map(|target| target.language) != Some(Language::Alloy) {
         return;
     }
     for package in stored
@@ -126,8 +126,11 @@ fn is_alloy_package(dir: &Path) -> bool {
         && fs::read_to_string(dir.join(crate::project::manifest::MANIFEST_FILE))
             .ok()
             .and_then(|text| toml::from_str::<Manifest>(&text).ok())
-            .and_then(|manifest| manifest.target)
-            .is_some_and(|target| target.language == Language::Alloy)
+            .is_some_and(|manifest| {
+                manifest
+                    .target()
+                    .is_some_and(|target| target.language == Language::Alloy)
+            })
 }
 
 /** what the current ember.lock pins, so a yanked version it holds keeps

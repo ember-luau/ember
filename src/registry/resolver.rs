@@ -22,7 +22,7 @@ pub struct Allow {
 impl Allow {
     /// the rule `manifest`'s own target sets. a manifest with no [target] only consumes, and sets none.
     pub fn for_project(manifest: &Manifest) -> Option<Allow> {
-        let target = manifest.target.as_ref()?;
+        let target = manifest.target()?;
         Some(Allow {
             environment: target.environment,
             language: target.language,
@@ -241,7 +241,11 @@ fn resolve_once(
     ttl_skipped: &mut bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
-    let prefer_environment = manifest.target.as_ref().map(|target| target.environment);
+    let prefer_environment = manifest.target().map(|target| target.environment);
+    let language = manifest
+        .target()
+        .map(|target| target.language)
+        .unwrap_or_default();
     let mut indices: HashMap<String, Index> = HashMap::new();
     /* Only walk up looking for a claiming workspace root once a workspace
     dep actually appears. */
@@ -374,6 +378,7 @@ fn resolve_once(
                     None => target.or(prefer_environment),
                 };
                 let pins = pinned.get(&name).map(Vec::as_slice).unwrap_or_default();
+                let preferred = preferred.map(|environment| (environment, language));
                 let package = index.resolve(&name, &req, preferred, pins)?;
                 /* a transitive package is judged by its tree's environment.
                 a seed's `target` crosses environments on purpose, so a
@@ -444,8 +449,7 @@ fn resolve_once(
                 let version = semver::Version::parse(&member_package.version)?;
                 let environment = member
                     .manifest
-                    .target
-                    .as_ref()
+                    .target()
                     .map(|target| target.environment)
                     .ok_or_else(|| Error::UnknownPackageEnvironment(name.clone()))?;
 
@@ -954,7 +958,7 @@ mod tests {
                     "{}@{} {}/{}",
                     install.name,
                     install.version,
-                    install.context,
+                    install.context.dir_name(),
                     install.link.as_deref().unwrap_or("-")
                 )
             })
@@ -1639,7 +1643,7 @@ mod tests {
             server
                 .refusal("acme/x@1.0.0".to_string(), Loom, Some(Environment::Roblox))
                 .to_string(),
-            "This Luau project for server takes Luau packages for server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
+            "This Luau project for roblox_server takes Luau packages for roblox_server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
         );
     }
 

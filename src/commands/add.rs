@@ -61,7 +61,9 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     } else {
         Refresh::Ttl
     };
-    let prefer = manifest.target.as_ref().map(|target| target.environment);
+    let prefer = manifest
+        .target()
+        .map(|target| (target.environment, target.language));
     let index = Index::open(&index_url, mode)?;
     let package = match index.resolve(&name, &req, prefer, &[]) {
         Ok(package) => package,

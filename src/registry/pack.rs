@@ -37,7 +37,7 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     walk(root, root, &out_dirs, &mut files)?;
 
     let empty = Vec::new();
-    let (includes, excludes) = match &manifest.target {
+    let (includes, excludes) = match manifest.target() {
         Some(target) => (&target.includes, &target.excludes),
         None => (&empty, &empty),
     };
