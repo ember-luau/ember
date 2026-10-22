@@ -5,18 +5,48 @@ use clap::builder::styling;
 use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
 
-/// theme accent #F23C1B. the only place the color lives, everything derives from it.
-pub const ACCENT: (u8, u8, u8) = (0xF2, 0x3C, 0x1B);
+/** the colours embr paints with. the accent marks every ✓, bar, prompt
+and flag name; `top` and `bottom` end the logo's gradient, with the accent
+in the middle. */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub accent: (u8, u8, u8),
+    pub top: (u8, u8, u8),
+    pub bottom: (u8, u8, u8),
+}
 
-fn accent() -> crossterm::style::Color {
-    let (r, g, b) = ACCENT;
+/** ember's own: accent #F23C1B, a gold tip and a crimson coal. the ends stay
+off pure white and near black, so the help text painted with the ramp
+reads on a light terminal and a dark one. */
+pub const EMBER: Palette = Palette {
+    accent: (0xF2, 0x3C, 0x1B),
+    top: (0xFF, 0xC2, 0x4A),
+    bottom: (0xD9, 0x1E, 0x36),
+};
+
+static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+
+/** paints everything after this call with `palette`. a tool that runs
+embr's commands under its own name sets its brand once, before the first
+command. the first call wins. */
+pub fn set_palette(palette: Palette) {
+    let _ = PALETTE.set(palette);
+}
+
+/// the palette in use, ember's own unless a host set another.
+pub fn palette() -> Palette {
+    PALETTE.get().copied().unwrap_or(EMBER)
+}
+
+pub fn accent() -> crossterm::style::Color {
+    let (r, g, b) = palette().accent;
     crossterm::style::Color::Rgb { r, g, b }
 }
 
 /** Styles clap's help/usage/error output to match the prompt theme. plain
 section headers, accent command/flag names, dimmed placeholders. */
 pub fn help_styles() -> styling::Styles {
-    let (r, g, b) = ACCENT;
+    let (r, g, b) = palette().accent;
     let accent = styling::Style::new().fg_color(Some(styling::RgbColor(r, g, b).into()));
     let dimmed = styling::Style::new().fg_color(Some(styling::AnsiColor::BrightBlack.into()));
 
@@ -301,7 +331,7 @@ pub fn print_elapsed(duration: Duration) {
 }
 
 pub fn render_config() -> RenderConfig<'static> {
-    let (r, g, b) = ACCENT;
+    let (r, g, b) = palette().accent;
     let accent = Color::rgb(r, g, b);
 
     RenderConfig::default_colored()
@@ -330,7 +360,7 @@ pub fn render_config() -> RenderConfig<'static> {
 mod tests {
     use std::time::Duration;
 
-    use super::{ACCENT, RESET, fg, format_duration, visible_width};
+    use super::{EMBER, RESET, fg, format_duration, visible_width};
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {
@@ -365,6 +395,6 @@ mod tests {
         assert_eq!(visible_width(""), 0);
         // a painted line measures as what the terminal shows, not what it stores
         assert_eq!(visible_width("\x1b[38;2;230;16;72mab\x1b[0mc"), 3);
-        assert_eq!(visible_width(&format!("{}x{RESET}", fg(ACCENT))), 1);
+        assert_eq!(visible_width(&format!("{}x{RESET}", fg(EMBER.accent))), 1);
     }
 }

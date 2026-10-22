@@ -97,7 +97,7 @@ fn device_flow(client_id: &str) -> Result<Credentials, Error> {
 fn print_instructions(device: &responses::DeviceCode) {
     use crossterm::style::Stylize;
 
-    let (r, g, b) = ui::ACCENT;
+    let (r, g, b) = ui::palette().accent;
     let accent = crossterm::style::Color::Rgb { r, g, b };
     println!(
         "Open {} and enter the code {}",

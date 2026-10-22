@@ -11,6 +11,8 @@ pub mod api;
 #[doc(hidden)]
 pub mod art;
 #[doc(hidden)]
+pub mod cli;
+#[doc(hidden)]
 pub mod commands;
 #[doc(hidden)]
 pub mod error;
