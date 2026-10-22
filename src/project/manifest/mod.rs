@@ -51,8 +51,18 @@ pub struct Manifest {
     [`Error::PackageMissing`]. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<Package>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<Target>,
+    /** what the package ships, `[target]` for one target or `[[target]]`
+    for several. the first is the project's own: install, the fit warnings,
+    init, workspaces, and `embr add` read only that one. read it through
+    [`Manifest::target`] and [`Manifest::targets`]. */
+    #[serde(
+        rename = "target",
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_targets",
+        deserialize_with = "deserialize_targets"
+    )]
+    pub(crate) targets: Vec<Target>,
     #[serde(default, skip_serializing_if = "Config::is_default")]
     pub config: Config,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -141,6 +151,29 @@ pub struct Config {
     pub seal_packages_out: Option<String>,
     #[serde(rename = "zune-packages-out", skip_serializing_if = "Option::is_none")]
     pub zune_packages_out: Option<String>,
+    /// how the requires embr writes look, see [`RequireStyle`].
+    #[serde(default, skip_serializing_if = "RequireStyle::is_string")]
+    pub requires: RequireStyle,
+}
+
+/** how embr writes the requires it generates: link files, and package
+requires it points at their new place (#43). */
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RequireStyle {
+    /** `require("./packages/roblox/x")`, which every runtime reads. embr
+    also turns a package's own `script.Parent.X` requires into strings. */
+    #[default]
+    String,
+    /** `require(script.Parent.packages.roblox.x)`, Roblox's dot requires.
+    a package's own instance requires stay as it wrote them. */
+    Instance,
+}
+
+impl RequireStyle {
+    fn is_string(&self) -> bool {
+        *self == RequireStyle::String
+    }
 }
 
 impl Config {
@@ -152,6 +185,7 @@ impl Config {
             && self.lute_packages_out.is_none()
             && self.seal_packages_out.is_none()
             && self.zune_packages_out.is_none()
+            && self.requires.is_string()
     }
 }
 
@@ -211,6 +245,54 @@ pub struct Target {
     pub language: Language,
 }
 
+impl Target {
+    /** the name that the index keys this target by. it is the environment
+    alone for Luau, else `<environment>-<language>`, such as `roblox-alloy`. */
+    pub fn id(&self) -> String {
+        match self.language {
+            Language::Luau => self.environment.to_string(),
+            language => format!("{}-{language}", self.environment),
+        }
+    }
+}
+
+/// writes one target as a `[target]` table and several as `[[target]]`.
+fn serialize_targets<S: serde::Serializer>(
+    targets: &[Target],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match targets {
+        [target] => target.serialize(serializer),
+        targets => targets.serialize(serializer),
+    }
+}
+
+/** reads `[target]` or `[[target]]` into one list, and refuses two targets
+with the same ID: the index has one entry for each ID. */
+fn deserialize_targets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Target>, D::Error> {
+    use serde::de::Error as _;
+    let targets = match toml::Value::deserialize(deserializer)? {
+        toml::Value::Array(items) => items
+            .into_iter()
+            .map(Target::deserialize)
+            .collect::<Result<Vec<_>, _>>(),
+        table => Target::deserialize(table).map(|target| vec![target]),
+    }
+    .map_err(D::Error::custom)?;
+    let mut ids = std::collections::HashSet::new();
+    for target in &targets {
+        let id = target.id();
+        if !ids.insert(id.clone()) {
+            return Err(D::Error::custom(format!(
+                "two targets have the ID '{id}'; give each one a different environment or language"
+            )));
+        }
+    }
+    Ok(targets)
+}
+
 /** the language of a package's own files. Alloy and Loom build to plain
 Luau, so their packages install wherever a Luau one does. Luwu runs only on
 a Luwu host, so its packages need a Luwu project. */
@@ -240,6 +322,18 @@ impl Language {
         }
     }
 
+    /// the language that `as_str` spells `name`. None for a name embr does not know.
+    pub fn parse(name: &str) -> Option<Language> {
+        [
+            Language::Luau,
+            Language::Alloy,
+            Language::Loom,
+            Language::Luwu,
+        ]
+        .into_iter()
+        .find(|language| language.as_str() == name)
+    }
+
     /** the compiler whose `build` writes this language's Luau before a
     publish. None for languages that ship their sources as they are. */
     pub fn builder(self) -> Option<&'static str> {
@@ -250,11 +344,21 @@ impl Language {
         }
     }
 
-    /** whether a project in `self` can use a package in `package`. Luau,
-    Alloy, and Loom packages ship Luau, which every project runs. Luwu reads
-    Luau too, but nothing else reads Luwu. */
+    /** whether a project in `self` takes a package in `package`: its own
+    language, or plain Luau, the base every language reads. languages do
+    not reach into each other, so a Luau project takes no Alloy package. */
     pub fn accepts(self, package: Language) -> bool {
-        package != Language::Luwu || self == Language::Luwu
+        package == self || package == Language::Luau
+    }
+
+    /// the name people write: "Luau", "Alloy", "Loom", "Luwu".
+    pub fn title(self) -> &'static str {
+        match self {
+            Language::Luau => "Luau",
+            Language::Alloy => "Alloy",
+            Language::Loom => "Loom",
+            Language::Luwu => "Luwu",
+        }
     }
 }
 
@@ -275,7 +379,10 @@ pub enum Environment {
     since every already-published manifest and lockfile says it. */
     #[serde(alias = "shared")]
     Roblox,
-    /// Roblox server-side only
+    /** Roblox server-side only. it takes pesde's name, `roblox_server`, and
+    reads `server`, the name before, everywhere. its packages folder keeps the
+    name `server`, see [`Environment::dir_name`]. */
+    #[serde(rename = "roblox_server", alias = "server")]
     Server,
     /// needs the Lune runtime
     Lune,
@@ -300,6 +407,9 @@ impl Environment {
         Environment::Zune,
     ];
 
+    /** the folder under packages/ that this environment's packages install
+    to. it differs from [`Environment::as_str`] only for `roblox_server`,
+    whose folder stays `server` so existing Rojo project paths keep working. */
     pub fn dir_name(self) -> &'static str {
         match self {
             Environment::Roblox => "roblox",
@@ -309,6 +419,14 @@ impl Environment {
             Environment::Lute => "lute",
             Environment::Seal => "seal",
             Environment::Zune => "zune",
+        }
+    }
+
+    /// the name that embr writes and prints, such as `roblox_server`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Environment::Server => "roblox_server",
+            other => other.dir_name(),
         }
     }
 
@@ -333,11 +451,12 @@ impl Environment {
         }
     }
 
-    /// parses embr's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
+    /** parses embr's own environment names like "roblox" and "lune". `shared`
+    is the pre-rename spelling of `roblox`, and `server` of `roblox_server`. */
     pub fn from_embr(environment: &str) -> Result<Self, Error> {
         match environment {
             "roblox" | "shared" => Ok(Environment::Roblox),
-            "server" => Ok(Environment::Server),
+            "roblox_server" | "server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
             "lute" => Ok(Environment::Lute),
@@ -348,18 +467,20 @@ impl Environment {
     }
 
     /** whether a project in `self` can use a package published for
-    `package`. portable Luau runs anywhere, and a Roblox server runs shared
-    Roblox code, wally's realm rule. */
+    `package`. portable Luau runs anywhere, a Roblox server runs shared
+    Roblox code (wally's realm rule), and Lune runs Roblox code through
+    its `@lune/roblox` DOM. */
     pub fn accepts(self, package: Environment) -> bool {
         self == package
             || package == Environment::Luau
-            || (self == Environment::Server && package == Environment::Roblox)
+            || (matches!(self, Environment::Server | Environment::Lune)
+                && package == Environment::Roblox)
     }
 }
 
 impl fmt::Display for Environment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.dir_name())
+        f.write_str(self.as_str())
     }
 }
 
@@ -475,7 +596,7 @@ fn default_workspace_version() -> String {
 
 impl Dependency {
     /** the `target` an entry states, e.g.
-    `Chief = { name = "chief/core", version = "^", target = "server" }`.
+    `Chief = { name = "chief/core", version = "^", target = "roblox_server" }`.
 
     it overrides which environment tree a *direct* dependency installs
     under, so a package published for Roblox can be pulled into the server
@@ -750,10 +871,19 @@ impl Manifest {
         Self::load_from(&manifest_in(Path::new("")))
     }
 
+    /// the project's own target, the first one. None without a [target].
+    pub fn target(&self) -> Option<&Target> {
+        self.targets.first()
+    }
+
+    /// every target, in the order that the manifest gives them.
+    pub fn targets(&self) -> &[Target] {
+        &self.targets
+    }
+
     /// member globs from [target] workspace. empty = not a workspace root.
     pub fn workspace_members(&self) -> &[String] {
-        self.target
-            .as_ref()
+        self.target()
             .map(|target| target.workspace.as_slice())
             .unwrap_or(&[])
     }
@@ -779,6 +909,15 @@ impl Manifest {
         match configured {
             Some(dir) => std::path::PathBuf::from(dir),
             None => std::path::Path::new("packages").join(environment.dir_name()),
+        }
+    }
+
+    /** the require style for packages that install under `context`. only
+    Roblox has a `script` to climb from, so the other trees keep strings. */
+    pub fn require_style(&self, context: Environment) -> RequireStyle {
+        match context {
+            Environment::Roblox | Environment::Server => self.config.requires,
+            _ => RequireStyle::String,
         }
     }
 
@@ -957,10 +1096,7 @@ mod tests {
 
         assert_eq!(manifest.name(), Some("scope/name"));
         assert_eq!(manifest.id().as_deref(), Some("scope/name@0.1.0"));
-        assert_eq!(
-            manifest.target.as_ref().unwrap().environment,
-            Environment::Lune
-        );
+        assert_eq!(manifest.target().unwrap().environment, Environment::Lune);
         assert!(matches!(
             &manifest.dependencies["Chief"],
             Dependency::Registry { index: None, .. }
@@ -1073,6 +1209,37 @@ mod tests {
         );
     }
 
+    /// #43: `[config] requires` picks the style, and only Roblox trees take instances.
+    #[test]
+    fn require_style_applies_to_roblox_trees() {
+        let parse = |config: &str| {
+            toml::from_str::<Manifest>(&format!(
+                "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n[config]\n{config}"
+            ))
+        };
+
+        let manifest = parse("requires = \"instance\"\n").unwrap();
+        assert_eq!(
+            manifest.require_style(Environment::Roblox),
+            RequireStyle::Instance
+        );
+        assert_eq!(
+            manifest.require_style(Environment::Server),
+            RequireStyle::Instance
+        );
+        assert_eq!(
+            manifest.require_style(Environment::Lune),
+            RequireStyle::String
+        );
+
+        let manifest = parse("").unwrap();
+        assert_eq!(
+            manifest.require_style(Environment::Roblox),
+            RequireStyle::String
+        );
+        assert!(parse("requires = \"dots\"\n").is_err());
+    }
+
     #[test]
     fn packages_out_defaults_and_overrides() {
         let manifest: Manifest = toml::from_str(
@@ -1167,15 +1334,64 @@ mod tests {
              [target]\nenvironment = \"shared\"\n",
         )
         .unwrap();
-        assert_eq!(
-            manifest.target.as_ref().unwrap().environment,
-            Environment::Roblox
-        );
+        assert_eq!(manifest.target().unwrap().environment, Environment::Roblox);
         let serialized = toml::to_string(&manifest).unwrap();
         assert!(
             serialized.contains(r#"environment = "roblox""#),
             "{serialized}"
         );
+    }
+
+    /** `roblox_server` is pesde's name, and `server` the name before it.
+    the old name parses in every reader, embr writes only the new one, and
+    the packages folder keeps the old name so Rojo paths do not move. */
+    #[test]
+    fn server_is_still_read_as_roblox_server() {
+        assert_eq!(
+            Environment::from_embr("server").unwrap(),
+            Environment::Server
+        );
+        assert_eq!(
+            Environment::from_embr("roblox_server").unwrap(),
+            Environment::Server
+        );
+        assert_eq!(Environment::Server.to_string(), "roblox_server");
+        assert_eq!(Environment::Server.dir_name(), "server");
+
+        let old: Manifest = toml::from_str(
+            "[config]\nserver-packages-out = \"src/ServerPackages\"\n\n\
+             [target]\nenvironment = \"server\"\nlanguage = \"alloy\"\n\n\
+             [dependencies]\nChief = { name = \"chief/core\", version = \"^\", target = \"server\" }\n",
+        )
+        .unwrap();
+        let target = old.target().unwrap();
+        assert_eq!(target.environment, Environment::Server);
+        assert_eq!(target.id(), "roblox_server-alloy");
+        assert_eq!(
+            dependency_target("Chief", &old.dependencies["Chief"]).unwrap(),
+            Some(Environment::Server)
+        );
+        assert_eq!(
+            old.packages_out(Environment::Server),
+            std::path::PathBuf::from("src/ServerPackages")
+        );
+        let bare: Manifest = toml::from_str("").unwrap();
+        assert_eq!(
+            bare.packages_out(Environment::Server),
+            std::path::PathBuf::from("packages").join("server")
+        );
+
+        // a new write takes the new name, and keeps the config key
+        let written = toml::to_string(&old).unwrap();
+        assert!(
+            written.contains(r#"environment = "roblox_server""#),
+            "{written}"
+        );
+        assert!(written.contains("server-packages-out"), "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.target().unwrap().environment, Environment::Server);
+        // the fit rule is unchanged: a roblox_server project takes roblox packages
+        assert!(Environment::Server.accepts(Environment::Roblox));
     }
 
     /** [package] is only what a *publishable* package needs. a project that
@@ -1294,7 +1510,7 @@ mod tests {
         .unwrap();
         assert!(root.package.as_ref().unwrap().private);
         // a root needs a [target] but no `main`. members carry the code.
-        assert!(root.target.as_ref().unwrap().main.is_none());
+        assert!(root.target().unwrap().main.is_none());
         assert_eq!(root.workspace_members(), ["packages/*", "!packages/legacy"]);
 
         // pesde's spelling still parses so converted repos keep working.
@@ -1520,13 +1736,13 @@ mod tests {
         )
         .unwrap();
 
-        let target = manifest.target.as_ref().unwrap();
+        let target = manifest.target().unwrap();
         assert_eq!(target.includes, ["src", "ember.toml", "README.md"]);
         assert_eq!(target.excludes, ["src/tests"]);
 
         let serialized = toml::to_string(&manifest).unwrap();
         let parsed: Manifest = toml::from_str(&serialized).unwrap();
-        let reparsed = parsed.target.as_ref().unwrap();
+        let reparsed = parsed.target().unwrap();
         assert_eq!(reparsed.includes, target.includes);
         assert_eq!(reparsed.excludes, target.excludes);
 
@@ -1544,8 +1760,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(aliased.target.as_ref().unwrap().includes, ["src"]);
-        assert_eq!(aliased.target.as_ref().unwrap().excludes, ["tests"]);
+        assert_eq!(aliased.target().unwrap().includes, ["src"]);
+        assert_eq!(aliased.target().unwrap().excludes, ["tests"]);
 
         // absent lists stay absent on write.
         let bare: Manifest = toml::from_str(
@@ -1559,7 +1775,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(bare.target.as_ref().unwrap().includes.is_empty());
+        assert!(bare.target().unwrap().includes.is_empty());
         let serialized = toml::to_string(&bare).unwrap();
         assert!(!serialized.contains("includes"));
         assert!(!serialized.contains("excludes"));
@@ -1777,13 +1993,13 @@ mod tests {
     #[test]
     fn language_defaults_to_luau_and_round_trips() {
         let plain: Manifest = toml::from_str("[target]\nenvironment = \"lune\"\n").unwrap();
-        assert_eq!(plain.target.as_ref().unwrap().language, Language::Luau);
+        assert_eq!(plain.target().unwrap().language, Language::Luau);
         // the default stays out of the file, so existing manifests keep their text
         assert!(!toml::to_string(&plain).unwrap().contains("language"));
 
         let alloy: Manifest =
             toml::from_str("[target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n").unwrap();
-        assert_eq!(alloy.target.as_ref().unwrap().language, Language::Alloy);
+        assert_eq!(alloy.target().unwrap().language, Language::Alloy);
         assert!(
             toml::to_string(&alloy)
                 .unwrap()
@@ -1797,15 +2013,118 @@ mod tests {
     }
 
     #[test]
+    fn targets_take_one_table_or_several() {
+        // one [target] stays one table when embr writes the manifest
+        let one: Manifest =
+            toml::from_str("[target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n")
+                .unwrap();
+        assert_eq!(one.targets().len(), 1);
+        let written = toml::to_string(&one).unwrap();
+        assert!(
+            written.contains("[target]") && !written.contains("[[target]]"),
+            "{written}"
+        );
+
+        // several stay an array of tables, in their order
+        let several: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "acme/multi"
+            version = "1.0.0"
+
+            [[target]]
+            environment = "roblox"
+            main = "src/init.luau"
+
+            [[target]]
+            environment = "roblox"
+            language = "alloy"
+            main = "out/init.luau"
+
+            [[target]]
+            environment = "luau"
+            language = "luwu"
+            main = "src/init.luwu"
+
+            [dependencies]
+            Signal = { name = "acme/signal", version = "^1" }
+            "#,
+        )
+        .unwrap();
+        let ids = |manifest: &Manifest| -> Vec<String> {
+            manifest.targets().iter().map(Target::id).collect()
+        };
+        assert_eq!(ids(&several), ["roblox", "roblox-alloy", "luau-luwu"]);
+        // the first target is the project's own
+        assert_eq!(several.target().unwrap().id(), "roblox");
+
+        let written = toml::to_string(&several).unwrap();
+        assert_eq!(written.matches("[[target]]").count(), 3, "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(ids(&reparsed), ids(&several));
+        assert_eq!(reparsed.targets()[1].main.as_deref(), Some("out/init.luau"));
+        assert_eq!(reparsed.dependencies.len(), 1);
+
+        // no target stays absent
+        let none: Manifest = toml::from_str("").unwrap();
+        assert!(none.target().is_none() && none.targets().is_empty());
+        assert!(!toml::to_string(&none).unwrap().contains("target"));
+    }
+
+    #[test]
+    fn two_targets_with_one_id_are_refused() {
+        // `shared` is `roblox`, so these two are one ID
+        let error = toml::from_str::<Manifest>(
+            "[[target]]\nenvironment = \"roblox\"\n\n[[target]]\nenvironment = \"shared\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("two targets have the ID 'roblox'"),
+            "{error}"
+        );
+
+        // one environment in two languages is two IDs
+        assert!(
+            toml::from_str::<Manifest>(
+                "[[target]]\nenvironment = \"roblox\"\n\n\
+                 [[target]]\nenvironment = \"roblox\"\nlanguage = \"loom\"\n",
+            )
+            .is_ok()
+        );
+        // a bad value inside an array table still names itself
+        let error = toml::from_str::<Manifest>("[[target]]\nenvironment = \"mars\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mars"), "{error}");
+    }
+
+    #[test]
+    fn target_ids_name_the_language_unless_it_is_luau() {
+        let id = |environment: &str, language: &str| {
+            toml::from_str::<Manifest>(&format!(
+                "[target]\nenvironment = \"{environment}\"\nlanguage = \"{language}\"\n"
+            ))
+            .unwrap()
+            .target()
+            .unwrap()
+            .id()
+        };
+        assert_eq!(id("roblox", "luau"), "roblox");
+        assert_eq!(id("shared", "luau"), "roblox");
+        assert_eq!(id("lune", "luau"), "lune");
+        assert_eq!(id("roblox", "alloy"), "roblox-alloy");
+        assert_eq!(id("roblox", "loom"), "roblox-loom");
+        assert_eq!(id("luau", "luwu"), "luau-luwu");
+    }
+
+    #[test]
     fn seal_and_zune_install_to_their_own_folders() {
         let manifest: Manifest = toml::from_str(
             "[config]\nzune-packages-out = \"deps\"\n\n[target]\nenvironment = \"seal\"\n",
         )
         .unwrap();
-        assert_eq!(
-            manifest.target.as_ref().unwrap().environment,
-            Environment::Seal
-        );
+        assert_eq!(manifest.target().unwrap().environment, Environment::Seal);
         assert_eq!(
             manifest.packages_out(Environment::Seal),
             std::path::PathBuf::from("packages").join("seal")
@@ -1816,7 +2135,7 @@ mod tests {
         );
         for environment in Environment::ALL {
             assert_eq!(
-                Environment::from_embr(environment.dir_name()).unwrap(),
+                Environment::from_embr(environment.as_str()).unwrap(),
                 environment
             );
         }
@@ -1831,12 +2150,15 @@ mod tests {
         assert!(Seal.accepts(Luau));
         assert!(Server.accepts(Roblox));
         // nothing else does
+        // Lune runs Roblox code through its DOM
+        assert!(Lune.accepts(Roblox));
+        assert!(!Lune.accepts(Server));
+        assert!(!Lute.accepts(Roblox));
         assert!(!Roblox.accepts(Server));
         assert!(!Roblox.accepts(Lune));
         assert!(!Luau.accepts(Lune));
         assert!(!Seal.accepts(Lute));
 
-        // Alloy and Loom ship Luau, so only Luwu needs a project of its own
         let all = [
             Language::Luau,
             Language::Alloy,
@@ -1844,11 +2166,14 @@ mod tests {
             Language::Luwu,
         ];
         for project in all {
-            assert!(project.accepts(Language::Luau));
-            assert!(project.accepts(Language::Alloy));
-            assert!(project.accepts(Language::Loom));
-            // only a Luwu project runs Luwu
-            assert_eq!(project.accepts(Language::Luwu), project == Language::Luwu);
+            for package in all {
+                // its own language, or plain Luau, the base every language reads
+                assert_eq!(
+                    project.accepts(package),
+                    package == project || package == Language::Luau,
+                    "{project} taking {package}"
+                );
+            }
         }
     }
 }

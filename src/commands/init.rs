@@ -5,7 +5,15 @@ use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
 
-const ENVIRONMENTS: &[&str] = &["roblox", "server", "lune", "luau", "lute", "seal", "zune"];
+const ENVIRONMENTS: &[&str] = &[
+    "roblox",
+    "roblox_server",
+    "lune",
+    "luau",
+    "lute",
+    "seal",
+    "zune",
+];
 
 /// what the first question offers, in the order it offers them.
 const KINDS: &[&str] = &[PROJECT, PACKAGE];
@@ -213,14 +221,14 @@ pub fn run() -> Result<(), Error> {
             license: Some(license.to_string()),
             logo: None,
         }),
-        target: Some(Target {
+        targets: vec![Target {
             environment: Environment::from_embr(environment)?,
             main: non_empty(main),
             includes: Vec::new(),
             excludes: Vec::new(),
             workspace: Vec::new(),
             language: Default::default(),
-        }),
+        }],
         config: Default::default(),
         indices: Default::default(),
         dependencies: Default::default(),
@@ -366,7 +374,7 @@ mod tests {
         for environment in ENVIRONMENTS {
             let parsed = Environment::from_embr(environment).unwrap();
             // and each offers its own canonical spelling, not an alias
-            assert_eq!(parsed.dir_name(), *environment);
+            assert_eq!(parsed.as_str(), *environment);
         }
         assert_eq!(KINDS, [PROJECT, PACKAGE]);
     }

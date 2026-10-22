@@ -1,6 +1,5 @@
 /*! embr's command line: every command, and what each one runs. the embr
-binary parses into it, and a host tool runs it under its own name through
-[`crate::api::run`]. */
+binary parses into it and runs it. */
 
 use crate::commands::{self, self_cmd::SelfCommand};
 use crate::error::Error;
@@ -32,7 +31,7 @@ pub enum Commands {
 
     hidden, npm's way: `npm start` works everywhere and is nobody's idea of a
     command to look up. they belong to a project's [scripts], not to embr's own
-    surface, and listing five of them would say otherwise while telling a
+    surface, and listing six of them would say otherwise while telling a
     project that defines none of them about commands it cannot run. `embr run`
     lists what this project actually has, and `script_hint` points at these
     from the one place they get typed by mistake. */
@@ -51,6 +50,10 @@ pub enum Commands {
     /// Runs the `serve` script from ember.toml
     #[command(hide = true)]
     Serve(commands::run::ShortcutArgs),
+
+    /// Runs the `dev` script from ember.toml
+    #[command(hide = true)]
+    Dev(commands::run::ShortcutArgs),
 
     /// Runs the `fmt` (or `format`) script from ember.toml
     // plain alias, not visible_alias: nothing of this command is on display
@@ -114,6 +117,20 @@ pub enum Commands {
     SelfManage(SelfCommand),
 }
 
+/** `embr build:prod` is `embr run build:prod`. clap matches a subcommand by
+its whole name, so a shortcut, a colon, and more gets its `run` here, before
+the parse (#52). `args` starts with the program name. */
+pub fn expand_shortcut(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    if args
+        .get(1)
+        .and_then(|word| word.to_str())
+        .is_some_and(|word| word.contains(':') && commands::run::is_shortcut(word))
+    {
+        args.insert(1, "run".into());
+    }
+    args
+}
+
 /// how a command ended, which decides what its caller prints after it.
 pub enum Outcome {
     /// it finished, and the caller may say how long it took
@@ -152,6 +169,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Test(args) => done(commands::run::shortcut(&["test"], args)),
         Commands::Start(args) => done(commands::run::shortcut(&["start"], args)),
         Commands::Serve(args) => done(commands::run::shortcut(&["serve"], args)),
+        Commands::Dev(args) => done(commands::run::shortcut(&["dev"], args)),
         Commands::Fmt(args) => done(commands::run::shortcut(&commands::run::FMT_NAMES, args)),
     }
 }

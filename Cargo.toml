@@ -6,7 +6,7 @@ version = "0.6.0"
 edition = "2024"
 # let-chains, used throughout, are stable from here.
 rust-version = "1.88"
-description = "A package manager built for Luau: dependencies, tools and scripts for Luau and Roblox projects"
+description = "A package manager built for Luau: publish, discover, and install packages for Luau and everything built on it"
 authors = ["savruun"]
 license = "MIT"
 readme = "README.md"
@@ -18,7 +18,7 @@ categories = ["command-line-utilities", "development-tools"]
 # Repo furniture that does not belong in the published crate. src/, the
 # lockfile, the readme and the license ship; target/ and gitignored files are
 # dropped by cargo already.
-exclude = [".github/", "scripts/", "CLAUDE.md"]
+exclude = [".github/", "scripts/", "packaging/", "CLAUDE.md"]
 
 # the library is what the Alloy CLI links for alloy add, install, and publish
 [lib]

@@ -2,25 +2,25 @@ use crate::error::Error;
 use crate::net::{auth, provenance, registry};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::{
-    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Environment, Language, Manifest,
-    is_github_username, split_package_name, workspace_version_req,
+    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Manifest, Target, is_github_username,
+    split_package_name, workspace_version_req,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::Index;
 use crate::registry::pack;
 use crate::ui;
 use clap::Args;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
     /// Show what would be published without uploading anything
     #[arg(long)]
     pub dry_run: bool,
-    /** the compiler of a language that builds to Luau, `alloy` say. no
-    flag: the Alloy CLI sets it to itself, and `embr publish` looks on PATH. */
-    #[arg(skip)]
-    pub compiler: Option<PathBuf>,
+    /// Publish only this target, such as `roblox` or `roblox-alloy`; repeat it for more
+    #[arg(long = "target", value_name = "ID")]
+    pub targets: Vec<String>,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -44,9 +44,8 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     };
     let oidc_token = oidc_token.as_deref();
 
-    let compiler = args.compiler.as_deref();
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, args.dry_run, oidc_token, compiler)?;
+        publish_project(manifest, args.dry_run, oidc_token, &args.targets)?;
         return lifecycle.after();
     }
 
@@ -57,7 +56,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, compiler) {
+    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, &args.targets) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -71,7 +70,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, args.dry_run, oidc_token, compiler)?;
+            publish_project(manifest, args.dry_run, oidc_token, &args.targets)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -88,14 +87,16 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     lifecycle.after()
 }
 
-/** publishes the project in the current directory. private packages and
-main-less workspace roots say so and skip instead of failing. that's how
-a container root stays unpublished while its members go out. */
+/** publishes the project in the current directory, one archive for each
+target that `selected` names, or for each target when it names none.
+private packages and main-less workspace roots say so and skip instead of
+failing. that's how a container root stays unpublished while its members
+go out. */
 fn publish_project(
     mut manifest: Manifest,
     dry_run: bool,
     oidc_token: Option<&str>,
-    compiler: Option<&Path>,
+    selected: &[String],
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -119,36 +120,32 @@ fn publish_project(
     /* a workspace root needs no `main`, without one it's a pure container
     and only its members go out */
     let has_main = manifest
-        .target
-        .as_ref()
-        .is_some_and(|target| target.main.is_some());
+        .targets()
+        .iter()
+        .any(|target| target.main.is_some());
     if !manifest.workspace_members().is_empty() && !has_main {
         println!("Skipping {}: workspace root without a main", package.name);
         return Ok(());
     }
 
-    let environment = publish_environment(&manifest)?;
-    let language = manifest
-        .target
-        .as_ref()
-        .map(|target| target.language)
-        .unwrap_or_default();
-    // "lune", or "lune, alloy" when the files are not plain Luau
-    let label = match language {
-        Language::Luau => environment.to_string(),
-        language => format!("{environment}, {language}"),
-    };
-    /* a dry run builds too: it shows the archive a real publish would
-    produce, and that archive holds the build output */
-    if let Some(program) = language.builder() {
-        build_to_luau(Path::new("."), &manifest, program, compiler)?;
+    let ids = select_targets(manifest.targets(), selected)?;
+    let root = Path::new(".");
+    /* a dry run builds too: it shows the archives a real publish would
+    produce, and they hold the build output. each compiler runs once, before
+    any target packs, so every archive sees the same output */
+    let mut builds = BTreeMap::new();
+    for target in manifest.targets() {
+        if let Some(program) = target.language.builder()
+            && ids.contains(&target.id())
+        {
+            builds
+                .entry(program)
+                .or_insert_with(|| run_build(root, program, None));
+        }
     }
-    validate_logo(Path::new("."), package.logo.as_deref())?;
+    validate_logo(root, package.logo.as_deref())?;
     let package_name = package.name.clone();
-    let (scope, name) = {
-        let (scope, name) = split_package_name(&package_name)?;
-        (scope.to_string(), name.to_string())
-    };
+    split_package_name(&package_name)?;
     let version = semver::Version::parse(&package.version)?;
 
     /* the API appends [package] authors to the scope's owner list, each one
@@ -170,12 +167,98 @@ fn publish_project(
 
     /* workspace deps become registry ones in the archive's manifest,
     the on-disk ember.toml is never touched */
-    convert_workspace_dependencies(&mut manifest, Path::new("."))?;
+    convert_workspace_dependencies(&mut manifest, root)?;
     strip_local_tables(&mut manifest);
 
-    let root = Path::new(".");
-    let files = pack::packed_files(root, &manifest)?;
-    let archive = ui::with_spinner("Packing package", || pack::pack(root, &manifest))?;
+    let targets: Vec<Target> = std::mem::take(&mut manifest.targets)
+        .into_iter()
+        .filter(|target| ids.contains(&target.id()))
+        .collect();
+    let count = targets.len();
+    let mut token: Option<String> = None;
+    let mut failed = Vec::new();
+    for target in targets {
+        let id = target.id();
+        /* the archive's ember.toml holds this one target as a plain
+        [target] table, which is all the registry accepts */
+        manifest.targets = vec![target];
+        let result = publish_target(
+            root,
+            &manifest,
+            &builds,
+            &format!("{package_name}@{version}"),
+            dry_run,
+            oidc_token,
+            &mut token,
+        );
+        match result {
+            Ok(()) => {}
+            // one target fails the way a single publish always has
+            Err(error) if count == 1 => return Err(error),
+            Err(error) => {
+                ui::print_error(&format!("{id}: {error}"));
+                failed.push(id);
+            }
+        }
+    }
+
+    if !dry_run && failed.len() < count {
+        println!("Install it with `embr add {package_name}`");
+    }
+    if !failed.is_empty() {
+        return Err(Error::TargetPublishFailed(failed));
+    }
+    Ok(())
+}
+
+/** the IDs of the targets that `selected` names, in manifest order, or of
+every target when it names none. an ID that no target has is an error that
+lists the valid ones. */
+fn select_targets(targets: &[Target], selected: &[String]) -> Result<Vec<String>, Error> {
+    if targets.is_empty() {
+        return Err(Error::ManifestInvalid(
+            "publishing requires a [target] section with an environment".to_string(),
+        ));
+    }
+    let ids: Vec<String> = targets.iter().map(Target::id).collect();
+    if let Some(unknown) = selected.iter().find(|id| !ids.contains(id)) {
+        return Err(Error::UnknownTarget {
+            id: unknown.clone(),
+            valid: ids.join(", "),
+        });
+    }
+    Ok(ids
+        .into_iter()
+        .filter(|id| selected.is_empty() || selected.contains(id))
+        .collect())
+}
+
+/** packs and uploads the one target that `manifest` holds. `builds` has
+the outcome of each compiler that the selected targets need. `token` is
+the GitHub token, read on the first upload and kept for the next. */
+fn publish_target(
+    root: &Path,
+    manifest: &Manifest,
+    builds: &BTreeMap<&'static str, Result<(), String>>,
+    package: &str,
+    dry_run: bool,
+    oidc_token: Option<&str>,
+    token: &mut Option<String>,
+) -> Result<(), Error> {
+    let target = manifest.target().expect("publish sets one target");
+    let id = target.id();
+    if let Some(program) = target.language.builder() {
+        if let Some(Err(reason)) = builds.get(program) {
+            return Err(Error::LanguageBuild {
+                program,
+                reason: reason.clone(),
+            });
+        }
+        check_built_main(root, target.main.as_deref(), program)?;
+    }
+
+    let files = pack::packed_files(root, manifest)?;
+    let archive = ui::with_spinner(&format!("Packing {id}"), || pack::pack(root, manifest))?;
 
     /* the API answers 413 past its cap, failing here saves the upload
     and lets --dry-run catch it too */
@@ -188,11 +271,8 @@ fn publish_project(
 
     if dry_run {
         println!(
-            "Would publish {package_name}@{version} ({label}) to {}:",
+            "Would publish {package} ({id}) to {}, {} bytes:",
             registry::API_URL,
-        );
-        println!(
-            "  {scope}/{name}/{version}.tar.gz ({} bytes)",
             archive.len()
         );
         for file in &files {
@@ -203,25 +283,31 @@ fn publish_project(
 
     /* stored credentials first. the device flow, and the index clone that
     provides its client id, only when nothing is stored yet */
-    let credentials = match auth::load()? {
-        Some(credentials) => credentials,
-        None => auth::login(&oauth_client_id()?)?,
+    let stored = match token.take() {
+        Some(stored) => stored,
+        None => match auth::load()? {
+            Some(credentials) => credentials.token,
+            None => auth::login(&oauth_client_id()?)?.token,
+        },
     };
-
-    match upload(&credentials.token, oidc_token, &archive) {
+    let stored = match upload(&stored, oidc_token, &archive) {
         /* 401 means the stored token was revoked or expired, not that this
         publish is doomed. forget it, log in fresh, retry once */
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
-            let credentials = auth::login(&oauth_client_id()?)?;
-            upload(&credentials.token, oidc_token, &archive)?;
+            let fresh = auth::login(&oauth_client_id()?)?.token;
+            upload(&fresh, oidc_token, &archive)?;
+            fresh
         }
-        other => other?,
-    }
+        other => {
+            other?;
+            stored
+        }
+    };
+    *token = Some(stored);
 
-    ui::print_success(&format!("Published {package_name}@{version} ({label})"));
-    println!("Install it with `embr add {package_name}`");
+    ui::print_success(&format!("Published {package} ({id})"));
     Ok(())
 }
 
@@ -335,40 +421,34 @@ pub(crate) fn oauth_client_id() -> Result<String, Error> {
         .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
-/** an Alloy or Loom package ships its sources and the Luau that the
-compiler's `build` writes from them, so a plain Luau project can use it.
-the build runs here and not in a hook, so a forgotten hook cannot publish
-stale output. `compiler` overrides the program found on PATH. */
-fn build_to_luau(
-    root: &Path,
-    manifest: &Manifest,
-    program: &'static str,
-    compiler: Option<&Path>,
-) -> Result<(), Error> {
+/** runs `{program} build` in `root`, the build of an Alloy or Loom
+package. such a package ships its sources and the Luau that the build
+writes from them, so a plain Luau project can use it. the build runs here
+and not in a hook, so a forgotten hook cannot publish stale output.
+`compiler` stands in for the program on PATH, for tests. Err is the reason
+for an [`Error::LanguageBuild`]. */
+fn run_build(root: &Path, program: &'static str, compiler: Option<&Path>) -> Result<(), String> {
     println!("Running {program} build");
-    let failed = |reason: String| Error::LanguageBuild { program, reason };
     let status = std::process::Command::new(compiler.unwrap_or(Path::new(program)))
         .arg("build")
         .current_dir(root)
         .status()
-        .map_err(|error| {
-            failed(match error.kind() {
-                std::io::ErrorKind::NotFound => format!("the {program} command is not on PATH"),
-                _ => format!("it could not start: {error}"),
-            })
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("the {program} command is not on PATH"),
+            _ => format!("it could not start: {error}"),
         })?;
     if !status.success() {
-        return Err(failed(match status.code() {
+        return Err(match status.code() {
             Some(code) => format!("it exited with status {code}"),
             None => "a signal stopped it".to_string(),
-        }));
+        });
     }
+    Ok(())
+}
 
+/// refuses a `main` that does not name the Luau file that `program` built.
+fn check_built_main(root: &Path, main: Option<&str>, program: &'static str) -> Result<(), Error> {
     let not_built = |detail: String| Error::MainNotBuilt { program, detail };
-    let main = manifest
-        .target
-        .as_ref()
-        .and_then(|target| target.main.as_deref());
     match main {
         None => Err(not_built("ember.toml has no main".to_string())),
         Some(main) if !main.ends_with(".luau") => {
@@ -407,19 +487,6 @@ fn validate_logo(root: &Path, logo: Option<&str>) -> Result<(), Error> {
         )));
     }
     Ok(())
-}
-
-/// published packages must say where their code runs, the index entry is keyed by it.
-fn publish_environment(manifest: &Manifest) -> Result<Environment, Error> {
-    manifest
-        .target
-        .as_ref()
-        .map(|target| target.environment)
-        .ok_or_else(|| {
-            Error::ManifestInvalid(
-                "publishing requires a [target] section with an environment".to_string(),
-            )
-        })
 }
 
 #[cfg(test)]
@@ -527,36 +594,177 @@ mod tests {
         let base = std::env::temp_dir().join("embr-test-publish-build");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("out")).unwrap();
-        let manifest = |main: &str| -> Manifest {
-            toml::from_str(&format!(
-                "[target]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\nmain = \"{main}\"\n"
-            ))
-            .unwrap()
-        };
-        let build = |main: &str, compiler: &str| {
-            build_to_luau(&base, &manifest(main), "alloy", Some(Path::new(compiler)))
-        };
+        let build = |compiler: &str| run_build(&base, "alloy", Some(Path::new(compiler)));
+        let check = |main: Option<&str>| check_built_main(&base, main, "alloy");
 
         // `true` stands in for a build that works, `false` for one that fails
-        assert!(matches!(
-            build("out/init.luau", "false"),
-            Err(Error::LanguageBuild { .. })
-        ));
-        assert!(matches!(
-            build("out/init.luau", "embr-test-no-compiler"),
-            Err(Error::LanguageBuild { reason, .. }) if reason.contains("PATH")
-        ));
+        assert!(build("true").is_ok());
+        assert!(build("false").unwrap_err().contains("status 1"));
+        assert!(build("embr-test-no-compiler").unwrap_err().contains("PATH"));
         // main must name built Luau, and the build must have written it
-        assert!(matches!(
-            build("src/init.aly", "true"),
-            Err(Error::MainNotBuilt { .. })
-        ));
-        assert!(matches!(
-            build("out/init.luau", "true"),
-            Err(Error::MainNotBuilt { .. })
-        ));
+        for main in [None, Some("src/init.aly"), Some("out/init.luau")] {
+            assert!(
+                matches!(check(main), Err(Error::MainNotBuilt { .. })),
+                "{main:?}"
+            );
+        }
         fs::write(base.join("out/init.luau"), "return {}").unwrap();
-        assert!(build("out/init.luau", "true").is_ok());
+        assert!(check(Some("out/init.luau")).is_ok());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// one package for Roblox in Luau and in Alloy, and for Luau in Luwu.
+    const THREE_TARGETS: &str = "[package]\nname = \"acme/multi\"\nversion = \"1.0.0\"\n\n\
+        [[target]]\nenvironment = \"roblox\"\nmain = \"luau/init.luau\"\nincludes = [\"luau\"]\n\n\
+        [[target]]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\nmain = \"out/init.luau\"\n\
+        includes = [\"src\", \"out\"]\n\n\
+        [[target]]\nenvironment = \"luau\"\nlanguage = \"luwu\"\nmain = \"luwu/init.luwu\"\n\
+        includes = [\"luwu\"]\n";
+
+    /// a project dir for [`THREE_TARGETS`], the Alloy build already run.
+    fn three_target_project(name: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&base);
+        for file in [
+            "luau/init.luau",
+            "src/init.aly",
+            "out/init.luau",
+            "luwu/init.luwu",
+            "README.md",
+        ] {
+            fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+            fs::write(base.join(file), "return {}").unwrap();
+        }
+        fs::write(base.join("ember.toml"), THREE_TARGETS).unwrap();
+        base
+    }
+
+    #[test]
+    fn the_target_flag_repeats() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "embr",
+            "publish",
+            "--target",
+            "roblox",
+            "--target",
+            "roblox-alloy",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Publish(publish)) = cli.command else {
+            panic!("publish parses as publish");
+        };
+        assert_eq!(publish.targets, ["roblox", "roblox-alloy"]);
+    }
+
+    #[test]
+    fn targets_are_picked_by_id() {
+        let manifest: Manifest = toml::from_str(THREE_TARGETS).unwrap();
+        let pick = |selected: &[&str]| {
+            let selected: Vec<String> = selected.iter().map(|id| id.to_string()).collect();
+            select_targets(manifest.targets(), &selected)
+        };
+
+        assert_eq!(pick(&[]).unwrap(), ["roblox", "roblox-alloy", "luau-luwu"]);
+        assert_eq!(pick(&["roblox-alloy"]).unwrap(), ["roblox-alloy"]);
+        // manifest order, whatever order the flags came in
+        assert_eq!(
+            pick(&["luau-luwu", "roblox"]).unwrap(),
+            ["roblox", "luau-luwu"]
+        );
+        let error = pick(&["roblox", "lune"]).unwrap_err().to_string();
+        assert!(
+            error.contains("'lune'") && error.contains("roblox, roblox-alloy, luau-luwu"),
+            "{error}"
+        );
+
+        let bare: Manifest =
+            toml::from_str("[package]\nname = \"acme/x\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(matches!(
+            select_targets(bare.targets(), &[]),
+            Err(Error::ManifestInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn each_target_packs_its_own_files_and_one_target_table() {
+        let base = three_target_project("embr-test-publish-targets");
+        let mut manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
+        let expected = [
+            ("roblox", vec!["ember.toml", "luau/init.luau"]),
+            (
+                "roblox-alloy",
+                vec!["ember.toml", "out/init.luau", "src/init.aly"],
+            ),
+            ("luau-luwu", vec!["ember.toml", "luwu/init.luwu"]),
+        ];
+
+        for (target, (id, files)) in std::mem::take(&mut manifest.targets)
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(target.id(), id);
+            manifest.targets = vec![target];
+            let archive = pack::pack(&base, &manifest).unwrap();
+
+            let mut unpacked = BTreeMap::new();
+            let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive.as_slice()));
+            for entry in tar.entries().unwrap() {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut contents = String::new();
+                std::io::Read::read_to_string(&mut entry, &mut contents).unwrap();
+                unpacked.insert(path, contents);
+            }
+            assert_eq!(unpacked.keys().collect::<Vec<_>>(), files, "{id}");
+
+            // a plain [target] table, which is all the registry accepts
+            let packed = &unpacked["ember.toml"];
+            assert!(
+                packed.contains("[target]") && !packed.contains("[[target]]"),
+                "{packed}"
+            );
+            let reparsed: Manifest = toml::from_str(packed).unwrap();
+            assert_eq!(reparsed.targets().len(), 1);
+            assert_eq!(reparsed.target().unwrap().id(), id);
+        }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_build_fails_only_the_targets_that_need_it() {
+        let base = three_target_project("embr-test-publish-isolation");
+        let mut manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
+        let builds = BTreeMap::from([("alloy", Err("it exited with status 1".to_string()))]);
+
+        for target in std::mem::take(&mut manifest.targets) {
+            let id = target.id();
+            manifest.targets = vec![target];
+            let result = publish_target(
+                &base,
+                &manifest,
+                &builds,
+                "acme/multi@1.0.0",
+                true,
+                None,
+                &mut None,
+            );
+            match id.as_str() {
+                "roblox-alloy" => assert!(
+                    matches!(
+                        result,
+                        Err(Error::LanguageBuild {
+                            program: "alloy",
+                            ..
+                        })
+                    ),
+                    "{result:?}"
+                ),
+                _ => assert!(result.is_ok(), "{id}: {result:?}"),
+            }
+        }
 
         let _ = fs::remove_dir_all(&base);
     }

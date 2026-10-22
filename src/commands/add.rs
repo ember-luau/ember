@@ -20,16 +20,12 @@ pub struct AddArgs {
     /// Key written to [dependencies], defaults to the package short name
     #[arg(long)]
     pub alias: Option<String>,
+    /// Key the dependency by its full scope/name; its link file goes in a folder named after the scope
+    #[arg(long, conflicts_with = "alias")]
+    pub scoped: bool,
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
     pub refresh: bool,
-    /// what a host tool lets its users install. no flag: embr sets none
-    #[arg(skip)]
-    pub allow: Option<crate::registry::resolver::Allow>,
-    /** ask for the index when --index is absent. a host tool calls add with
-    no terminal to ask on, so it takes the default index instead */
-    #[arg(skip = true)]
-    pub prompt: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -43,12 +39,16 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let name = args.package.to_lowercase();
     let (_, short_name) = split_package_name(&name)?;
-    let alias = args.alias.unwrap_or_else(|| short_name.to_string());
+    let alias = match args.alias {
+        Some(alias) => alias,
+        // `mayari/core` and `chief/core` can then both be dependencies (#45)
+        None if args.scoped => name.clone(),
+        None => short_name.to_string(),
+    };
 
     let index_key = match args.index {
         Some(key) => Some(key),
-        None if args.prompt => prompt_index_key(&manifest)?,
-        None => None,
+        None => prompt_index_key(&manifest)?,
     };
     let index_url = manifest.index_url(index_key.as_deref())?.to_string();
 
@@ -61,7 +61,9 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     } else {
         Refresh::Ttl
     };
-    let prefer = manifest.target.as_ref().map(|target| target.environment);
+    let prefer = manifest
+        .target()
+        .map(|target| (target.environment, target.language));
     let index = Index::open(&index_url, mode)?;
     let package = match index.resolve(&name, &req, prefer, &[]) {
         Ok(package) => package,
@@ -72,8 +74,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         }
         Err(error) => return Err(error),
     };
-    if let Some(allow) = &args.allow
-        && !allow.admits(package.language, package.environment)
+    if let Some(allow) = crate::registry::resolver::Allow::for_project(&manifest)
+        && !allow.admits(
+            package.language,
+            package.environment,
+            Some(allow.environment),
+        )
     {
         return Err(allow.refusal(
             format!("{name}@{}", package.version),

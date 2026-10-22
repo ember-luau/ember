@@ -4,7 +4,8 @@ understand foreign manifests, pesde.toml, wally.toml, Rojo project files, since
 that's all a published package carries. */
 
 use crate::error::Error;
-use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE};
+use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE, RequireStyle};
+use crate::project::requires;
 use crate::project::rojo::{PACKAGES_DIR, PROJECT_FILE};
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
@@ -57,14 +58,24 @@ the require and the alias only appear when a default needs them, see
 [`exported_types`]. no exported types at all = the compact
 `return require(...)` form. */
 pub fn link_contents(folder: &str, entry: &str, exports: &Exports) -> String {
-    link_contents_at(&format!("./.ember/{folder}"), entry, exports)
+    link_contents_at(
+        &format!("./.ember/{folder}"),
+        entry,
+        exports,
+        RequireStyle::String,
+    )
 }
 
 /** like [`link_contents`] but rooted anywhere. workspace members link straight
 to their source, like `../../packages/core` + `src`, instead of an extracted
 copy under `.ember/`. `root` is the package, `entry` the module inside it, kept
-apart because imports are relative to the package, not to the module. */
-pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
+apart because imports are relative to the package, not to the module.
+`style` writes each require as a string or as a Roblox instance chain. */
+pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: RequireStyle) -> String {
+    let require = |path: &str| match style {
+        RequireStyle::String => format!("require(\"{path}\")"),
+        RequireStyle::Instance => format!("require({})", requires::instance_chain(path)),
+    };
     // empty entry = the package root itself is the module, a root init file
     let module_path = if entry.is_empty() {
         root.to_string()
@@ -72,15 +83,18 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports) -> String {
         format!("{root}/{entry}")
     };
     if exports.types.is_empty() {
-        return format!("return require(\"{module_path}\")\n");
+        return format!("return {}\n", require(&module_path));
     }
 
-    let mut contents = format!("local {MODULE_BINDING} = require(\"{module_path}\")\n");
+    let mut contents = format!("local {MODULE_BINDING} = {}\n", require(&module_path));
     /* the aliases below name these the way the source did, so the bindings
     have to exist here too, pointing at the same modules through the link
     file's own path */
     for (name, path) in &exports.imports {
-        contents.push_str(&format!("local {name} = require(\"{root}/{path}\")\n"));
+        contents.push_str(&format!(
+            "local {name} = {}\n",
+            require(&format!("{root}/{path}"))
+        ));
     }
     for line in &exports.aliases {
         contents.push_str(line);
@@ -874,7 +888,13 @@ pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
 fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     let mut value: toml::Value = fs::read_to_string(dir.join(file)).ok()?.parse().ok()?;
     for key in keys {
-        value = value.get(key)?.clone();
+        value = match value.get(key)? {
+            // `[[target]]`: the first table is the project's own
+            toml::Value::Array(tables) if tables.first().is_some_and(toml::Value::is_table) => {
+                tables[0].clone()
+            }
+            found => found.clone(),
+        };
     }
     value.as_str().map(str::to_string)
 }
@@ -919,6 +939,17 @@ mod tests {
         let embr = base.join("embr");
         write_package(&embr, "ember.toml", "[target]\nenvironment = \"lune\"");
         assert_eq!(environment(&embr), Some(Environment::Lune));
+
+        // a workspace member with several targets reads as its first one
+        let several = base.join("several");
+        write_package(
+            &several,
+            "ember.toml",
+            "[[target]]\nenvironment = \"zune\"\nmain = \"src/init.luau\"\n\n\
+             [[target]]\nenvironment = \"zune\"\nlanguage = \"alloy\"\nmain = \"out/init.luau\"\n",
+        );
+        assert_eq!(environment(&several), Some(Environment::Zune));
+        assert_eq!(entry_point(&several).as_deref(), Some("src"));
 
         let pesde = base.join("pesde");
         write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");
@@ -1326,6 +1357,22 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// #43: a project that asks for instance requires gets dot chains in its links.
+    #[test]
+    fn link_files_take_the_require_style() {
+        assert_eq!(
+            link_contents_at(
+                "../.ember/evaera_promise",
+                "lib",
+                &type_lines(["export type Status = module.Status"]),
+                RequireStyle::Instance,
+            ),
+            "local module = require(script.Parent.Parent[\".ember\"].evaera_promise.lib)\n\
+             export type Status = module.Status\n\
+             return module\n"
+        );
     }
 
     #[test]

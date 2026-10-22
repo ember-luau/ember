@@ -70,10 +70,10 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("{host} installs {summary}; {package} is {what}")]
+    #[error("This {project} takes {takes}; {package} is {what}")]
     NotAllowed {
-        host: &'static str,
-        summary: &'static str,
+        project: String,
+        takes: String,
         package: String,
         what: String,
     },
@@ -106,6 +106,12 @@ pub enum Error {
 
     #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]
     WorkspacePublishFailed(Vec<String>),
+
+    #[error("Publishing failed for {} target{}: {}", .0.len(), if .0.len() == 1 { "" } else { "s" }, .0.join(", "))]
+    TargetPublishFailed(Vec<String>),
+
+    #[error("No target has the ID '{id}'; the targets in ember.toml are {valid}")]
+    UnknownTarget { id: String, valid: String },
 
     #[error("Invalid [patches] key '{key}': {reason}")]
     PatchKeyInvalid { key: String, reason: String },
@@ -294,7 +300,7 @@ pub enum Error {
     },
 
     #[error(
-        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'server', or 'lune'"
+        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'roblox_server', or 'lune'"
     )]
     DependencyTargetInvalid { alias: String, target: String },
 
@@ -312,8 +318,31 @@ pub enum Error {
         path: String,
     },
 
+    #[error(
+        "Dependency key '{0}' can't name a link file; use a plain name, or the package's lowercase scope/name"
+    )]
+    LinkAliasInvalid(String),
+
+    #[error(
+        "Dependency keys '{plain}' and '{scoped}' collide in the {context} tree: '{plain}.luau' and the '{plain}' scope folder share a name; rename one of them"
+    )]
+    LinkScopeCollision {
+        plain: String,
+        scoped: String,
+        context: Environment,
+    },
+
     #[error("Failed to fetch index {url}: {reason}")]
     IndexFetch { url: String, reason: String },
+
+    #[error(
+        "The host of index {url} failed {attempts} times with a server error or a stalled transfer ({reason}); it may be down, so try again later"
+    )]
+    IndexUnavailable {
+        url: String,
+        attempts: u32,
+        reason: String,
+    },
 
     #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,

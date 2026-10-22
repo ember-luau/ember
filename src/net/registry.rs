@@ -11,7 +11,6 @@ index entry. The API is the index repo's only writer.
 use crate::error::Error;
 use crate::net::http;
 use crate::net::http::error::HttpError;
-use crate::project::manifest::Environment;
 use serde::Deserialize;
 
 pub const API_URL: &str = "https://api.luaupm.com";
@@ -63,18 +62,18 @@ pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<
 }
 
 /** sets or clears `yanked` on a version's index entries through
-`PUT`/`DELETE /v1/packages/{scope}/{name}/{version}/yank`. without an
-`environment` every target of the version changes. owners only, the same
+`PUT`/`DELETE /v1/packages/{scope}/{name}/{version}/yank`. without a
+`target` ID every target of the version changes. owners only, the same
 auth as publish. both calls are idempotent. */
 pub fn yank(
     token: &str,
     name: &str,
     version: &semver::Version,
-    environment: Option<Environment>,
+    target: Option<&str>,
     undo: bool,
 ) -> Result<(), Error> {
     let path = format!("/v1/packages/{name}/{version}/yank");
-    owner_call(token, "yank", &path, environment, (!undo).then_some(None))
+    owner_call(token, "yank", &path, target, (!undo).then_some(None))
 }
 
 /** sets or clears a deprecation through `PUT`/`DELETE` on
@@ -85,7 +84,7 @@ pub fn deprecate(
     token: &str,
     name: &str,
     version: Option<&semver::Version>,
-    environment: Option<Environment>,
+    target: Option<&str>,
     reason: Option<&str>,
 ) -> Result<(), Error> {
     let path = match version {
@@ -93,7 +92,7 @@ pub fn deprecate(
         None => format!("/v1/packages/{name}/deprecate"),
     };
     let body = reason.map(|reason| Some(serde_json::json!({ "reason": reason })));
-    owner_call(token, "deprecation", &path, environment, body)
+    owner_call(token, "deprecation", &path, target, body)
 }
 
 /** one call an owner makes. `body` None sends a DELETE, Some a PUT with
@@ -102,12 +101,12 @@ fn owner_call(
     token: &str,
     action: &'static str,
     path: &str,
-    environment: Option<Environment>,
+    target: Option<&str>,
     body: Option<Option<serde_json::Value>>,
 ) -> Result<(), Error> {
     let mut url = format!("{API_URL}{path}");
-    if let Some(environment) = environment {
-        url.push_str(&format!("?target={environment}"));
+    if let Some(target) = target {
+        url.push_str(&format!("?target={target}"));
     }
     let method = if body.is_some() { "PUT" } else { "DELETE" };
     let request = http::agent()
