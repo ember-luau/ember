@@ -429,13 +429,17 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
         }
         if wanted {
             let started = std::time::Instant::now();
-            let result = git::run(&["-C", &dir.to_string_lossy(), "pull", "--ff-only"]);
+            let result = fetch(
+                url,
+                &["-C", &dir.to_string_lossy(), "pull", "--ff-only"],
+                STALL_SECS,
+            );
             crate::ui::timing(&format!("index-refresh {url}"), started);
             /* stamp the attempt, success or not. an unreachable remote
             should warn once per TTL window, not hang every install */
             touch(&stamp);
-            if let Err(reason) = result {
-                eprintln!("warning: could not refresh index {url} ({reason}); using cached copy");
+            if let Err(error) = result {
+                eprintln!("warning: embr uses the cached copy of the index. {error}");
             }
         }
         return Ok((dir, false));
@@ -443,15 +447,56 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
 
     std::fs::create_dir_all(dir.parent().expect("cache dir has a parent"))?;
     let started = std::time::Instant::now();
-    git::run(&["clone", "--depth", "1", url, &dir.to_string_lossy()]).map_err(|reason| {
-        Error::IndexFetch {
-            url: url.to_string(),
-            reason,
-        }
-    })?;
+    fetch(
+        url,
+        &["clone", "--depth", "1", url, &dir.to_string_lossy()],
+        STALL_SECS,
+    )?;
     crate::ui::timing(&format!("index-clone {url}"), started);
     touch(&stamp);
     Ok((dir, false))
+}
+
+/** git sets no deadline of its own. a host that holds the connection open,
+as GitHub can in an outage, kept resolution waiting forever (#34). a
+transfer slower than one byte a second for this long fails instead. */
+const STALL_SECS: u32 = 30;
+
+/// how many tries a clone or a pull gets when the host fails.
+const FETCH_ATTEMPTS: u32 = 3;
+
+/** runs a git clone or pull against the index at `url`. a server error or
+a stall can pass, so it gets FETCH_ATTEMPTS tries with a short wait between
+them. any other failure, a 404 or a bad url, fails at once. */
+fn fetch(url: &str, args: &[&str], stall_secs: u32) -> Result<(), Error> {
+    let stall = format!("http.lowSpeedTime={stall_secs}");
+    let mut full = vec!["-c", "http.lowSpeedLimit=1", "-c", &stall];
+    full.extend_from_slice(args);
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let Err(reason) = git::run(&full) else {
+            return Ok(());
+        };
+        // a 503 reads "returned error: 503", a stall "Operation too slow"
+        let host_failed = reason.contains("returned error: 5") || reason.contains("too slow");
+        if !host_failed {
+            return Err(Error::IndexFetch {
+                url: url.to_string(),
+                reason,
+            });
+        }
+        if attempt == FETCH_ATTEMPTS {
+            return Err(Error::IndexUnavailable {
+                url: url.to_string(),
+                attempts: FETCH_ATTEMPTS,
+                // git's last line holds the cause, the lines above it are progress
+                reason: reason.lines().last().unwrap_or_default().to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+    }
 }
 
 /** whether `url`'s index cache was refreshed within the TTL, what
@@ -685,6 +730,69 @@ mod tests {
                 .version,
             semver::Version::new(2, 0, 0)
         );
+    }
+
+    /** a local index host. it answers every request with `reply`, or with
+    no reply it holds the connection open and says nothing. the count is
+    the number of connections it took. */
+    fn host(
+        reply: Option<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/index", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for mut stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.read(&mut [0u8; 4096]);
+                match reply {
+                    Some(reply) => drop(stream.write_all(reply.as_bytes())),
+                    None => held.push(stream),
+                }
+            }
+        });
+        (url, hits)
+    }
+
+    /// #34: a 503 gets three tries, then an error that names the host.
+    #[test]
+    fn a_failing_host_gets_bounded_tries() {
+        let (url, hits) = host(Some(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ));
+        if cache_dir(&url).is_err() {
+            return; // no home directory on this machine
+        }
+
+        let Err(error) = Index::open(&url, Refresh::Ttl) else {
+            panic!("a host that answers 503 opened as an index");
+        };
+        assert!(
+            matches!(error, Error::IndexUnavailable { attempts: 3, .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("503"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// #34: a host that never answers fails the clone, it does not hang it.
+    #[test]
+    fn a_stalled_host_fails_instead_of_hanging() {
+        let (url, hits) = host(None);
+        let dir = std::env::temp_dir().join("embr-test-stalled-clone");
+        let _ = fs::remove_dir_all(&dir);
+
+        let started = std::time::Instant::now();
+        let clone: [&str; 5] = ["clone", "--depth", "1", &url, &dir.to_string_lossy()];
+        let error = fetch(&url, &clone, 1).unwrap_err();
+        assert!(matches!(error, Error::IndexUnavailable { .. }), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(started.elapsed() < Duration::from_secs(60));
     }
 
     #[test]

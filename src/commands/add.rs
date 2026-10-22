@@ -20,6 +20,9 @@ pub struct AddArgs {
     /// Key written to [dependencies], defaults to the package short name
     #[arg(long)]
     pub alias: Option<String>,
+    /// Key the dependency by its full scope/name; its link file goes in a folder named after the scope
+    #[arg(long, conflicts_with = "alias")]
+    pub scoped: bool,
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
     pub refresh: bool,
@@ -36,7 +39,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let name = args.package.to_lowercase();
     let (_, short_name) = split_package_name(&name)?;
-    let alias = args.alias.unwrap_or_else(|| short_name.to_string());
+    let alias = match args.alias {
+        Some(alias) => alias,
+        // `mayari/core` and `chief/core` can then both be dependencies (#45)
+        None if args.scoped => name.clone(),
+        None => short_name.to_string(),
+    };
 
     let index_key = match args.index {
         Some(key) => Some(key),

@@ -41,7 +41,7 @@ fn main() {
         return;
     }
 
-    let cli = parse_cli(args);
+    let cli = parse_cli(embr::cli::expand_shortcut(args));
     let Some(command) = cli.command else {
         print_root_help();
         return;
@@ -197,7 +197,7 @@ fn script_hint(err: &clap::Error) -> Option<String> {
     let manifest = project::manifest::Manifest::load().ok()?;
     manifest.scripts.contains_key(name).then(|| {
         format!(
-            "'{name}' is a script in ember.toml; run it with `embr run {name}` (only {} can drop `run`)",
+            "'{name}' is a script in ember.toml; run it with `embr run {name}` (only {}, and a name that starts with one of them and a colon, can drop `run`)",
             commands::run::shortcut_list()
         )
     })
@@ -246,6 +246,7 @@ fn report_parse_error(err: clap::Error) -> ! {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use embr::cli::Commands;
 
     #[test]
     fn command_tree_is_well_formed() {
@@ -273,6 +274,31 @@ mod tests {
         `embr run lint` and nothing else, whatever ember.toml says. */
         assert!(Cli::try_parse_from(["embr", "lint"]).is_err());
         assert!(Cli::try_parse_from(["embr", "run", "lint"]).is_ok());
+    }
+
+    #[test]
+    fn a_shortcut_and_a_colon_run_that_script() {
+        let parse = |words: &[&str]| {
+            let args = words.iter().map(std::ffi::OsString::from).collect();
+            Cli::try_parse_from(embr::cli::expand_shortcut(args))
+        };
+
+        let Ok(Cli {
+            command: Some(Commands::Run(run)),
+        }) = parse(&["embr", "build:prod", "--watch"])
+        else {
+            panic!("`embr build:prod` should run the build:prod script");
+        };
+        assert_eq!(run.name.as_deref(), Some("build:prod"));
+        assert_eq!(run.args, ["--watch"]);
+        assert!(parse(&["embr", "format:check"]).is_ok());
+
+        // a script that is no shortcut, an empty tail, or no colon still needs `run`
+        for word in ["lint:fix", "build:", "builder"] {
+            assert!(parse(&["embr", word]).is_err(), "{word}");
+        }
+        // and the words after the subcommand are never touched
+        assert!(parse(&["embr", "run", "build:prod"]).is_ok());
     }
 
     #[test]

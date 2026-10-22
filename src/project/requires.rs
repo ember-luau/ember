@@ -9,8 +9,9 @@ package. both end up at the same place through the same arithmetic. anything
 we can't map safely just stays as it was. */
 
 use crate::error::Error;
+use crate::project::manifest::RequireStyle;
 use crate::project::rojo::PACKAGES_DIR;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,20 +29,23 @@ how the mapping works.
 - anything weirder, children of a plain file module, climbing further, non
   literal segments, gets skipped */
 pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usize, Error> {
-    rewrite_requires(package_dir, entry, None)
+    rewrite_requires(package_dir, entry, None, RequireStyle::String)
 }
 
 /** the second half, run from the nested-link phase once every dependency's
 environment is known. maps chains that climb exactly one level past the
 module root, wally's alias zone, onto the package's OWN nested links,
 `packages/<env>/<alias>`. `aliases` is alias -> environment folder name.
-aliases absent from it stay untouched, like any other unmappable chain. */
+aliases absent from it stay untouched, like any other unmappable chain.
+with `RequireStyle::Instance` the new requires are instance chains, and the
+chains inside the module stay as the package wrote them. */
 pub fn rewrite_escape_requires(
     package_dir: &Path,
     entry: &str,
     aliases: &BTreeMap<String, String>,
+    style: RequireStyle,
 ) -> Result<usize, Error> {
-    rewrite_requires(package_dir, entry, Some(aliases))
+    rewrite_requires(package_dir, entry, Some(aliases), style)
 }
 
 /** what the `roblox` environment's folder was called before the rename,
@@ -244,6 +248,7 @@ fn rewrite_requires(
     package_dir: &Path,
     entry: &str,
     aliases: Option<&BTreeMap<String, String>>,
+    style: RequireStyle,
 ) -> Result<usize, Error> {
     let (module_root, files) = module_tree(package_dir, entry)?;
 
@@ -275,6 +280,7 @@ fn rewrite_requires(
             depth_in_module: dir_in_module,
             depth_in_package: dir_in_package,
             aliases,
+            style,
         };
         let mut found = 0;
         if let Some((updated, count)) = rewrite_source(&source, &context) {
@@ -304,6 +310,8 @@ struct FileContext<'a> {
     depth_in_package: usize,
     /// alias -> environment folder for escape requires. None leaves them alone.
     aliases: Option<&'a BTreeMap<String, String>>,
+    /// how a rewritten require is written, as a string or as an instance chain.
+    style: RequireStyle,
 }
 
 /// every .luau/.lua file under `root`, recursively.
@@ -348,21 +356,25 @@ fn rewrite_source(source: &str, context: &FileContext) -> Option<(String, usize)
     // one splice pass over the recorded ranges
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
-    for (start, end, path) in &chains {
+    for (start, end, argument) in &chains {
         output.push_str(&source[cursor..*start]);
-        output.push_str("require(\"");
-        output.push_str(path);
-        output.push_str("\")");
+        output.push_str("require(");
+        output.push_str(argument);
+        output.push(')');
         cursor = *end;
     }
     output.push_str(&source[cursor..]);
     Some((output, chains.len()))
 }
 
-/// scan pass, finds every mappable chain as (start, end, replacement path).
+/// scan pass, finds every mappable chain as (start, end, replacement argument).
 fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String)> {
     let bytes = source.as_bytes();
     let mut found = Vec::new();
+    /* `local Packages = script.Parent`, name -> the byte range of its steps.
+    React and the rest of jsdotlua require through such a local, as
+    `require(Packages.LuauPolyfill)`, so a chain can start at one (#44). */
+    let mut bindings: HashMap<&str, (usize, usize)> = HashMap::new();
     let mut position = 0;
 
     while position < bytes.len() {
@@ -381,11 +393,14 @@ fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String
             _ => {
                 if at_word(bytes, position, b"require")
                     && let Some((end, path)) =
-                        parse_chain(source, position + "require".len(), context)
+                        parse_chain(source, position + "require".len(), context, &bindings)
                 {
                     found.push((position, end, path));
                     position = end;
                     continue;
+                }
+                if at_word(bytes, position, b"local") {
+                    bind_local(source, position + "local".len(), &mut bindings);
                 }
                 // step whole identifiers so "myrequire" can't half-match
                 if is_ident_byte(bytes[position]) {
@@ -401,56 +416,89 @@ fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String
     found
 }
 
-/** parses `(script.A.B)` style chains starting right after the require word.
-returns (end offset just past the closing paren, replacement path) or None
-when the chain isn't one we can map. */
-fn parse_chain(
-    source: &str,
-    mut position: usize,
-    context: &FileContext,
-) -> Option<(usize, String)> {
+/** records `local <name> = script<steps>` from just past the `local` word.
+the steps must end the statement, so `script.Parent or x` binds nothing. any
+other value for the name drops what it held before. a later assignment
+without `local` is not followed. */
+fn bind_local<'a>(
+    source: &'a str,
+    position: usize,
+    bindings: &mut HashMap<&'a str, (usize, usize)>,
+) {
     let bytes = source.as_bytes();
-    position = skip_ws(bytes, position);
-    if bytes.get(position) != Some(&b'(') {
-        return None;
+    let Some((end, name)) = take_ident(source, skip_ws(bytes, position)) else {
+        return;
+    };
+    bindings.remove(name);
+    let position = skip_ws(bytes, end);
+    if bytes.get(position) != Some(&b'=') || bytes.get(position + 1) == Some(&b'=') {
+        return;
     }
-    position = skip_ws(bytes, position + 1);
+    let position = skip_ws(bytes, position + 1);
     if !at_word(bytes, position, b"script") {
-        return None;
+        return;
     }
-    position = skip_ws(bytes, position + "script".len());
+    let start = position + "script".len();
+    /* the steps are checked again at each use, against the file's own
+    frame. here they only have to parse */
+    let mut walk = Walk {
+        leaf: false,
+        ups: 0,
+        names: Vec::new(),
+    };
+    let Some(steps_end) = walk_steps(source, skip_ws(bytes, start), &mut walk) else {
+        return;
+    };
+    /* walk_steps also steps over the whitespace after the chain. a line
+    break in it ends the statement. a continuation on the next line, like
+    `or x`, is not followed */
+    let gap = &source[source[..steps_end].trim_end().len()..steps_end];
+    let ends_statement = gap.contains('\n')
+        || match bytes.get(steps_end) {
+            None | Some(b';') => true,
+            Some(b'-') => bytes.get(steps_end + 1) == Some(&b'-'),
+            _ => false,
+        };
+    if ends_statement {
+        bindings.insert(name, (start, steps_end));
+    }
+}
 
-    /* walk the chain file-relative. `leaf` means we're at the file itself,
-    a non-init module, `ups` counts how far above the file's dir we are */
-    let mut leaf = !context.is_init;
-    let mut ups = 0usize;
-    let mut names: Vec<String> = Vec::new();
+/** where a chain of steps from `script` lands, file-relative. `leaf` means
+the file itself, a non-init module. `ups` counts how far above the file's
+dir the chain climbed, and `names` is the way down from there. */
+struct Walk {
+    leaf: bool,
+    ups: usize,
+    names: Vec<String>,
+}
 
+/** follows `.Name`, `["Name"]` and `:WaitForChild("Name")` steps from
+`position` up to the first byte that starts no step, and returns where that
+byte is. None for a step there is no mapping for. */
+fn walk_steps(source: &str, mut position: usize, walk: &mut Walk) -> Option<usize> {
+    let bytes = source.as_bytes();
     loop {
-        match bytes.get(position)? {
-            b')' => {
-                position += 1;
-                break;
-            }
-            b'.' => {
+        match bytes.get(position) {
+            Some(b'.') => {
                 position = skip_ws(bytes, position + 1);
                 let (end, name) = take_ident(source, position)?;
                 position = skip_ws(bytes, end);
                 if name == "Parent" {
-                    if leaf {
-                        leaf = false;
-                    } else if !names.is_empty() {
-                        names.pop();
+                    if walk.leaf {
+                        walk.leaf = false;
+                    } else if !walk.names.is_empty() {
+                        walk.names.pop();
                     } else {
-                        ups += 1;
+                        walk.ups += 1;
                     }
-                } else if leaf {
+                } else if walk.leaf {
                     return None; // children of a plain file module, no mapping
                 } else {
-                    names.push(name.to_string());
+                    walk.names.push(name.to_string());
                 }
             }
-            b'[' => {
+            Some(b'[') => {
                 position = skip_ws(bytes, position + 1);
                 let (end, name) = take_string(source, position)?;
                 position = skip_ws(bytes, end);
@@ -458,12 +506,12 @@ fn parse_chain(
                     return None;
                 }
                 position = skip_ws(bytes, position + 1);
-                if leaf {
+                if walk.leaf {
                     return None;
                 }
-                names.push(name);
+                walk.names.push(name);
             }
-            b':' => {
+            Some(b':') => {
                 position = skip_ws(bytes, position + 1);
                 let (end, method) = take_ident(source, position)?;
                 if method != "WaitForChild" && method != "FindFirstChild" {
@@ -480,14 +528,52 @@ fn parse_chain(
                     return None;
                 }
                 position = skip_ws(bytes, position + 1);
-                if leaf {
+                if walk.leaf {
                     return None;
                 }
-                names.push(name);
+                walk.names.push(name);
             }
-            _ => return None,
+            _ => return Some(position),
         }
     }
+}
+
+/** parses `(script.A.B)` style chains starting right after the require word,
+or `(Packages.A)` where `Packages` is in `bindings`. returns (end offset just
+past the closing paren, replacement path) or None when the chain isn't one
+we can map. */
+fn parse_chain(
+    source: &str,
+    mut position: usize,
+    context: &FileContext,
+    bindings: &HashMap<&str, (usize, usize)>,
+) -> Option<(usize, String)> {
+    let bytes = source.as_bytes();
+    position = skip_ws(bytes, position);
+    if bytes.get(position) != Some(&b'(') {
+        return None;
+    }
+    position = skip_ws(bytes, position + 1);
+
+    let mut walk = Walk {
+        leaf: !context.is_init,
+        ups: 0,
+        names: Vec::new(),
+    };
+    let (end, first) = take_ident(source, position)?;
+    if first != "script" {
+        // a bound local stands for its own steps, walked from `script`
+        let &(start, steps_end) = bindings.get(first)?;
+        if walk_steps(source, skip_ws(bytes, start), &mut walk)? != steps_end {
+            return None;
+        }
+    }
+    position = walk_steps(source, skip_ws(bytes, end), &mut walk)?;
+    if bytes.get(position) != Some(&b')') {
+        return None;
+    }
+    position += 1;
+    let Walk { leaf, ups, names } = walk;
 
     if leaf || (ups == 0 && names.is_empty()) {
         return None; // require(script) / require(script.Parent), nothing to point at
@@ -499,6 +585,9 @@ fn parse_chain(
     and every Parent hop renders with one less "../" */
     let init_shift = usize::from(context.is_init);
     let path = if ups <= context.depth_in_module {
+        if context.style == RequireStyle::Instance {
+            return None; // inside the module, the chain already works as written
+        }
         if ups == 0 && context.is_init {
             format!("@self/{}", names.join("/"))
         } else {
@@ -520,7 +609,49 @@ fn parse_chain(
         return None; // climbing past the alias zone, nowhere to map that
     };
 
-    Some((position, path))
+    let argument = match context.style {
+        RequireStyle::String => format!("\"{path}\""),
+        RequireStyle::Instance => instance_chain(&path),
+    };
+    Some((position, argument))
+}
+
+/** a string require path as the instance chain Roblox reads the same way:
+`./x` is `script.Parent.x`, each `../` one more `.Parent`, and `@self/x` is
+`script.x`. a name that is no identifier goes in brackets, as `[".ember"]`. */
+pub fn instance_chain(path: &str) -> String {
+    let mut chain = String::from("script");
+    let rest = match path.strip_prefix("@self/") {
+        Some(rest) => rest,
+        None => {
+            chain.push_str(".Parent");
+            path.strip_prefix("./").unwrap_or(path)
+        }
+    };
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => chain.push_str(".Parent"),
+            name if is_identifier(name) => {
+                chain.push('.');
+                chain.push_str(name);
+            }
+            name => chain.push_str(&format!("[\"{name}\"]")),
+        }
+    }
+    chain
+}
+
+/// a Luau name that can follow a dot: an identifier and no reserved word.
+fn is_identifier(name: &str) -> bool {
+    const RESERVED: [&str; 21] = [
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+        "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+    ];
+    name.bytes().all(is_ident_byte)
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && !name.is_empty()
+        && !RESERVED.contains(&name)
 }
 
 /** the package's own nested link for `alias`, `packages/<env>/<alias>`,
@@ -717,6 +848,7 @@ mod tests {
             // package with module root "src", file dir depth is one more
             depth_in_package: depth_in_module + 1,
             aliases: None,
+            style: RequireStyle::String,
         }
     }
 
@@ -803,6 +935,7 @@ mod tests {
             depth_in_module: 0,
             depth_in_package: 0,
             aliases: Some(&aliases),
+            style: RequireStyle::String,
         };
         let (out, count) = rewrite_source(source, &root_init).unwrap();
         assert_eq!(count, 1);
@@ -822,6 +955,106 @@ mod tests {
         assert_eq!(count, 1);
         assert!(out.contains("require(\"./packages/shared/Signal\")"));
         assert!(out.contains("require(script.Parent.Mystery)"));
+    }
+
+    /// #43: with instance requires, embr writes dot chains and leaves the module's own alone.
+    #[test]
+    fn instance_style_retargets_escapes_and_keeps_the_rest() {
+        let aliases = linked(&[("Signal", "roblox")]);
+        let mut init = dir_module(0, true);
+        init.aliases = Some(&aliases);
+        init.style = RequireStyle::Instance;
+
+        let (out, count) = rewrite_source(
+            "local Signal = require(script.Parent.Signal)\n\
+             local Util = require(script.Util)\n",
+            &init,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            out,
+            "local Signal = require(script.Parent.packages.roblox.Signal)\n\
+             local Util = require(script.Util)\n"
+        );
+
+        // the first pass has no aliases, so it has nothing to do at all
+        let mut first = dir_module(0, true);
+        first.style = RequireStyle::Instance;
+        assert_eq!(rewrite_source("require(script.Util)\n", &first), None);
+    }
+
+    #[test]
+    fn string_paths_read_as_instance_chains() {
+        for (path, chain) in [
+            (
+                "./.ember/acme_thing/src",
+                "script.Parent[\".ember\"].acme_thing.src",
+            ),
+            (
+                "../../../jsdotlua_luau-polyfill/src",
+                "script.Parent.Parent.Parent.Parent[\"jsdotlua_luau-polyfill\"].src",
+            ),
+            (
+                "@self/packages/roblox/Signal",
+                "script.packages.roblox.Signal",
+            ),
+            (
+                "./ReactFiberWorkLoop.new",
+                "script.Parent[\"ReactFiberWorkLoop.new\"]",
+            ),
+            ("./end", "script.Parent[\"end\"]"),
+        ] {
+            assert_eq!(instance_chain(path), chain, "{path}");
+        }
+    }
+
+    /** haedrix/react@17.3.10 and the rest of jsdotlua's React, verbatim. they
+    require their dependencies through a local, so the chain starts at
+    `Packages`, not at `script` (#44). */
+    #[test]
+    fn chains_start_at_a_local_bound_to_script() {
+        let aliases = linked(&[("LuauPolyfill", "roblox"), ("Shared", "roblox")]);
+
+        // src/init.lua
+        let mut init = dir_module(0, true);
+        init.aliases = Some(&aliases);
+        let (out, count) = rewrite_source(
+            "local Packages = script.Parent\n\
+             local LuauPolyfill = require(Packages.LuauPolyfill)\n\
+             local React = require(\"@self/React\")\n\
+             local SharedModule = require(Packages.Shared)\n",
+            &init,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            out,
+            "local Packages = script.Parent\n\
+             local LuauPolyfill = require(\"./packages/roblox/LuauPolyfill\")\n\
+             local React = require(\"@self/React\")\n\
+             local SharedModule = require(\"./packages/roblox/Shared\")\n"
+        );
+
+        // src/ReactLazy.lua, a plain file one hop further down
+        let mut lazy = dir_module(0, false);
+        lazy.aliases = Some(&aliases);
+        let (out, _) = rewrite_source(
+            "local Packages = script.Parent.Parent\n\
+             local Shared = require(Packages.Shared).ReactSymbols\n",
+            &lazy,
+        )
+        .unwrap();
+        assert!(out.contains("require(\"../packages/roblox/Shared\").ReactSymbols"));
+
+        // a local that is not a plain chain, or is bound again, maps nothing
+        for source in [
+            "local Packages = script.Parent or game\nrequire(Packages.Shared)\n",
+            "local Packages = script.Parent\nlocal Packages = game\nrequire(Packages.Shared)\n",
+            "require(Packages.Shared)\nlocal Packages = script.Parent\n",
+        ] {
+            assert_eq!(rewrite_source(source, &init), None, "{source}");
+        }
     }
 
     /** littensy/charm-sync@0.4.0, verbatim. it was written for wally's layout,
@@ -877,6 +1110,7 @@ mod tests {
             depth_in_module: 0,
             depth_in_package: 0,
             aliases: Some(&aliases),
+            style: RequireStyle::String,
         };
         assert_eq!(
             escaped_alias("./Charm", &root_init).as_deref(),

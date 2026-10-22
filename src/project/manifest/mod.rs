@@ -151,6 +151,29 @@ pub struct Config {
     pub seal_packages_out: Option<String>,
     #[serde(rename = "zune-packages-out", skip_serializing_if = "Option::is_none")]
     pub zune_packages_out: Option<String>,
+    /// how the requires embr writes look, see [`RequireStyle`].
+    #[serde(default, skip_serializing_if = "RequireStyle::is_string")]
+    pub requires: RequireStyle,
+}
+
+/** how embr writes the requires it generates: link files, and package
+requires it points at their new place (#43). */
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RequireStyle {
+    /** `require("./packages/roblox/x")`, which every runtime reads. embr
+    also turns a package's own `script.Parent.X` requires into strings. */
+    #[default]
+    String,
+    /** `require(script.Parent.packages.roblox.x)`, Roblox's dot requires.
+    a package's own instance requires stay as it wrote them. */
+    Instance,
+}
+
+impl RequireStyle {
+    fn is_string(&self) -> bool {
+        *self == RequireStyle::String
+    }
 }
 
 impl Config {
@@ -162,6 +185,7 @@ impl Config {
             && self.lute_packages_out.is_none()
             && self.seal_packages_out.is_none()
             && self.zune_packages_out.is_none()
+            && self.requires.is_string()
     }
 }
 
@@ -888,6 +912,15 @@ impl Manifest {
         }
     }
 
+    /** the require style for packages that install under `context`. only
+    Roblox has a `script` to climb from, so the other trees keep strings. */
+    pub fn require_style(&self, context: Environment) -> RequireStyle {
+        match context {
+            Environment::Roblox | Environment::Server => self.config.requires,
+            _ => RequireStyle::String,
+        }
+    }
+
     /** the `entry` this manifest states for the package `name`, see
     [`Dependency::entry`]. matched case-insensitively, the way package names
     resolve everywhere else. */
@@ -1171,6 +1204,37 @@ mod tests {
             manifest.index_url(None).unwrap(),
             "https://example.com/my-index"
         );
+    }
+
+    /// #43: `[config] requires` picks the style, and only Roblox trees take instances.
+    #[test]
+    fn require_style_applies_to_roblox_trees() {
+        let parse = |config: &str| {
+            toml::from_str::<Manifest>(&format!(
+                "[package]\nname = \"scope/name\"\nversion = \"0.1.0\"\n\n[config]\n{config}"
+            ))
+        };
+
+        let manifest = parse("requires = \"instance\"\n").unwrap();
+        assert_eq!(
+            manifest.require_style(Environment::Roblox),
+            RequireStyle::Instance
+        );
+        assert_eq!(
+            manifest.require_style(Environment::Server),
+            RequireStyle::Instance
+        );
+        assert_eq!(
+            manifest.require_style(Environment::Lune),
+            RequireStyle::String
+        );
+
+        let manifest = parse("").unwrap();
+        assert_eq!(
+            manifest.require_style(Environment::Roblox),
+            RequireStyle::String
+        );
+        assert!(parse("requires = \"dots\"\n").is_err());
     }
 
     #[test]
