@@ -796,10 +796,13 @@ impl Manifest {
     entry under [indices] when the project defines one, embr's own index otherwise. */
     pub fn index_url(&self, index: Option<&str>) -> Result<&str, Error> {
         match index {
+            /* the project's own default, then the machine's from
+            `embr self default-index`, then ember's */
             None => Ok(self
                 .indices
                 .get(DEFAULT_INDEX_NAME)
                 .map(String::as_str)
+                .or_else(|| crate::project::settings::default_index())
                 .unwrap_or(DEFAULT_INDEX_URL)),
             Some(key) => self
                 .indices

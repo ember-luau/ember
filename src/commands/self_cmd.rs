@@ -21,6 +21,14 @@ pub enum SelfCommand {
     Uninstall,
     /// Set up ember.toml IntelliSense in VS Code
     Code,
+    /// Show or set the index a dependency uses when ember.toml names none
+    DefaultIndex {
+        /// ember, wally, pesde, or an index URL. Omit it to print the current one
+        index: Option<String>,
+        /// Go back to ember's own index
+        #[arg(long, conflicts_with = "index")]
+        reset: bool,
+    },
 }
 
 pub fn run(command: SelfCommand) -> Result<(), Error> {
@@ -29,7 +37,42 @@ pub fn run(command: SelfCommand) -> Result<(), Error> {
         SelfCommand::Update => update(),
         SelfCommand::Uninstall => uninstall(),
         SelfCommand::Code => code(),
+        SelfCommand::DefaultIndex { index, reset } => default_index(index, reset),
     }
+}
+
+/** the machine-wide default index, in ~/.ember/config.toml. a project's
+own `[indices] default` still wins over it, so one project can pin ember
+while the machine prefers wally. */
+fn default_index(index: Option<String>, reset: bool) -> Result<(), Error> {
+    use crate::project::manifest::DEFAULT_INDEX_URL;
+    use crate::project::settings;
+
+    let mut current = settings::load();
+    if reset {
+        current.default_index = None;
+        settings::save(&current)?;
+        crate::ui::print_success(&format!("Default index: ember ({DEFAULT_INDEX_URL})"));
+        return Ok(());
+    }
+    let Some(name) = index else {
+        match &current.default_index {
+            Some(url) => println!("{url}"),
+            None => println!("{DEFAULT_INDEX_URL} (ember, the built-in default)"),
+        }
+        return Ok(());
+    };
+
+    // project keys mean nothing machine-wide, so only names and URLs count
+    let url = crate::commands::index::index_url_for(None, &name)?;
+    /* open it now: a typo'd URL should fail here, not in the middle of
+    some later install in another project */
+    crate::registry::index::Index::open(&url, crate::registry::index::Refresh::Ttl)?;
+    current.default_index = (url != DEFAULT_INDEX_URL).then(|| url.clone());
+    settings::save(&current)?;
+    crate::ui::print_success(&format!("Default index: {url}"));
+    println!("A project's own [indices] default still wins over it.");
+    Ok(())
 }
 
 fn install() -> Result<(), Error> {

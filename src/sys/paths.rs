@@ -50,6 +50,11 @@ fn adopt_legacy_root(home: &Path, root: &Path) -> bool {
     legacy.is_dir() && std::fs::rename(&legacy, root).is_ok()
 }
 
+/// ~/.ember/config.toml, the settings for every project on this machine.
+pub fn config_file() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("config.toml"))
+}
+
 /// ~/.ember/bin, the per-alias tool shims. `embr self install` puts it on PATH.
 pub fn bin_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("bin"))
