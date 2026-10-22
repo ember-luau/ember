@@ -3,6 +3,9 @@ like the embr command of the same name, and prints what that command
 prints. */
 
 use crate::commands::{add, install, publish};
+use crate::project::lockfile::Lockfile;
+use crate::project::manifest::Manifest;
+use crate::registry::index::DownloadSource;
 use std::path::PathBuf;
 
 pub use crate::error::Error;
@@ -39,4 +42,33 @@ whose language compiles to Luau, so the Alloy CLI passes its own path.
 None looks for the compiler on PATH. */
 pub fn publish(dry_run: bool, compiler: Option<PathBuf>) -> Result<(), Error> {
     publish::run(publish::PublishArgs { dry_run, compiler })
+}
+
+/// one package that ember.lock records, and the folder ember stored it in.
+pub struct Installed {
+    pub name: String,
+    pub version: String,
+    pub dir: PathBuf,
+}
+
+/** every downloaded package that ember.lock records, with its folder: the
+packages-out folder of its context, then `.ember/<scope>_<name>`. the
+Alloy CLI rebuilds Alloy packages from their sources there. workspace
+members are linked in place, so they are not in the list. */
+pub fn installed() -> Result<Vec<Installed>, Error> {
+    let manifest = Manifest::load()?;
+    let lock = Lockfile::load()?;
+    Ok(lock
+        .packages
+        .into_iter()
+        .filter(|package| !matches!(package.source, DownloadSource::Workspace { .. }))
+        .map(|package| Installed {
+            dir: manifest
+                .packages_out(package.context())
+                .join(install::STORE_DIR)
+                .join(package.name.replace('/', "_")),
+            name: package.name,
+            version: package.version,
+        })
+        .collect())
 }

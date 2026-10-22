@@ -81,7 +81,7 @@ const WORKERS: usize = 8;
 const STATE_FILE: &str = ".state";
 
 /// the per-environment package store inside `packages/`.
-const STORE_DIR: &str = ".ember";
+pub(crate) const STORE_DIR: &str = ".ember";
 /// what that store was called before the ember rename. removed on install.
 const LEGACY_STORE_DIR: &str = ".lpm";
 
