@@ -6,4 +6,5 @@ pub mod manifest;
 pub mod package;
 pub mod requires;
 pub mod rojo;
+pub mod settings;
 pub mod workspace;

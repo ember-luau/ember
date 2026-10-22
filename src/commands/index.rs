@@ -38,6 +38,26 @@ fn known_url(name: &str) -> Option<&'static str> {
         .map(|(_, url)| *url)
 }
 
+/** the index an argument names: `ember`, a known name like `wally` or
+`pesde`, a key of the project's [indices], or a URL. the commands that
+take `--index` on the command line read it through here. */
+pub(crate) fn index_url_for(manifest: Option<&Manifest>, name: &str) -> Result<String, Error> {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case("ember") {
+        return Ok(crate::project::manifest::DEFAULT_INDEX_URL.to_string());
+    }
+    if let Some(url) = manifest.and_then(|manifest| manifest.indices.get(name)) {
+        return Ok(url.clone());
+    }
+    if let Some(url) = known_url(name) {
+        return Ok(url.to_string());
+    }
+    if name.starts_with("https://") || name.starts_with("http://") {
+        return Ok(name.to_string());
+    }
+    Err(Error::IndexName(name.to_string()))
+}
+
 /** case-insensitive contains filter over a fixed list. tab completes
 the highlighted suggestion, or the only match left. free-form input
 is never blocked. */
