@@ -31,7 +31,7 @@ pub enum Commands {
 
     hidden, npm's way: `npm start` works everywhere and is nobody's idea of a
     command to look up. they belong to a project's [scripts], not to embr's own
-    surface, and listing five of them would say otherwise while telling a
+    surface, and listing six of them would say otherwise while telling a
     project that defines none of them about commands it cannot run. `embr run`
     lists what this project actually has, and `script_hint` points at these
     from the one place they get typed by mistake. */
@@ -50,6 +50,10 @@ pub enum Commands {
     /// Runs the `serve` script from ember.toml
     #[command(hide = true)]
     Serve(commands::run::ShortcutArgs),
+
+    /// Runs the `dev` script from ember.toml
+    #[command(hide = true)]
+    Dev(commands::run::ShortcutArgs),
 
     /// Runs the `fmt` (or `format`) script from ember.toml
     // plain alias, not visible_alias: nothing of this command is on display
@@ -157,6 +161,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Test(args) => done(commands::run::shortcut(&["test"], args)),
         Commands::Start(args) => done(commands::run::shortcut(&["start"], args)),
         Commands::Serve(args) => done(commands::run::shortcut(&["serve"], args)),
+        Commands::Dev(args) => done(commands::run::shortcut(&["dev"], args)),
         Commands::Fmt(args) => done(commands::run::shortcut(&commands::run::FMT_NAMES, args)),
     }
 }
