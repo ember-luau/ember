@@ -3,7 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::progress::{Progress, Task};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
-use crate::project::manifest::{self, Environment, Language, Manifest, Tool};
+use crate::project::manifest::{self, Environment, Language, Manifest, RequireStyle, Tool};
 use crate::project::package;
 use crate::project::requires;
 use crate::project::rojo;
@@ -316,6 +316,7 @@ fn install_project(
     /* two [config] keys pointed at one folder would let one context's
     storage silently overwrite the other's. refuse before touching disk */
     assert_distinct_roots(manifest, &jobs)?;
+    assert_links_fit(&jobs)?;
 
     /* recheck half of the fast path. local inputs were unchanged but the
     indices were stale, so resolution ran fresh and pulled them. when it
@@ -399,6 +400,7 @@ fn install_project(
                 context: package.context(),
                 in_place,
                 redirects: package.redirects.clone(),
+                requires: manifest.require_style(package.context()),
             }
         })
         .collect();
@@ -888,6 +890,46 @@ fn assert_distinct_roots(manifest: &Manifest, jobs: &[Job]) -> Result<(), Error>
     Ok(())
 }
 
+/** every direct dependency's key has to name a link file. a plain key is
+one file, a scoped `scope/name` key (#45) is a file in its scope's folder.
+a scope folder beside a plain link of the same name is refused: Luau's
+`./quill` and Rojo's `quill` would then each mean two things. */
+fn assert_links_fit(jobs: &[Job]) -> Result<(), Error> {
+    let links = || {
+        jobs.iter()
+            .filter_map(|job| Some((job.link.as_deref()?, job.context)))
+    };
+    for (link, context) in links() {
+        if is_plain_file_name(link) {
+            continue;
+        }
+        let (scope, _) = manifest::split_package_name(link)
+            .map_err(|_| Error::LinkAliasInvalid(link.to_string()))?;
+        if let Some((plain, _)) = links().find(|(other, other_context)| {
+            *other_context == context && other.eq_ignore_ascii_case(scope)
+        }) {
+            return Err(Error::LinkScopeCollision {
+                plain: plain.to_string(),
+                scoped: link.to_string(),
+                context,
+            });
+        }
+    }
+    Ok(())
+}
+
+/** where the link file for `link` goes under `out`, and how a require there
+climbs back to `out`. a scoped `scope/name` link sits one folder down. */
+fn link_file(out: &Path, link: &str) -> std::io::Result<(PathBuf, &'static str)> {
+    match link.split_once('/') {
+        Some((scope, name)) => {
+            fs::create_dir_all(out.join(scope))?;
+            Ok((out.join(scope).join(format!("{name}.luau")), ".."))
+        }
+        None => Ok((out.join(format!("{link}.luau")), ".")),
+    }
+}
+
 /** the tail every skipped install shares. verify the pinned tools with a
 few stats, install is also the repair path for wiped tool storage,
 download any that are missing, and say so. */
@@ -1208,8 +1250,11 @@ fn install_one(
             like require(script.Parent.X), wally stuff especially but ports
             published to pesde or our index too. rewrite what we can into
             string requires so they work without an instance tree. string
-            require packages come through unchanged */
-            requires::rewrite_instance_requires(&storage, &entry)?;
+            require packages come through unchanged. a project that asks
+            for instance requires keeps them as the package wrote them */
+            if manifest.require_style(job.context) == RequireStyle::String {
+                requires::rewrite_instance_requires(&storage, &entry)?;
+            }
             let types = link_types(&storage, &entry, &job.name, &mut warner(progress));
             (Some(entry), types)
         }
@@ -1247,10 +1292,15 @@ fn write_registry_link(
         (Some(link), Some(entry)) => {
             let out = manifest.packages_out(job.context);
             let folder = job.name.replace('/', "_");
-            let link_path = out.join(format!("{link}.luau"));
+            let (link_path, up) = link_file(&out, link)?;
             fs::write(
                 &link_path,
-                package::link_contents(&folder, entry, &extracted.types),
+                package::link_contents_at(
+                    &format!("{up}/.ember/{folder}"),
+                    entry,
+                    &extracted.types,
+                    manifest.require_style(job.context),
+                ),
             )?;
         }
         // entry-less packages warn even without a link to write, nothing
@@ -1285,15 +1335,21 @@ fn link_workspace_member(
         entry_for(manifest, &job.name, member_dir, &mut warner(progress)),
     ) {
         (Some(link), Some(entry)) => {
-            let mut root = workspace::relative_path(&out, member_dir);
+            let (link_path, _) = link_file(&out, link)?;
+            let link_dir = link_path.parent().expect("a link file has a folder");
+            let mut root = workspace::relative_path(link_dir, member_dir);
             if !root.starts_with("..") {
                 root = format!("./{root}");
             }
             let exports = link_types(member_dir, &entry, &job.name, &mut warner(progress));
-            let link_path = out.join(format!("{link}.luau"));
             fs::write(
                 &link_path,
-                package::link_contents_at(&root, &entry, &exports),
+                package::link_contents_at(
+                    &root,
+                    &entry,
+                    &exports,
+                    manifest.require_style(job.context),
+                ),
             )?;
         }
         (_, None) => warn_no_entry(&job.name, progress),
@@ -1341,6 +1397,8 @@ struct StoredPackage {
     redirects: BTreeMap<String, String>,
     /// the module a link to this package points at, see [`entry_for`]. None = nothing here to link.
     entry: Option<String>,
+    /// how its nested links and rewritten requires are written, from its context
+    requires: RequireStyle,
 }
 
 /** link files inside a stored package for its own declared dependencies,
@@ -1444,7 +1502,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             let link_path = link_dir.join(format!("{alias}.luau"));
             match fs::write(
                 &link_path,
-                package::link_contents_at(&root, &entry, &exports),
+                package::link_contents_at(&root, &entry, &exports, package.requires),
             ) {
                 /* only now is the alias safe to retarget escape requires
                 at. rewriting toward a link that failed to write would
@@ -1471,9 +1529,12 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             couldn't map on the workers since dependency environments weren't
             known yet, now the nested links are decided so retarget them at
             packages/<env>/<alias> */
-            if let Err(error) =
-                requires::rewrite_escape_requires(&package.storage, &entry, &escape_aliases)
-            {
+            if let Err(error) = requires::rewrite_escape_requires(
+                &package.storage,
+                &entry,
+                &escape_aliases,
+                package.requires,
+            ) {
                 warn(format!(
                     "warning: could not rewrite requires in {} ({error})",
                     package.name
@@ -2402,7 +2463,71 @@ mod tests {
             .collect();
         assert_eq!(files, ["thing.luau"]);
 
+        /* a scoped key (#45) links inside its scope's folder, and its
+        require climbs out of that folder first */
+        write_registry_link(
+            &manifest,
+            &job(Some("mayari/core")),
+            &extracted(Some("")),
+            &bar,
+        )
+        .unwrap();
+        let link = fs::read_to_string(out.join("mayari/core.luau")).unwrap();
+        assert_eq!(link, "return require(\"../.ember/acme_thing\")\n");
+
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// #45: what a dependency key may be, and the one pair of keys that collides.
+    #[test]
+    fn dependency_keys_must_name_a_link_file() {
+        let job = |link: &str, context: Environment| Job {
+            name: "acme/thing".to_string(),
+            version: "1.0.0".to_string(),
+            environment: None,
+            context,
+            source: index::DownloadSource::Zip {
+                url: "https://example.com/thing/1.0.0".to_string(),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: Some(link.to_string()),
+            redirects: BTreeMap::new(),
+            patch: None,
+        };
+        let roblox = |links: &[&str]| -> Vec<Job> {
+            links
+                .iter()
+                .map(|link| job(link, Environment::Roblox))
+                .collect()
+        };
+
+        // `mayari/core` and `chief/core` both fit beside a plain `core`
+        assert!(assert_links_fit(&roblox(&["core", "mayari/core", "chief/core"])).is_ok());
+
+        // a key that is neither a file name nor a package's scope/name
+        for link in ["a/b/c", "../x", "Mayari/Core", "mayari/"] {
+            assert!(
+                matches!(
+                    assert_links_fit(&roblox(&[link])),
+                    Err(Error::LinkAliasInvalid(_))
+                ),
+                "{link}"
+            );
+        }
+
+        // a `quill` link and a `quill` scope folder would share one name
+        assert!(matches!(
+            assert_links_fit(&roblox(&["quill", "quill/init"])),
+            Err(Error::LinkScopeCollision { .. })
+        ));
+        // in two trees they never meet
+        assert!(
+            assert_links_fit(&[
+                job("quill", Environment::Roblox),
+                job("quill/init", Environment::Server),
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2655,6 +2780,7 @@ mod tests {
             context,
             in_place: false,
             redirects: BTreeMap::new(),
+            requires: RequireStyle::String,
         }
     }
 
@@ -3055,6 +3181,7 @@ mod tests {
                 context: Environment::Roblox,
                 in_place: true,
                 redirects: BTreeMap::new(),
+                requires: RequireStyle::String,
             },
             stored("acme/extras", consumer.clone(), Environment::Roblox),
         ];

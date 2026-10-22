@@ -20,13 +20,24 @@ working for the names that are in it either.
 
 Each entry needs a matching variant on `Commands` in main.rs, which
 `shortcuts_are_all_real_subcommands` there checks. */
-pub const SHORTCUTS: [&str; 5] = ["build", "test", "start", "serve", "fmt"];
+pub const SHORTCUTS: [&str; 6] = ["build", "test", "start", "serve", "dev", "fmt"];
 
 /** The script names `embr fmt` will accept, in preference order. Both
 spellings are common and neither is obviously right, so rather than make
 people remember which one embr chose, `fmt` and `format` are accepted as the
 subcommand (one is an alias of the other) and as the `[scripts]` key. */
 pub const FMT_NAMES: [&str; 2] = ["fmt", "format"];
+
+/** whether `name` runs without `run`: a shortcut itself, or a shortcut, a
+colon, and more, as `build:prod` (#52). */
+pub fn is_shortcut(name: &str) -> bool {
+    let head = match name.split_once(':') {
+        Some((_, "")) => return false,
+        Some((head, _)) => head,
+        None => name,
+    };
+    SHORTCUTS.contains(&head) || FMT_NAMES.contains(&head)
+}
 
 /// "build, test, start, serve and fmt", for prose that has to list them.
 pub fn shortcut_list() -> String {
@@ -47,8 +58,9 @@ not nest, so `prebuild` is run as-is and no `preprebuild` is looked for.\n\n\
 Anything after the script name is appended to its command line, shell-quoted, \
 with an optional `--` separator: `embr run build -- --watch` and `embr build \
 --watch` reach the script identically.\n\n\
-build, test, start, serve and fmt are also subcommands, so `run` is optional \
-for those five. Every other script needs it.")]
+build, test, start, serve, dev and fmt are also subcommands, so `run` is \
+optional for those six. It is optional too for a name that starts with one of \
+them and a colon, such as `embr dev:gameplay`. Every other script needs it.")]
 pub struct RunArgs {
     /// Name of the script under [scripts] in ember.toml; omit to list them all
     pub name: Option<String>,
@@ -128,7 +140,7 @@ fn kind(manifest: &Manifest, name: &str) -> Kind {
         {
             Kind::Hook
         }
-        _ if SHORTCUTS.contains(&name) || FMT_NAMES.contains(&name) => Kind::Lifecycle,
+        _ if is_shortcut(name) => Kind::Lifecycle,
         _ => Kind::Script,
     }
 }
@@ -360,6 +372,21 @@ mod tests {
         }
         // everything else needs `run`
         assert_eq!(kind(&manifest, "lint"), Kind::Script);
+    }
+
+    #[test]
+    fn a_shortcut_and_a_colon_start_a_lifecycle_script() {
+        let manifest = manifest(
+            "\"build:prod\" = \"a\"\n\"format:check\" = \"b\"\n\"lint:fix\" = \"c\"\n\
+             \"build:\" = \"d\"\nbuilder = \"e\"\n",
+        );
+        for name in ["build:prod", "format:check"] {
+            assert_eq!(kind(&manifest, name), Kind::Lifecycle, "{name}");
+        }
+        // the colon has to follow a whole shortcut, and something has to follow it
+        for name in ["lint:fix", "build:", "builder"] {
+            assert_eq!(kind(&manifest, name), Kind::Script, "{name}");
+        }
     }
 
     #[test]
