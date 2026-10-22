@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::project::lockfile::Lockfile;
-use crate::project::manifest::{Dependency, Manifest, dependency_target, parse_version_req};
+use crate::project::manifest::{
+    Dependency, Language, Manifest, dependency_target, parse_version_req,
+};
 use crate::registry::index::{Index, Refresh};
 use crate::ui;
 use clap::Args;
@@ -45,7 +47,9 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
     } else {
         Refresh::Ttl
     };
-    let prefer = manifest.target.as_ref().map(|target| target.environment);
+    let prefer = manifest
+        .target()
+        .map(|target| (target.environment, target.language));
 
     let mut indices: HashMap<String, Index> = HashMap::new();
     let mut rows = Vec::new();
@@ -69,7 +73,14 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
             indices.insert(url.clone(), Index::open(&url, refresh)?);
         }
         let index = &indices[&url];
-        let prefer = dependency_target(alias, dependency)?.or(prefer);
+        // a dependency's `target` names an environment, the project keeps its language
+        let prefer = match dependency_target(alias, dependency)? {
+            Some(environment) => Some((
+                environment,
+                prefer.map_or(Language::Luau, |(_, language)| language),
+            )),
+            None => prefer,
+        };
         let newest = |req: &semver::VersionReq| {
             index
                 .resolve(&name, req, prefer, &[])
