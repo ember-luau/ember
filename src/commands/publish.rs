@@ -2,21 +2,25 @@ use crate::error::Error;
 use crate::net::{auth, provenance, registry};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::{
-    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Environment, Manifest, is_github_username,
-    split_package_name, workspace_version_req,
+    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Environment, Language, Manifest,
+    is_github_username, split_package_name, workspace_version_req,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::Index;
 use crate::registry::pack;
 use crate::ui;
 use clap::Args;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
     /// Show what would be published without uploading anything
     #[arg(long)]
     pub dry_run: bool,
+    /** the alloy binary for `language = "alloy"`. no flag: the Alloy CLI
+    sets it to itself, and `embr publish` finds `alloy` on PATH. */
+    #[arg(skip)]
+    pub alloy: Option<PathBuf>,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -40,8 +44,9 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     };
     let oidc_token = oidc_token.as_deref();
 
+    let alloy = args.alloy.as_deref();
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, args.dry_run, oidc_token)?;
+        publish_project(manifest, args.dry_run, oidc_token, alloy)?;
         return lifecycle.after();
     }
 
@@ -52,7 +57,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token) {
+    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, alloy) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -66,7 +71,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, args.dry_run, oidc_token)?;
+            publish_project(manifest, args.dry_run, oidc_token, alloy)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -90,6 +95,7 @@ fn publish_project(
     mut manifest: Manifest,
     dry_run: bool,
     oidc_token: Option<&str>,
+    alloy: Option<&Path>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -122,6 +128,21 @@ fn publish_project(
     }
 
     let environment = publish_environment(&manifest)?;
+    let language = manifest
+        .target
+        .as_ref()
+        .map(|target| target.language)
+        .unwrap_or_default();
+    // "lune", or "lune, alloy" when the files are not plain Luau
+    let label = match language {
+        Language::Luau => environment.to_string(),
+        language => format!("{environment}, {language}"),
+    };
+    /* a dry run builds too: it shows the archive a real publish would
+    produce, and that archive holds the build output */
+    if language == Language::Alloy {
+        build_alloy(Path::new("."), &manifest, alloy)?;
+    }
     let package_name = package.name.clone();
     let (scope, name) = {
         let (scope, name) = split_package_name(&package_name)?;
@@ -166,7 +187,7 @@ fn publish_project(
 
     if dry_run {
         println!(
-            "Would publish {package_name}@{version} ({environment}) to {}:",
+            "Would publish {package_name}@{version} ({label}) to {}:",
             registry::API_URL,
         );
         println!(
@@ -198,9 +219,7 @@ fn publish_project(
         other => other?,
     }
 
-    ui::print_success(&format!(
-        "Published {package_name}@{version} ({environment})"
-    ));
+    ui::print_success(&format!("Published {package_name}@{version} ({label})"));
     println!("Install it with `embr add {package_name}`");
     Ok(())
 }
@@ -305,7 +324,7 @@ fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), E
 
 /** OAuth app client id for the device flow. lives in the embr index's
 config.toml, not in the binary, so it can rotate without a CLI release. */
-fn oauth_client_id() -> Result<String, Error> {
+pub(crate) fn oauth_client_id() -> Result<String, Error> {
     /* a stale oauth id is harmless, it rotates roughly never, so any
     cached copy will do. a first-ever run still clones */
     let index = Index::open(DEFAULT_INDEX_URL, crate::registry::index::Refresh::Never)?;
@@ -313,6 +332,47 @@ fn oauth_client_id() -> Result<String, Error> {
         .github_oauth_id()
         .map(str::to_string)
         .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
+}
+
+/** an Alloy package ships its sources and the Luau that `alloy build`
+writes from them, so a plain Luau project can use it. the build runs here
+and not in a hook, so a forgotten hook cannot publish stale output. */
+fn build_alloy(root: &Path, manifest: &Manifest, alloy: Option<&Path>) -> Result<(), Error> {
+    println!("Running alloy build");
+    let program = alloy.unwrap_or(Path::new("alloy"));
+    let status = std::process::Command::new(program)
+        .arg("build")
+        .current_dir(root)
+        .status()
+        .map_err(|error| {
+            Error::AlloyBuild(match error.kind() {
+                std::io::ErrorKind::NotFound => "the alloy command is not on PATH".to_string(),
+                _ => format!("it could not start: {error}"),
+            })
+        })?;
+    if !status.success() {
+        return Err(Error::AlloyBuild(match status.code() {
+            Some(code) => format!("it exited with status {code}"),
+            None => "a signal stopped it".to_string(),
+        }));
+    }
+
+    let main = manifest
+        .target
+        .as_ref()
+        .and_then(|target| target.main.as_deref());
+    match main {
+        None => Err(Error::AlloyMainNotBuilt(
+            "ember.toml has no main".to_string(),
+        )),
+        Some(main) if !main.ends_with(".luau") => Err(Error::AlloyMainNotBuilt(format!(
+            "ember.toml says '{main}'"
+        ))),
+        Some(main) if !root.join(main).is_file() => Err(Error::AlloyMainNotBuilt(format!(
+            "'{main}' does not exist after the build"
+        ))),
+        Some(_) => Ok(()),
+    }
 }
 
 /// published packages must say where their code runs, the index entry is keyed by it.
@@ -425,5 +485,43 @@ mod tests {
         ));
         // chars, not bytes, 200 two-byte chars are still fine
         assert!(validate_description(Some(&"é".repeat(200))).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alloy_publishes_need_a_build_and_a_built_main() {
+        let base = std::env::temp_dir().join("embr-test-publish-alloy");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("out")).unwrap();
+        let manifest = |main: &str| -> Manifest {
+            toml::from_str(&format!(
+                "[target]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\nmain = \"{main}\"\n"
+            ))
+            .unwrap()
+        };
+        // `true` stands in for a build that works, `false` for one that fails
+        let builds = Some(Path::new("true"));
+
+        assert!(matches!(
+            build_alloy(&base, &manifest("out/init.luau"), Some(Path::new("false"))),
+            Err(Error::AlloyBuild(_))
+        ));
+        assert!(matches!(
+            build_alloy(&base, &manifest("out/init.luau"), Some(Path::new("embr-test-no-alloy"))),
+            Err(Error::AlloyBuild(message)) if message.contains("PATH")
+        ));
+        // main must name built Luau, and the build must have written it
+        assert!(matches!(
+            build_alloy(&base, &manifest("src/init.aly"), builds),
+            Err(Error::AlloyMainNotBuilt(_))
+        ));
+        assert!(matches!(
+            build_alloy(&base, &manifest("out/init.luau"), builds),
+            Err(Error::AlloyMainNotBuilt(_))
+        ));
+        fs::write(base.join("out/init.luau"), "return {}").unwrap();
+        assert!(build_alloy(&base, &manifest("out/init.luau"), builds).is_ok());
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -94,6 +94,9 @@ enum Commands {
     /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
 
+    /// Mark a published version so new installs skip it
+    Yank(commands::yank::YankArgs),
+
     /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
@@ -162,6 +165,7 @@ fn main() {
         Commands::Install(args) => commands::install::run(args),
         Commands::Patch(args) => commands::patch::run(args),
         Commands::Publish(args) => commands::publish::run(args),
+        Commands::Yank(args) => commands::yank::run(args),
         Commands::Cache(command) => commands::cache::run(command),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),

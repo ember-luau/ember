@@ -39,10 +39,25 @@ pub enum Error {
     #[error("Publishing failed: {message}")]
     PublishFailed { status: u16, message: String },
 
+    /// same shape as `PublishFailed`, from the yank endpoint.
+    #[error("The registry refused the yank: {message}")]
+    YankFailed { status: u16, message: String },
+
+    #[error("'{0}' is not a version to yank; write it as scope/name@version")]
+    YankSpec(String),
+
     #[error(
         "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"
     )]
     PublishTooLarge { size_mb: f64, limit_mb: u64 },
+
+    #[error("Publishing an Alloy package runs `alloy build` first, and {0}")]
+    AlloyBuild(String),
+
+    #[error(
+        "An Alloy package's `main` must name the built Luau file, such as \"out/init.luau\", and {0}"
+    )]
+    AlloyMainNotBuilt(String),
 
     #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
     PublishNotSupported(String),
@@ -245,7 +260,7 @@ pub enum Error {
     },
 
     #[error(
-        "Invalid target '{target}' for dependency '{alias}': only 'roblox' and 'server' can be targeted"
+        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'server', or 'lune'"
     )]
     DependencyTargetInvalid { alias: String, target: String },
 

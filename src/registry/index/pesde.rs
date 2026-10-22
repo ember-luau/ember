@@ -1,6 +1,6 @@
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
-use crate::project::manifest::{Environment, split_package_name};
+use crate::project::manifest::{Environment, Language, split_package_name};
 use serde::Deserialize;
 use std::path::Path;
 use toml::Value;
@@ -35,6 +35,8 @@ struct Candidate {
     entry's own target table. Fills {PACKAGE_TARGET} in download URLs. */
     target: Option<String>,
     environment: Option<Environment>,
+    language: Language,
+    yanked: bool,
     entry: Value,
 }
 
@@ -45,6 +47,7 @@ pub fn resolve(
     name: &str,
     req: &semver::VersionReq,
     prefer_environment: Option<Environment>,
+    pinned: &[semver::Version],
 ) -> Result<ResolvedPackage, Error> {
     let (scope, package) = split_package_name(name)?;
     let path = root.join(scope).join(package);
@@ -93,11 +96,26 @@ pub fn resolve(
         let Ok(environment) = target.map(parse_environment).transpose() else {
             continue; // published for a target embr doesn't support
         };
+        /* cargo's rule: a yanked version stays out of fresh picks, but a
+        lockfile that already pins it keeps installing it. pesde writes
+        the same `yanked = true`, so its own yanks count too. */
+        let yanked = entry.get("yanked").and_then(Value::as_bool) == Some(true);
+        if yanked && !pinned.contains(&version) {
+            continue;
+        }
+        let language = match entry.get("language").and_then(Value::as_str) {
+            None | Some("luau") => Language::Luau,
+            Some("alloy") => Language::Alloy,
+            Some("luwu") => Language::Luwu,
+            Some(_) => continue, // a language this embr does not know
+        };
 
         candidates.push(Candidate {
             version,
             target: target.map(str::to_string),
             environment,
+            language,
+            yanked,
             entry: entry.clone(),
         });
     }
@@ -130,6 +148,8 @@ pub fn resolve(
     Ok(ResolvedPackage {
         version: candidate.version,
         environment: candidate.environment,
+        language: candidate.language,
+        yanked: candidate.yanked,
         dependencies,
         source,
     })
@@ -387,6 +407,8 @@ mod tests {
             version: semver::Version::new(1, 0, 2),
             target: Some("luau".to_string()),
             environment: Some(Environment::Luau),
+            language: Language::Luau,
+            yanked: false,
             entry: parse_entries(""),
         };
 
@@ -418,6 +440,8 @@ mod tests {
             version: semver::Version::new(1, 2, 3),
             target: Some("shared".to_string()),
             environment: Some(Environment::Roblox),
+            language: Language::Luau,
+            yanked: false,
             entry: parse_entries(r#"download = "https://cdn.luaupm.com/scope/pkg/1.2.3.tar.gz""#),
         };
 
@@ -444,6 +468,8 @@ mod tests {
             version: semver::Version::new(1, 2, 3),
             target: Some("luau".to_string()),
             environment: Some(Environment::Luau),
+            language: Language::Luau,
+            yanked: false,
             entry: parse_entries(""),
         };
 
@@ -486,6 +512,7 @@ mod tests {
             "chief/core",
             &semver::VersionReq::STAR,
             None,
+            &[],
         )
         .unwrap();
 
@@ -527,6 +554,7 @@ mod tests {
             "scope/pkg",
             &semver::VersionReq::STAR,
             None,
+            &[],
         )
         .unwrap();
 
@@ -580,6 +608,7 @@ mod tests {
             "scope/multi",
             &semver::VersionReq::STAR,
             Some(Environment::Lune),
+            &[],
         )
         .unwrap();
 
@@ -592,5 +621,80 @@ mod tests {
             url,
             "https://registry.example.com/v1/packages/scope%2Fmulti/1.0.0/lune/archive"
         );
+    }
+
+    #[test]
+    fn yanked_versions_resolve_only_when_pinned() {
+        let index = TempIndex::new("yanked", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/thing",
+            r#"
+            ["1.0.0 luau"]
+            target = "luau"
+            download = "https://cdn.example.com/acme/thing/1.0.0.tar.gz"
+
+            ["1.1.0 luau"]
+            target = "luau"
+            yanked = true
+            download = "https://cdn.example.com/acme/thing/1.1.0.tar.gz"
+            "#,
+        );
+        let config = load_config(&index.root).unwrap();
+        let pick = |pinned: &[semver::Version]| {
+            resolve(
+                &index.root,
+                "https://example.com/index",
+                &config,
+                "acme/thing",
+                &semver::VersionReq::STAR,
+                None,
+                pinned,
+            )
+            .unwrap()
+        };
+
+        // a fresh pick steps over the yank
+        let fresh = pick(&[]);
+        assert_eq!(fresh.version, semver::Version::new(1, 0, 0));
+        assert!(!fresh.yanked);
+
+        // a lockfile that pins the yanked version keeps it, flagged
+        let pinned = pick(&[semver::Version::new(1, 1, 0)]);
+        assert_eq!(pinned.version, semver::Version::new(1, 1, 0));
+        assert!(pinned.yanked);
+    }
+
+    #[test]
+    fn entries_carry_their_language() {
+        let index = TempIndex::new("language", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/signal",
+            r#"
+            ["0.1.0 roblox"]
+            target = "roblox"
+            language = "alloy"
+            download = "https://cdn.example.com/acme/signal/0.1.0.tar.gz"
+
+            ["0.2.0 roblox"]
+            target = "roblox"
+            language = "cobol"
+            download = "https://cdn.example.com/acme/signal/0.2.0.tar.gz"
+            "#,
+        );
+        let config = load_config(&index.root).unwrap();
+        let resolved = resolve(
+            &index.root,
+            "https://example.com/index",
+            &config,
+            "acme/signal",
+            &semver::VersionReq::STAR,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        // a language this embr does not know is skipped like an unknown target
+        assert_eq!(resolved.version, semver::Version::new(0, 1, 0));
+        assert_eq!(resolved.language, Language::Alloy);
     }
 }

@@ -89,6 +89,9 @@ pub fn resolve(
     Ok(ResolvedPackage {
         version,
         environment: Some(Environment::from_wally_realm(&entry.package.realm)?),
+        // wally has no languages and no yanks
+        language: Default::default(),
+        yanked: false,
         dependencies,
         source: DownloadSource::Zip { url: download_url },
     })

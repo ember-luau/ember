@@ -5,7 +5,7 @@ use crate::sys::git;
 use inquire::{Select, Text, validator::Validation};
 use std::path::Path;
 
-const ENVIRONMENTS: &[&str] = &["roblox", "server", "lune", "luau", "lute"];
+const ENVIRONMENTS: &[&str] = &["roblox", "server", "lune", "luau", "lute", "seal", "zune"];
 
 /// what the first question offers, in the order it offers them.
 const KINDS: &[&str] = &[PROJECT, PACKAGE];
@@ -192,6 +192,11 @@ pub fn run() -> Result<(), Error> {
     let environment = Select::new("environment:", ENVIRONMENTS.to_vec())
         .with_help_message("Where this package's Luau code runs")
         .prompt()?;
+    /* seal resolves `.luau` only, so a dependency with `.lua` files breaks
+    there at require time. better said now than in the first bug report. */
+    if environment == "seal" {
+        eprintln!("note: seal loads .luau files only, and its @std is not lute's @std");
+    }
     let main = Text::new("main:")
         .with_help_message("Entry point of your package")
         .with_default("src/init.luau")
@@ -213,6 +218,7 @@ pub fn run() -> Result<(), Error> {
             includes: Vec::new(),
             excludes: Vec::new(),
             workspace: Vec::new(),
+            language: Default::default(),
         }),
         config: Default::default(),
         indices: Default::default(),

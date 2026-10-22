@@ -5,8 +5,10 @@ use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
 
 /// Never published, matched by name at any depth.
-const SKIP_NAMES: [&str; 6] = [
+const SKIP_NAMES: [&str; 7] = [
     ".git",
+    // Alloy's local folder: downloaded ingot executables and their lock
+    ".alloy",
     ".ember-staging",
     ".ember-patch",
     "ember.lock",
@@ -210,6 +212,7 @@ mod tests {
         write(&base, "ember.lock", "version = 1");
         write(&base, "target/debug/embr", "");
         write(&base, "node_modules/left-pad/index.js", "");
+        write(&base, ".alloy/ingots/enamel/enamel", "");
         write(&base, "packages/luau/Core.luau", "");
         write(&base, "Packages/Chief.luau", "");
         /* the pre-rename roblox output folder. [config] here repoints that

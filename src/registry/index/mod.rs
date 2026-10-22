@@ -3,7 +3,7 @@ pub mod wally;
 
 use crate::error::Error;
 use crate::net::http;
-use crate::project::manifest::Environment;
+use crate::project::manifest::{Environment, Language};
 use crate::sys::git;
 use crate::sys::hash::{fnv1a, fnv1a_parts};
 use crate::sys::paths;
@@ -80,6 +80,11 @@ pub struct ResolvedPackage {
     /** Known from index metadata. None means inspect the archive after
     extraction, ember.toml -> pesde.toml -> wally.toml. */
     pub environment: Option<Environment>,
+    /// from the entry's `language`, luau when it has none.
+    pub language: Language,
+    /** the entry is yanked. only a version in `pinned` can come back
+    yanked, a fresh pick skips them. */
+    pub yanked: bool,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
 }
@@ -159,12 +164,19 @@ impl Index {
         name: &str,
         req: &semver::VersionReq,
         prefer_environment: Option<Environment>,
+        pinned: &[semver::Version],
     ) -> Result<ResolvedPackage, Error> {
         match &self.kind {
             Kind::Wally(config) => wally::resolve(&self.root, &self.url, config, name, req),
-            Kind::Pesde(config) => {
-                pesde::resolve(&self.root, &self.url, config, name, req, prefer_environment)
-            }
+            Kind::Pesde(config) => pesde::resolve(
+                &self.root,
+                &self.url,
+                config,
+                name,
+                req,
+                prefer_environment,
+                pinned,
+            ),
         }
     }
 }
@@ -591,7 +603,10 @@ mod tests {
         assert!(!index.ttl_skipped());
         let any = semver::VersionReq::STAR;
         assert_eq!(
-            index.resolve("acme/thing", &any, None).unwrap().version,
+            index
+                .resolve("acme/thing", &any, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(1, 0, 0)
         );
 
@@ -604,11 +619,14 @@ mod tests {
         let index = Index::open(&url, Refresh::Ttl).unwrap();
         assert!(index.ttl_skipped());
         assert_eq!(
-            index.resolve("acme/thing", &any, None).unwrap().version,
+            index
+                .resolve("acme/thing", &any, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(1, 0, 0)
         );
         let two = semver::VersionReq::parse("^2.0.0").unwrap();
-        assert!(index.resolve("acme/thing", &two, None).is_err());
+        assert!(index.resolve("acme/thing", &two, None, &[]).is_err());
 
         /* the resolver-level guardrail, a failing resolve on a skipped
         index earns one forced refresh and then succeeds */
@@ -619,9 +637,14 @@ mod tests {
         ))
         .unwrap();
         // project_dir only matters for workspace deps, origin keeps it hermetic
-        let resolved =
-            crate::registry::resolver::resolve(&manifest, &origin, Refresh::Ttl, &mut Vec::new())
-                .unwrap();
+        let resolved = crate::registry::resolver::resolve(
+            &manifest,
+            &origin,
+            Refresh::Ttl,
+            &Default::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].version, semver::Version::new(2, 0, 0));
 
@@ -629,7 +652,10 @@ mod tests {
         let index = Index::open(&url, Refresh::Force).unwrap();
         assert!(!index.ttl_skipped());
         assert_eq!(
-            index.resolve("acme/thing", &two, None).unwrap().version,
+            index
+                .resolve("acme/thing", &two, None, &[])
+                .unwrap()
+                .version,
             semver::Version::new(2, 0, 0)
         );
     }

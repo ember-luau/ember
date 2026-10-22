@@ -10,3 +10,4 @@ pub mod run;
 pub mod self_cmd;
 pub mod studio;
 pub mod tool;
+pub mod yank;

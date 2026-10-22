@@ -175,22 +175,38 @@ fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, then the folder's init file. empty entry = the root's own init.
+/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, `<entry>.luwu`, then the folder's init file. empty entry = the root's own init.
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
     let candidates = if entry.is_empty() {
-        vec!["init.luau".to_string(), "init.lua".to_string()]
+        vec![
+            "init.luau".to_string(),
+            "init.lua".to_string(),
+            "init.luwu".to_string(),
+        ]
     } else {
         vec![
             format!("{entry}.luau"),
             format!("{entry}.lua"),
+            format!("{entry}.luwu"),
             format!("{entry}/init.luau"),
             format!("{entry}/init.lua"),
+            format!("{entry}/init.luwu"),
         ]
     };
     candidates
         .into_iter()
         .map(|candidate| dir.join(candidate))
         .find(|path| path.is_file())
+}
+
+/** the entry's source for the type parse. full_moon reads Luau only, so a
+`.luwu` entry links without types, and without a warning about it. */
+pub fn entry_luau_source(dir: &Path, entry: &str) -> Option<String> {
+    let path = entry_source(dir, entry)?;
+    if path.extension().is_some_and(|ext| ext == "luwu") {
+        return None;
+    }
+    fs::read_to_string(path).ok()
 }
 
 /// full_moon recurses per nesting level, so deep sources need serious stack. parsing gets its own thread with this much.
@@ -595,10 +611,13 @@ pub fn entry_point(dir: &Path) -> Option<String> {
     for candidate in [
         "init.luau",
         "init.lua",
+        "init.luwu",
         "src/init.luau",
         "src/init.lua",
+        "src/init.luwu",
         "lib/init.luau",
         "lib/init.lua",
+        "lib/init.luwu",
     ] {
         if dir.join(candidate).exists() {
             return Some(normalize_entry(candidate));
@@ -722,7 +741,7 @@ fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(
             collect_sources(root, &path, found)?;
         } else if matches!(
             path.extension().and_then(|ext| ext.to_str()),
-            Some("luau" | "lua")
+            Some("luau" | "lua" | "luwu")
         ) {
             let relative = path.strip_prefix(root).unwrap_or(&path);
             found.push(
@@ -867,6 +886,7 @@ pub(crate) fn normalize_entry(path: &str) -> String {
     let path = path
         .strip_suffix(".luau")
         .or_else(|| path.strip_suffix(".lua"))
+        .or_else(|| path.strip_suffix(".luwu"))
         .unwrap_or(path);
     /* init files are the folder's module, mod.rs style, so the require has to
     point at the folder. pesde manifests like lib = "/src/init.luau" hit this. */
@@ -1662,6 +1682,25 @@ mod tests {
         write_package(&base.join("src"), "init.lua", "return {}");
         assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.lua")));
         assert_eq!(entry_source(&base, "missing"), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn luwu_entries_resolve_but_skip_the_type_parse() {
+        let base = std::env::temp_dir().join("embr-test-luwu-entry");
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base.join("src"),
+            "init.luwu",
+            "export type T = number\nreturn {}",
+        );
+
+        assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.luwu")));
+        assert_eq!(guess_entry(&base).as_deref(), Some("src"));
+        // full_moon reads Luau only, so a Luwu entry links without types
+        assert_eq!(entry_luau_source(&base, "src"), None);
+        assert_eq!(normalize_entry("lib/vec.luwu"), "lib/vec");
 
         let _ = fs::remove_dir_all(&base);
     }

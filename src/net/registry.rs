@@ -58,6 +58,38 @@ pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<
     }
 }
 
+/** sets or clears `yanked` on a version's index entries through
+`PUT`/`DELETE /v1/packages/{scope}/{name}/{version}/yank`. without an
+`environment` every target of the version changes. owners only, the same
+auth as publish. both calls are idempotent. */
+pub fn yank(
+    token: &str,
+    name: &str,
+    version: &semver::Version,
+    environment: Option<crate::project::manifest::Environment>,
+    undo: bool,
+) -> Result<(), Error> {
+    let mut url = format!("{API_URL}/v1/packages/{name}/{version}/yank");
+    if let Some(environment) = environment {
+        url.push_str(&format!("?target={environment}"));
+    }
+    let method = if undo { "DELETE" } else { "PUT" };
+    let response = http::agent()
+        .request(method, &url)
+        .set("User-Agent", http::USER_AGENT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call();
+
+    match response {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(status, response)) => Err(Error::YankFailed {
+            status,
+            message: error_message(status, response.into_string().ok().as_deref()),
+        }),
+        Err(other) => Err(HttpError::from(other).into()),
+    }
+}
+
 fn error_message(status: u16, body: Option<&str>) -> String {
     body.and_then(|body| serde_json::from_str::<ErrorBody>(body).ok())
         .map(|body| body.error)

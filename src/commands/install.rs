@@ -84,6 +84,24 @@ const LEGACY_STORE_DIR: &str = ".lpm";
 /// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
 
+/** what the current ember.lock pins, so a yanked version it holds keeps
+installing. no lockfile, or one that does not parse, pins nothing. */
+fn pinned_versions() -> resolver::Pinned {
+    let mut pinned = resolver::Pinned::new();
+    let Ok(lock) = Lockfile::load() else {
+        return pinned;
+    };
+    for package in lock.packages {
+        if let Ok(version) = semver::Version::parse(&package.version) {
+            pinned
+                .entry(package.name.to_lowercase())
+                .or_default()
+                .push(version);
+        }
+    }
+    pinned
+}
+
 pub fn run(args: InstallArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
@@ -205,8 +223,9 @@ fn install_project(
         /* collected, not printed, inside the spinner. a bare eprintln
         would land mid-frame and get redrawn over */
         let mut warnings = Vec::new();
+        let pinned = pinned_versions();
         let resolved = ui::with_spinner("Resolving dependencies", || {
-            resolver::resolve(manifest, Path::new("."), mode, &mut warnings)
+            resolver::resolve(manifest, Path::new("."), mode, &pinned, &mut warnings)
         })?;
         for warning in &warnings {
             eprintln!("{warning}");
@@ -1336,8 +1355,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                     /* install_packages already parsed and complained about
                     every stored entry point, so no warn sink here, it would
                     just say the same thing twice */
-                    package::entry_source(&dep.storage, &entry)
-                        .and_then(|path| fs::read_to_string(path).ok())
+                    package::entry_luau_source(&dep.storage, &entry)
                         .and_then(|source| {
                             let frame = package::RequireFrame::of(&dep.storage, &entry);
                             package::exported_types(&source, &frame)
@@ -1422,9 +1440,7 @@ fn link_types(
     name: &str,
     warn: &mut impl FnMut(String),
 ) -> package::Exports {
-    let Some(source) =
-        package::entry_source(package_dir, entry).and_then(|path| fs::read_to_string(path).ok())
-    else {
+    let Some(source) = package::entry_luau_source(package_dir, entry) else {
         return package::Exports::default();
     };
     let frame = package::RequireFrame::of(package_dir, entry);

@@ -211,8 +211,9 @@ ours. */
 fn module_tree(package_dir: &Path, entry: &str) -> Result<(PathBuf, Vec<PathBuf>), Error> {
     let (module_root, single_file) = if entry.is_empty() {
         (PathBuf::new(), None)
-    } else if package_dir.join(format!("{entry}.luau")).is_file()
-        || package_dir.join(format!("{entry}.lua")).is_file()
+    } else if ["luau", "lua", "luwu"]
+        .iter()
+        .any(|ext| package_dir.join(format!("{entry}.{ext}")).is_file())
     {
         let entry_path = PathBuf::from(entry);
         (
@@ -228,7 +229,7 @@ fn module_tree(package_dir: &Path, entry: &str) -> Result<(PathBuf, Vec<PathBuf>
 
     let files: Vec<PathBuf> = match &single_file {
         // a lone file module mounts by itself, its siblings aren't in the tree
-        Some(entry_path) => ["luau", "lua"]
+        Some(entry_path) => ["luau", "lua", "luwu"]
             .iter()
             .map(|ext| package_dir.join(entry_path).with_extension(ext))
             .filter(|path| path.is_file())
@@ -266,7 +267,7 @@ fn rewrite_requires(
             .count();
         let is_init = matches!(
             file.file_name().and_then(|name| name.to_str()),
-            Some("init.luau" | "init.lua")
+            Some("init.luau" | "init.lua" | "init.luwu")
         );
 
         let context = FileContext {
@@ -320,7 +321,7 @@ fn luau_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
                 stack.push(path);
             } else if matches!(
                 path.extension().and_then(|ext| ext.to_str()),
-                Some("luau" | "lua")
+                Some("luau" | "lua" | "luwu")
             ) {
                 files.push(path);
             }

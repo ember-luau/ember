@@ -137,6 +137,10 @@ pub struct Config {
     pub luau_packages_out: Option<String>,
     #[serde(rename = "lute-packages-out", skip_serializing_if = "Option::is_none")]
     pub lute_packages_out: Option<String>,
+    #[serde(rename = "seal-packages-out", skip_serializing_if = "Option::is_none")]
+    pub seal_packages_out: Option<String>,
+    #[serde(rename = "zune-packages-out", skip_serializing_if = "Option::is_none")]
+    pub zune_packages_out: Option<String>,
 }
 
 impl Config {
@@ -146,6 +150,8 @@ impl Config {
             && self.lune_packages_out.is_none()
             && self.luau_packages_out.is_none()
             && self.lute_packages_out.is_none()
+            && self.seal_packages_out.is_none()
+            && self.zune_packages_out.is_none()
     }
 }
 
@@ -195,6 +201,49 @@ pub struct Target {
     path-or-glob entries. ember.toml always ships. */
     #[serde(default, alias = "exclude", skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<String>,
+    /** what the shipped files are written in. independent of `environment`:
+    an Alloy package for Lune is `lune` plus `alloy`. */
+    #[serde(default, skip_serializing_if = "Language::is_luau")]
+    pub language: Language,
+}
+
+/** the language of a package's own files. Alloy builds to plain Luau, so
+an Alloy package installs wherever a Luau one does. Luwu runs only on a Luwu
+host, so its packages need a Luwu project. */
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    #[default]
+    Luau,
+    Alloy,
+    Luwu,
+}
+
+impl Language {
+    pub fn is_luau(&self) -> bool {
+        *self == Language::Luau
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Language::Luau => "luau",
+            Language::Alloy => "alloy",
+            Language::Luwu => "luwu",
+        }
+    }
+
+    /** whether a project in `self` can use a package in `package`. Luau and
+    Alloy packages ship Luau, which every project runs. Luwu reads Luau
+    too, but nothing else reads Luwu. */
+    pub fn accepts(self, package: Language) -> bool {
+        package != Language::Luwu || self == Language::Luwu
+    }
+}
+
+impl fmt::Display for Language {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// where a package's Luau code runs. output folders under packages/ use the serialized lowercase form.
@@ -216,15 +265,21 @@ pub enum Environment {
     Luau,
     /// needs the Lute runtime
     Lute,
+    /// needs the seal runtime, which loads `.luau` files only
+    Seal,
+    /// needs the Zune runtime
+    Zune,
 }
 
 impl Environment {
-    pub const ALL: [Environment; 5] = [
+    pub const ALL: [Environment; 7] = [
         Environment::Roblox,
         Environment::Server,
         Environment::Lune,
         Environment::Luau,
         Environment::Lute,
+        Environment::Seal,
+        Environment::Zune,
     ];
 
     pub fn dir_name(self) -> &'static str {
@@ -234,6 +289,8 @@ impl Environment {
             Environment::Lune => "lune",
             Environment::Luau => "luau",
             Environment::Lute => "lute",
+            Environment::Seal => "seal",
+            Environment::Zune => "zune",
         }
     }
 
@@ -266,8 +323,19 @@ impl Environment {
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
             "lute" => Ok(Environment::Lute),
+            "seal" => Ok(Environment::Seal),
+            "zune" => Ok(Environment::Zune),
             other => Err(Error::UnsupportedEnvironment(other.to_string())),
         }
+    }
+
+    /** whether a project in `self` can use a package published for
+    `package`. portable Luau runs anywhere, and a Roblox server runs shared
+    Roblox code, wally's realm rule. */
+    pub fn accepts(self, package: Environment) -> bool {
+        self == package
+            || package == Environment::Luau
+            || (self == Environment::Server && package == Environment::Roblox)
     }
 }
 
@@ -455,8 +523,8 @@ pub fn dependency_target(
         return Ok(None);
     };
     match Environment::from_embr(target.trim()) {
-        Ok(environment @ (Environment::Roblox | Environment::Server)) => Ok(Some(environment)),
-        _ => Err(Error::DependencyTargetInvalid {
+        Ok(environment) => Ok(Some(environment)),
+        Err(_) => Err(Error::DependencyTargetInvalid {
             alias: alias.to_string(),
             target: target.to_string(),
         }),
@@ -687,6 +755,8 @@ impl Manifest {
             Environment::Lune => &self.config.lune_packages_out,
             Environment::Luau => &self.config.luau_packages_out,
             Environment::Lute => &self.config.lute_packages_out,
+            Environment::Seal => &self.config.seal_packages_out,
+            Environment::Zune => &self.config.zune_packages_out,
         };
         match configured {
             Some(dir) => std::path::PathBuf::from(dir),
@@ -1164,14 +1234,15 @@ mod tests {
         // workspace specifiers take one too, so it can't be silently ignored
         assert_eq!(target("Member").unwrap(), Some(Environment::Server));
 
-        /* a runtime environment and a typo are both refused, and both name
-        the entry: an untagged-enum "matched no variant" would name neither */
-        for alias in ["Runtime", "Typo"] {
-            assert!(
-                matches!(target(alias), Err(Error::DependencyTargetInvalid { alias: named, .. }) if named == alias),
-                "{alias} should be rejected"
-            );
-        }
+        /* any environment can be targeted: a `target` that matches the
+        package marks a cross-environment dependency as on purpose */
+        assert_eq!(target("Runtime").unwrap(), Some(Environment::Lune));
+        /* a typo is refused and names the entry: an untagged-enum "matched
+        no variant" would not */
+        assert!(
+            matches!(target("Typo"), Err(Error::DependencyTargetInvalid { alias: named, .. }) if named == "Typo"),
+            "Typo should be rejected"
+        );
 
         // the key round-trips, so `embr publish` doesn't silently drop it
         let serialized = toml::to_string(&manifest).unwrap();
@@ -1680,5 +1751,77 @@ mod tests {
         assert!(caret.matches(&semver::Version::new(1, 9, 0)));
         assert!(!caret.matches(&semver::Version::new(2, 0, 0)));
         assert!(parse_version_req("not a version").is_err());
+    }
+
+    #[test]
+    fn language_defaults_to_luau_and_round_trips() {
+        let plain: Manifest = toml::from_str("[target]\nenvironment = \"lune\"\n").unwrap();
+        assert_eq!(plain.target.as_ref().unwrap().language, Language::Luau);
+        // the default stays out of the file, so existing manifests keep their text
+        assert!(!toml::to_string(&plain).unwrap().contains("language"));
+
+        let alloy: Manifest =
+            toml::from_str("[target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n").unwrap();
+        assert_eq!(alloy.target.as_ref().unwrap().language, Language::Alloy);
+        assert!(
+            toml::to_string(&alloy)
+                .unwrap()
+                .contains(r#"language = "alloy""#)
+        );
+
+        assert!(
+            toml::from_str::<Manifest>("[target]\nenvironment = \"lune\"\nlanguage = \"rust\"\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn seal_and_zune_install_to_their_own_folders() {
+        let manifest: Manifest = toml::from_str(
+            "[config]\nzune-packages-out = \"deps\"\n\n[target]\nenvironment = \"seal\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.target.as_ref().unwrap().environment,
+            Environment::Seal
+        );
+        assert_eq!(
+            manifest.packages_out(Environment::Seal),
+            std::path::PathBuf::from("packages").join("seal")
+        );
+        assert_eq!(
+            manifest.packages_out(Environment::Zune),
+            std::path::PathBuf::from("deps")
+        );
+        for environment in Environment::ALL {
+            assert_eq!(
+                Environment::from_embr(environment.dir_name()).unwrap(),
+                environment
+            );
+        }
+    }
+
+    #[test]
+    fn fit_rules() {
+        use Environment::*;
+        // the same environment, portable Luau, and wally's realm rule fit
+        assert!(Lune.accepts(Lune));
+        assert!(Roblox.accepts(Luau));
+        assert!(Seal.accepts(Luau));
+        assert!(Server.accepts(Roblox));
+        // nothing else does
+        assert!(!Roblox.accepts(Server));
+        assert!(!Roblox.accepts(Lune));
+        assert!(!Luau.accepts(Lune));
+        assert!(!Seal.accepts(Lute));
+
+        // Alloy ships Luau, so only Luwu needs a project of its own
+        for project in [Language::Luau, Language::Alloy, Language::Luwu] {
+            assert!(project.accepts(Language::Luau));
+            assert!(project.accepts(Language::Alloy));
+        }
+        assert!(Language::Luwu.accepts(Language::Luwu));
+        assert!(!Language::Luau.accepts(Language::Luwu));
+        assert!(!Language::Alloy.accepts(Language::Luwu));
     }
 }

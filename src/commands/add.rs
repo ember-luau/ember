@@ -10,19 +10,19 @@ use inquire::validator::Validation;
 #[derive(Args, Debug)]
 pub struct AddArgs {
     /// Package to add, as scope/name
-    package: String,
+    pub package: String,
     /// Version requirement, defaults to "^" meaning latest
     #[arg(long)]
-    version: Option<String>,
+    pub version: Option<String>,
     /// Index key from [indices], skips the prompt
     #[arg(long)]
-    index: Option<String>,
+    pub index: Option<String>,
     /// Key written to [dependencies], defaults to the package short name
     #[arg(long)]
-    alias: Option<String>,
+    pub alias: Option<String>,
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
-    refresh: bool,
+    pub refresh: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -55,12 +55,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     };
     let prefer = manifest.target.as_ref().map(|target| target.environment);
     let index = Index::open(&index_url, mode)?;
-    let package = match index.resolve(&name, &req, prefer) {
+    let package = match index.resolve(&name, &req, prefer, &[]) {
         Ok(package) => package,
         /* the TTL may have kept us on a stale index that just hasn't
         seen this package or version yet, so one forced refresh, one retry */
         Err(_) if index.ttl_skipped() => {
-            Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer)?
+            Index::open(&index_url, Refresh::Force)?.resolve(&name, &req, prefer, &[])?
         }
         Err(error) => return Err(error),
     };
