@@ -66,6 +66,12 @@ pub enum Error {
     #[error("[package] logo {0}")]
     LogoInvalid(String),
 
+    #[error(
+        "Tool shims are copies of embr, and embr is not at {}; install embr, then run this again",
+        .0.display()
+    )]
+    EmbrMissing(PathBuf),
+
     #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
     PublishNotSupported(String),
 

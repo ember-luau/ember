@@ -64,11 +64,29 @@ pub fn path(alias: &str) -> Result<PathBuf, Error> {
     Ok(paths::bin_dir()?.join(format!("{alias}{}", env::consts::EXE_SUFFIX)))
 }
 
-/// writes the alias shim, a copy of the running embr executable.
+/// writes the alias shim, a copy of embr.
 pub fn write(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
-    fs::copy(env::current_exe()?, shim)?;
+    fs::copy(embr_executable()?, shim)?;
     super::make_executable(shim)
+}
+
+/** the embr a shim copies. a tool that links the library, `alloy` say,
+runs installs as itself, and a copy of it would not route the alias. so
+the running program counts only when it is embr, and the installed embr
+stands in for every other host. */
+fn embr_executable() -> Result<PathBuf, Error> {
+    let exe = env::current_exe()?;
+    let stem = exe.file_stem().and_then(|stem| stem.to_str());
+    if stem.is_some_and(|stem| alias_from_stem(stem).is_none()) {
+        return Ok(exe);
+    }
+    let installed = paths::bin_dir()?.join(format!("embr{}", env::consts::EXE_SUFFIX));
+    if installed.is_file() {
+        Ok(installed)
+    } else {
+        Err(Error::EmbrMissing(installed))
+    }
 }
 
 /** What `alias` currently resolves to on PATH when that is NOT our shim.
