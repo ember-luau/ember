@@ -19,6 +19,8 @@ pub mod error;
 #[doc(hidden)]
 pub mod net;
 #[doc(hidden)]
+pub mod progress;
+#[doc(hidden)]
 pub mod project;
 #[doc(hidden)]
 pub mod registry;

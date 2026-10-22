@@ -38,6 +38,11 @@ pub fn palette() -> Palette {
     PALETTE.get().copied().unwrap_or(EMBER)
 }
 
+/// a palette triple as a crossterm colour, for `Stylize::with`.
+pub fn rgb((r, g, b): (u8, u8, u8)) -> crossterm::style::Color {
+    crossterm::style::Color::Rgb { r, g, b }
+}
+
 pub fn accent() -> crossterm::style::Color {
     let (r, g, b) = palette().accent;
     crossterm::style::Color::Rgb { r, g, b }
@@ -237,30 +242,6 @@ pub fn print_script_entry(name: &str, commands: &[String]) {
     }
 }
 
-/** Prints a line to stdout while `bar` is live. `ProgressBar::println` goes
-through the bar's draw target, which writes to stderr on a terminal and
-swallows the line entirely when piped. suspending keeps the line on
-stdout in both worlds. */
-pub fn bar_println(bar: &indicatif::ProgressBar, line: &str) {
-    bar.suspend(|| println!("{line}"));
-}
-
-/** A `{msg} ━━━╸─── {pos}/{len}` bar with the filled portion in the accent
-color. indicatif templates only speak ANSI-16/256, so the exact accent
-RGB gets smuggled in as crossterm escapes around the bar placeholder.
-literal template text passes through untouched, and width measurement is
-escape-aware. */
-pub fn progress_bar(len: u64) -> indicatif::ProgressBar {
-    let template = format!("{{msg}} {} {{pos}}/{{len}}", "{bar:40}".with(accent()));
-    let style = indicatif::ProgressStyle::with_template(&template)
-        .expect("progress bar template is valid")
-        .progress_chars("━╸─");
-
-    let bar = indicatif::ProgressBar::new(len);
-    bar.set_style(style);
-    bar
-}
-
 /// accent spinner, self-ticking, the caller finishes or clears it.
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     let template = format!("{} {{msg}}", "{spinner}".with(accent()));
@@ -280,17 +261,6 @@ pub fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T, Error>) -
     let spinner = spinner(message);
     let result = work();
     spinner.finish_and_clear();
-    result
-}
-
-/// runs `work` with a `len`-step bar, cleared afterwards even on error.
-pub fn with_progress<T>(
-    len: u64,
-    work: impl FnOnce(&indicatif::ProgressBar) -> Result<T, Error>,
-) -> Result<T, Error> {
-    let bar = progress_bar(len);
-    let result = work(&bar);
-    bar.finish_and_clear();
     result
 }
 

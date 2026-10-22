@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::net::github::GithubAPI;
+use crate::progress::{Progress, Task};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
 use crate::project::manifest::{self, Environment, Manifest, Tool};
@@ -15,7 +16,6 @@ use crate::sys::paths;
 use crate::tools;
 use crate::ui;
 use clap::Args;
-use indicatif::ProgressBar;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -187,6 +187,12 @@ fn install_project(
     landing mid-install has to bust the next fast path */
     let state_inputs = state_inputs(include_global_tools);
 
+    /* the lock as the last install left it, read before this one writes,
+    so the summary can say what changed */
+    let previous = Lockfile::load().ok();
+
+    let progress = Progress::start("resolve");
+
     let mut jobs: Vec<Job> = if args.locked {
         let lock = Lockfile::load()?;
         /* a v1 lock predates contexts. replaying it would scatter a
@@ -224,23 +230,21 @@ fn install_project(
         } else {
             index::Refresh::Ttl
         };
-        /* collected, not printed, inside the spinner. a bare eprintln
-        would land mid-frame and get redrawn over */
         let mut warnings = Vec::new();
         let pinned = pinned_versions();
-        let resolved = ui::with_spinner("Resolving dependencies", || {
-            resolver::resolve(
-                manifest,
-                Path::new("."),
-                mode,
-                &pinned,
-                args.allow.as_ref(),
-                &mut warnings,
-            )
-        })?;
+        let resolved = resolver::resolve(
+            manifest,
+            Path::new("."),
+            mode,
+            &pinned,
+            args.allow.as_ref(),
+            &mut warnings,
+        );
+        // around the live line, a bare eprintln would land mid-frame
         for warning in &warnings {
-            eprintln!("{warning}");
+            progress.warn(warning);
         }
+        let resolved = resolved?;
         ui::timing("resolve", resolve_started);
         resolved
             .into_iter()
@@ -281,6 +285,7 @@ fn install_project(
         && let Ok(lock) = Lockfile::load()
         && jobs_match_lock(&jobs, &lock)
     {
+        drop(progress);
         finish_up_to_date(manifest, include_global_tools)?;
         ui::timing("recheck total", started);
         return Ok(());
@@ -290,7 +295,7 @@ fn install_project(
     packages/shared with it and leave the guard inside with nothing to see.
     it prints when it removes something, so it opens the output and the
     sections below separate themselves from it */
-    let mut printed = remove_legacy_roblox_out(manifest);
+    let mut printed = progress.suspend(|| remove_legacy_roblox_out(manifest));
 
     /* installs rebuild from scratch each run. every env's output folder is
     wiped even with nothing to install, so removing the last dependency
@@ -308,11 +313,13 @@ fn install_project(
     let staging = Path::new(".ember-staging").to_path_buf();
     let packages_started = Instant::now();
     if !jobs.is_empty() {
-        section("Installing packages", &mut printed);
+        // off a terminal the ✓ lines are the record, so they get their heading back
+        if !progress.is_live() {
+            section("Installing packages", &mut printed);
+        }
+        progress.phase("install", jobs.len() as u64);
     }
-    let locked = ui::with_progress(jobs.len() as u64, |bar| {
-        install_packages(manifest, jobs, &staging, bar, cache)
-    });
+    let locked = install_packages(manifest, jobs, &staging, &progress, cache);
     // staging cleanup used to be skipped on error, leaking the directory
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -354,10 +361,14 @@ fn install_project(
         })
         .collect();
     let nested_started = Instant::now();
-    link_nested_dependencies(&stored, &mut |message| eprintln!("{message}"));
+    link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
 
     let package_count = locked.len();
+    let changes = package_changes(
+        previous.as_ref().map_or(&[][..], |lock| &lock.packages[..]),
+        &locked,
+    );
     // stamps land in the folders actually written, the contexts
     let environments: BTreeSet<Environment> =
         locked.iter().map(|package| package.context()).collect();
@@ -373,9 +384,13 @@ fn install_project(
     let tool_jobs = tool_jobs(manifest, include_global_tools)?;
     let tool_count = tool_jobs.len();
     if !tool_jobs.is_empty() {
-        section("Installing tools", &mut printed);
-        ui::with_progress(tool_count as u64, |bar| install_tools(&tool_jobs, bar))?;
+        if !progress.is_live() {
+            section("Installing tools", &mut printed);
+        }
+        progress.phase("tools", tool_count as u64);
     }
+    let tools = install_tools(&tool_jobs, &progress)?;
+    drop(progress);
 
     /* everything succeeded, record what this install saw so the next run
     can skip itself when nothing changed. never on --locked, that path
@@ -388,6 +403,9 @@ fn install_project(
 
     // the summary belongs to neither section, so it gets its own separation
     if printed {
+        println!();
+    }
+    if print_changes(&changes, &tools) {
         println!();
     }
     match (package_count, tool_count) {
@@ -838,11 +856,17 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
     if missing.is_empty() {
         println!("Nothing to install (up to date)");
     } else {
-        let mut printed = false;
-        section("Installing tools", &mut printed);
         let count = missing.len();
-        ui::with_progress(count as u64, |bar| install_tools(&missing, bar))?;
-        println!();
+        let progress = Progress::start("tools");
+        if !progress.is_live() {
+            section("Installing tools", &mut false);
+        }
+        progress.phase("tools", count as u64);
+        let tools = install_tools(&missing, &progress)?;
+        drop(progress);
+        if print_changes(&BTreeMap::new(), &tools) {
+            println!();
+        }
         println!("Installed {count} tool{}", ui::plural(count));
     }
     Ok(())
@@ -920,13 +944,15 @@ fn write_state_stamps(
     }
 }
 
-/** downloads, stages, and links every package, reporting progress on `bar`.
-caller owns the bar's lifecycle so it gets cleared on errors too.
+/** downloads, stages, and links every package, one row of `progress` per
+package in flight. the caller owns the display, so it comes down on an
+error too.
 
 registry packages fan out over a small thread pool. each worker owns one
 job at a time end to end, download, extract, rewrite, parse, under its
-own staging dir, so nothing is shared but the target `.ember` parents. this
-thread keeps the bar, writes the link files, and fills `locked` by job
+own staging dir, so nothing is shared but the target `.ember` parents. a
+worker's row stays up until this thread writes the package's link file and
+fills its slot in `locked` by job
 index, so lockfile order is exactly the resolver's order no matter who
 finishes first. on the first error the pool stops taking work, in-flight
 requests run out against their timeouts, and that error is returned. */
@@ -934,7 +960,7 @@ fn install_packages(
     manifest: &Manifest,
     jobs: Vec<Job>,
     staging_root: &Path,
-    bar: &ProgressBar,
+    progress: &Progress,
     cache: index::CachePolicy,
 ) -> Result<Vec<LockedPackage>, Error> {
     let mut slots: Vec<Option<LockedPackage>> = Vec::new();
@@ -945,9 +971,8 @@ fn install_packages(
     let mut queue: VecDeque<(usize, Job)> = VecDeque::new();
     for (slot, job) in jobs.into_iter().enumerate() {
         if matches!(job.source, index::DownloadSource::Workspace { .. }) {
-            bar.set_message(job.name.clone());
-            slots[slot] = Some(link_workspace_member(manifest, job, bar)?);
-            bar.inc(1);
+            let task = progress.task(format!("{}@{}", job.name, job.version));
+            slots[slot] = Some(link_workspace_member(manifest, job, progress, task)?);
         } else {
             queue.push_back((slot, job));
         }
@@ -988,12 +1013,15 @@ fn install_packages(
                         job.name.replace('/', "_"),
                         job.context.dir_name()
                     ));
-                    let result = install_one(manifest, &job, &staging, cache, bar);
+                    /* the row lives until this thread's result is handled,
+                    the link file written on the main thread included */
+                    let task = progress.task(format!("{}@{}", job.name, job.version));
+                    let result = install_one(manifest, &job, &staging, cache, progress, &task);
                     if result.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
                     // a closed channel means the run is over, stop quietly
-                    if sender.send((slot, job, result)).is_err() {
+                    if sender.send((slot, job, result, task)).is_err() {
                         break;
                     }
                 }
@@ -1005,10 +1033,10 @@ fn install_packages(
         outage fails several in-flight downloads at once, the error the
         user sees shouldn't depend on thread timing */
         let mut error_slot = usize::MAX;
-        for (slot, job, result) in receiver {
+        for (slot, job, result, task) in receiver {
             match result {
                 Ok(extracted) => {
-                    if let Err(error) = write_registry_link(manifest, &job, &extracted, bar) {
+                    if let Err(error) = write_registry_link(manifest, &job, &extracted, progress) {
                         failed.store(true, Ordering::Relaxed);
                         if slot < error_slot {
                             error_slot = slot;
@@ -1016,20 +1044,15 @@ fn install_packages(
                         }
                         continue;
                     }
-                    bar.set_message(job.name.clone());
                     // transitives have no link, show where they landed instead
                     let shown = job
                         .link
                         .clone()
                         .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
-                    ui::bar_println(
-                        bar,
-                        &ui::success_line(&format!(
-                            "{}@{} → {}/{shown}",
-                            job.name, job.version, job.context
-                        )),
-                    );
-                    bar.inc(1);
+                    task.done(&ui::success_line(&format!(
+                        "{}@{} → {}/{shown}",
+                        job.name, job.version, job.context
+                    )));
                     slots[slot] = Some(LockedPackage {
                         name: job.name,
                         version: job.version,
@@ -1086,13 +1109,16 @@ fn install_one(
     job: &Job,
     staging: &Path,
     cache: index::CachePolicy,
-    bar: &ProgressBar,
+    progress: &Progress,
+    task: &Task,
 ) -> Result<Extracted, Error> {
     let started = Instant::now();
     if staging.exists() {
         with_retry(|| fs::remove_dir_all(staging))?;
     }
-    index::download(&job.source, staging, cache)?;
+    index::download_with(&job.source, staging, cache, &mut |done, total| {
+        task.bytes(done, total)
+    })?;
     package::flatten_single_dir(staging)?;
 
     /* the tree is staged and pristine here, patch it now so environment
@@ -1130,8 +1156,8 @@ fn install_one(
     name and tree, which our link files and the package's own relative
     requires don't spell. make it mirror the disk instead. after
     entry_point, so the entry is read from what the package shipped */
-    let entry = entry_for(manifest, &job.name, &storage, &mut bar_warn(bar));
-    rojo::mirror_disk_layout(&storage, &mut bar_warn(bar));
+    let entry = entry_for(manifest, &job.name, &storage, &mut warner(progress));
+    rojo::mirror_disk_layout(&storage, &mut warner(progress));
 
     let (entry, types) = match entry {
         Some(entry) => {
@@ -1141,14 +1167,14 @@ fn install_one(
             string requires so they work without an instance tree. string
             require packages come through unchanged */
             requires::rewrite_instance_requires(&storage, &entry)?;
-            let types = link_types(&storage, &entry, &job.name, &mut bar_warn(bar));
+            let types = link_types(&storage, &entry, &job.name, &mut warner(progress));
             (Some(entry), types)
         }
         None => (None, package::Exports::default()),
     };
 
-    // suspend so a timings line can't tear the live bar from a worker thread
-    bar.suspend(|| ui::timing(&format!("package {}", job.name), started));
+    // suspended so a timings line can't tear the live display from a worker thread
+    progress.suspend(|| ui::timing(&format!("package {}", job.name), started));
     Ok(Extracted {
         environment,
         entry,
@@ -1172,7 +1198,7 @@ fn write_registry_link(
     manifest: &Manifest,
     job: &Job,
     extracted: &Extracted,
-    bar: &ProgressBar,
+    progress: &Progress,
 ) -> Result<(), Error> {
     match (&job.link, &extracted.entry) {
         (Some(link), Some(entry)) => {
@@ -1186,7 +1212,7 @@ fn write_registry_link(
         }
         // entry-less packages warn even without a link to write, nothing
         // else warns when the only dependent links in place
-        (_, None) => warn_no_entry(&job.name, bar),
+        (_, None) => warn_no_entry(&job.name, progress),
         (None, Some(_)) => {}
     }
     Ok(())
@@ -1198,7 +1224,8 @@ symlinks. */
 fn link_workspace_member(
     manifest: &Manifest,
     job: Job,
-    bar: &ProgressBar,
+    progress: &Progress,
+    task: Task,
 ) -> Result<LockedPackage, Error> {
     let index::DownloadSource::Workspace { path } = &job.source else {
         unreachable!("only workspace jobs are linked in place");
@@ -1212,21 +1239,21 @@ fn link_workspace_member(
 
     match (
         &job.link,
-        entry_for(manifest, &job.name, member_dir, &mut bar_warn(bar)),
+        entry_for(manifest, &job.name, member_dir, &mut warner(progress)),
     ) {
         (Some(link), Some(entry)) => {
             let mut root = workspace::relative_path(&out, member_dir);
             if !root.starts_with("..") {
                 root = format!("./{root}");
             }
-            let exports = link_types(member_dir, &entry, &job.name, &mut bar_warn(bar));
+            let exports = link_types(member_dir, &entry, &job.name, &mut warner(progress));
             let link_path = out.join(format!("{link}.luau"));
             fs::write(
                 &link_path,
                 package::link_contents_at(&root, &entry, &exports),
             )?;
         }
-        (_, None) => warn_no_entry(&job.name, bar),
+        (_, None) => warn_no_entry(&job.name, progress),
         // a transitively pulled member, link targets exist, no link written
         (None, Some(_)) => {}
     }
@@ -1235,13 +1262,10 @@ fn link_workspace_member(
         .link
         .clone()
         .unwrap_or_else(|| job.name.replace('/', "_"));
-    ui::bar_println(
-        bar,
-        &ui::success_line(&format!(
-            "{}@{} → {}/{shown} (workspace)",
-            job.name, job.version, job.context
-        )),
-    );
+    task.done(&ui::success_line(&format!(
+        "{}@{} → {}/{shown} (workspace)",
+        job.name, job.version, job.context
+    )));
     Ok(LockedPackage {
         name: job.name,
         version: job.version,
@@ -1497,22 +1521,35 @@ fn entry_for(
     Some(guessed)
 }
 
-/// routes a warning line around the live progress bar.
-fn bar_warn(bar: &ProgressBar) -> impl FnMut(String) + '_ {
-    move |message: String| bar.suspend(|| eprintln!("{message}"))
+/// routes a warning line around the live display.
+fn warner(progress: &Progress) -> impl FnMut(String) + '_ {
+    move |message: String| progress.warn(&message)
 }
 
-fn warn_no_entry(name: &str, bar: &ProgressBar) {
-    bar.suspend(|| {
-        eprintln!("warning: could not find an entry point for {name}; no link file generated")
-    });
+fn warn_no_entry(name: &str, progress: &Progress) {
+    progress.warn(&format!(
+        "warning: could not find an entry point for {name}; no link file generated"
+    ));
 }
 
-fn install_tools(jobs: &[ToolJob], bar: &ProgressBar) -> Result<(), Error> {
+/// a tool this install put in place, for the summary.
+struct InstalledTool {
+    alias: String,
+    repository: String,
+    version: String,
+    global: bool,
+    /// false when the stored copy was reused
+    downloaded: bool,
+}
+
+fn install_tools(jobs: &[ToolJob], progress: &Progress) -> Result<Vec<InstalledTool>, Error> {
     let github = GithubAPI::new();
+    let mut installed = Vec::new();
     for (alias, tool, global) in jobs {
-        bar.set_message(tool.repository.clone());
-        let downloaded = tools::install_tool(alias, tool, &github)?;
+        let task = progress.task(format!("{}@{}", tool.repository, tool.version));
+        let downloaded = tools::install_tool(alias, tool, &github, &mut |done, total| {
+            task.bytes(done, total)
+        })?;
         let mut notes = Vec::new();
         if *global {
             notes.push("global");
@@ -1525,33 +1562,316 @@ fn install_tools(jobs: &[ToolJob], bar: &ProgressBar) -> Result<(), Error> {
         } else {
             format!(" ({})", notes.join(", "))
         };
-        ui::bar_println(
-            bar,
-            &ui::success_line(&format!(
-                "{}@{} → {alias}{notes}",
-                tool.repository, tool.version
-            )),
-        );
+        task.done(&ui::success_line(&format!(
+            "{}@{} → {alias}{notes}",
+            tool.repository, tool.version
+        )));
 
         /* another toolchain manager's shim earlier in PATH, aftman or
         rokit, would run instead of ours and report its own errors. surface
         that or the tool looks broken for no visible reason */
         if let Some(shadow) = tools::shim::shadowing_executable(alias) {
-            bar.suspend(|| {
-                eprintln!(
-                    "warning: `{alias}` resolves to {} on PATH before embr's shims; that copy will run instead",
-                    shadow.display()
-                )
-            });
+            progress.warn(&format!(
+                "warning: `{alias}` resolves to {} on PATH before embr's shims; that copy will run instead",
+                shadow.display()
+            ));
         }
-        bar.inc(1);
+        installed.push(InstalledTool {
+            alias: alias.clone(),
+            repository: tool.repository.clone(),
+            version: tool.version.clone(),
+            global: *global,
+            downloaded,
+        });
     }
-    Ok(())
+    Ok(installed)
+}
+
+/// one line of the install summary: a direct dependency that came, went, or moved.
+#[derive(Debug, PartialEq, Eq)]
+enum Change {
+    Added {
+        link: String,
+        name: String,
+        version: String,
+    },
+    Removed {
+        link: String,
+        name: String,
+        version: String,
+    },
+    Moved {
+        link: String,
+        name: String,
+        from: String,
+        to: String,
+    },
+}
+
+impl Change {
+    fn link(&self) -> &str {
+        match self {
+            Change::Added { link, .. }
+            | Change::Removed { link, .. }
+            | Change::Moved { link, .. } => link,
+        }
+    }
+}
+
+/** what this install changed among the direct dependencies, by the root
+each installs under. a dependency is its link file in its root: the same
+package at a new version moved, another package behind the same link is one
+gone and one new. a transitive has no link and nobody named it, so it stays
+out, the way pesde lists only what the manifest names. */
+fn package_changes(
+    old: &[LockedPackage],
+    new: &[LockedPackage],
+) -> BTreeMap<Environment, Vec<Change>> {
+    let direct = |packages: &[LockedPackage]| -> BTreeMap<(Environment, String), (String, String)> {
+        packages
+            .iter()
+            .filter_map(|package| {
+                let link = package.link.clone()?;
+                Some((
+                    (package.context(), link),
+                    (package.name.clone(), package.version.clone()),
+                ))
+            })
+            .collect()
+    };
+    let old = direct(old);
+    let new = direct(new);
+
+    let mut changes: BTreeMap<Environment, Vec<Change>> = BTreeMap::new();
+    for ((environment, link), (name, version)) in &old {
+        match new.get(&(*environment, link.clone())) {
+            Some((new_name, _)) if new_name == name => {}
+            _ => changes
+                .entry(*environment)
+                .or_default()
+                .push(Change::Removed {
+                    link: link.clone(),
+                    name: name.clone(),
+                    version: version.clone(),
+                }),
+        }
+    }
+    for ((environment, link), (name, version)) in &new {
+        let change = match old.get(&(*environment, link.clone())) {
+            Some((old_name, old_version)) if old_name == name => {
+                if old_version == version {
+                    continue;
+                }
+                Change::Moved {
+                    link: link.clone(),
+                    name: name.clone(),
+                    from: old_version.clone(),
+                    to: version.clone(),
+                }
+            }
+            _ => Change::Added {
+                link: link.clone(),
+                name: name.clone(),
+                version: version.clone(),
+            },
+        };
+        changes.entry(*environment).or_default().push(change);
+    }
+    for list in changes.values_mut() {
+        list.sort_by(|a, b| a.link().cmp(b.link()));
+    }
+    changes
+}
+
+/** prints what changed, one root per heading, after pesde's summary:
+
+```text
+roblox
+  + Roact 1.4.4  roblox/roact
+  ↑ Promise 4.0.0 → 4.1.0  evaera/promise
+  - Signal 2.0.0  sleitnick/signal
+tools
+  + rojo 7.4.4  rojo-rbx/rojo
+```
+
+gold for what came, crimson for what went, the accent for a version that
+moved. a tool lists only when this install downloaded it. returns whether
+anything printed, so the caller can separate it. */
+fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[InstalledTool]) -> bool {
+    use crossterm::style::Stylize;
+
+    let added = || "+".with(ui::rgb(ui::palette().top));
+    let removed = || "-".with(ui::rgb(ui::palette().bottom));
+    let mut printed = false;
+
+    for (environment, changes) in packages {
+        if changes.is_empty() {
+            continue;
+        }
+        println!("{}", environment.to_string().bold());
+        for change in changes {
+            match change {
+                Change::Added {
+                    link,
+                    name,
+                    version,
+                } => println!(
+                    "  {} {link} {version}  {}",
+                    added(),
+                    name.as_str().dark_grey()
+                ),
+                Change::Removed {
+                    link,
+                    name,
+                    version,
+                } => println!(
+                    "  {} {link} {version}  {}",
+                    removed(),
+                    name.as_str().dark_grey()
+                ),
+                Change::Moved {
+                    link,
+                    name,
+                    from,
+                    to,
+                } => {
+                    let arrow = match (semver::Version::parse(from), semver::Version::parse(to)) {
+                        (Ok(from), Ok(to)) if to < from => "↓",
+                        _ => "↑",
+                    };
+                    println!(
+                        "  {} {link} {from} → {to}  {}",
+                        arrow.with(ui::accent()),
+                        name.as_str().dark_grey()
+                    );
+                }
+            }
+        }
+        printed = true;
+    }
+
+    let fetched: Vec<&InstalledTool> = tools.iter().filter(|tool| tool.downloaded).collect();
+    if !fetched.is_empty() {
+        println!("{}", "tools".bold());
+        for tool in fetched {
+            let scope = if tool.global { " (global)" } else { "" };
+            println!(
+                "  {} {} {}  {}",
+                added(),
+                tool.alias,
+                tool.version,
+                format!("{}{scope}", tool.repository).dark_grey()
+            );
+        }
+        printed = true;
+    }
+    printed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn direct(
+        name: &str,
+        version: &str,
+        link: Option<&str>,
+        context: Environment,
+    ) -> LockedPackage {
+        LockedPackage {
+            name: name.to_string(),
+            version: version.to_string(),
+            environment: Environment::Roblox,
+            context: Some(context),
+            link: link.map(str::to_string),
+            index: "https://example.com/index".to_string(),
+            redirects: BTreeMap::new(),
+            patch: None,
+            source: index::DownloadSource::Zip {
+                url: format!("https://example.com/{name}/{version}"),
+            },
+        }
+    }
+
+    /// the summary names direct dependencies only, by root, and pairs a moved version.
+    #[test]
+    fn changes_list_what_the_manifest_names() {
+        let old = vec![
+            direct(
+                "evaera/promise",
+                "4.0.0",
+                Some("Promise"),
+                Environment::Roblox,
+            ),
+            direct(
+                "sleitnick/signal",
+                "2.0.0",
+                Some("Signal"),
+                Environment::Roblox,
+            ),
+            direct("acme/kept", "1.0.0", Some("Kept"), Environment::Server),
+            direct("acme/deep", "1.0.0", None, Environment::Roblox),
+        ];
+        let new = vec![
+            direct(
+                "evaera/promise",
+                "4.1.0",
+                Some("Promise"),
+                Environment::Roblox,
+            ),
+            direct("roblox/roact", "1.4.4", Some("Roact"), Environment::Roblox),
+            direct("acme/kept", "1.0.0", Some("Kept"), Environment::Server),
+            direct("acme/deep", "2.0.0", None, Environment::Roblox),
+        ];
+
+        let changes = package_changes(&old, &new);
+
+        // the server root changed nothing, and the transitive acme/deep never shows
+        assert_eq!(changes.keys().collect::<Vec<_>>(), [&Environment::Roblox]);
+        assert_eq!(
+            changes[&Environment::Roblox],
+            [
+                Change::Moved {
+                    link: "Promise".to_string(),
+                    name: "evaera/promise".to_string(),
+                    from: "4.0.0".to_string(),
+                    to: "4.1.0".to_string(),
+                },
+                Change::Added {
+                    link: "Roact".to_string(),
+                    name: "roblox/roact".to_string(),
+                    version: "1.4.4".to_string(),
+                },
+                Change::Removed {
+                    link: "Signal".to_string(),
+                    name: "sleitnick/signal".to_string(),
+                    version: "2.0.0".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// another package behind the same link is one gone and one new, not a move.
+    #[test]
+    fn a_swapped_package_is_removed_and_added() {
+        let old = vec![direct(
+            "acme/old",
+            "1.0.0",
+            Some("Thing"),
+            Environment::Roblox,
+        )];
+        let new = vec![direct(
+            "acme/new",
+            "1.0.0",
+            Some("Thing"),
+            Environment::Roblox,
+        )];
+
+        let changes = &package_changes(&old, &new)[&Environment::Roblox];
+
+        assert!(matches!(changes[0], Change::Removed { ref name, .. } if name == "acme/old"));
+        assert!(matches!(changes[1], Change::Added { ref name, .. } if name == "acme/new"));
+    }
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -2021,7 +2341,7 @@ mod tests {
             entry: entry.map(str::to_string),
             types: package::Exports::default(),
         };
-        let bar = ProgressBar::hidden();
+        let bar = Progress::hidden();
 
         // a direct dependency gets its consumer-level link
         write_registry_link(&manifest, &job(Some("thing")), &extracted(Some("")), &bar).unwrap();

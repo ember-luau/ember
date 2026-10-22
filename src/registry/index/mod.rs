@@ -204,6 +204,17 @@ registries are public too. If credentialed downloads ever come back, restore
 the old restraint of tokens only to GitHub-owned hosts, so an arbitrary
 registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
+    download_with(source, dest, cache, &mut |_, _| {})
+}
+
+/** [`download`], and `on_bytes` hears the archive arrive: bytes so far and
+the whole size when known. a cached archive reports itself whole at once. */
+pub fn download_with(
+    source: &DownloadSource,
+    dest: &Path,
+    cache: CachePolicy,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), Error> {
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
         // Workspace members are linked in place, install never gets here.
         return Err(Error::IndexFetch {
@@ -218,7 +229,7 @@ pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Res
     }
 
     std::fs::create_dir_all(dest)?;
-    let (bytes, from_cache) = fetch_archive(url, &headers, cache)?;
+    let (bytes, from_cache) = fetch_archive(url, &headers, cache, on_bytes)?;
     match extract(source, &bytes, dest) {
         Ok(()) => Ok(()),
         /* cached bytes that no longer extract are poison, bitrot the
@@ -228,7 +239,7 @@ pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Res
             evict_archive(url);
             fs::remove_dir_all(dest)?;
             fs::create_dir_all(dest)?;
-            let (bytes, _) = fetch_archive(url, &headers, CachePolicy::Bypass)?;
+            let (bytes, _) = fetch_archive(url, &headers, CachePolicy::Bypass, on_bytes)?;
             extract(source, &bytes, dest)
         }
         Err(error) => Err(error),
@@ -274,6 +285,7 @@ fn fetch_archive(
     url: &str,
     headers: &[(&str, &str)],
     cache: CachePolicy,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(Vec<u8>, bool), Error> {
     let entry = archive_entry(url);
 
@@ -281,11 +293,13 @@ fn fetch_archive(
         && let Some(entry) = &entry
         && let Some(bytes) = load_archive(entry, url)
     {
+        let size = bytes.len() as u64;
+        on_bytes(size, Some(size));
         return Ok((bytes, true));
     }
 
     let started = std::time::Instant::now();
-    let bytes = http::get_bytes(url, headers)?;
+    let bytes = http::get_bytes_with(url, headers, on_bytes)?;
     crate::ui::timing(&format!("download {url}"), started);
 
     /* caching is best-effort, a full disk or permission problem must not
