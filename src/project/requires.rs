@@ -9,6 +9,7 @@ package. both end up at the same place through the same arithmetic. anything
 we can't map safely just stays as it was. */
 
 use crate::error::Error;
+use crate::project::manifest::RequireStyle;
 use crate::project::rojo::PACKAGES_DIR;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -28,20 +29,23 @@ how the mapping works.
 - anything weirder, children of a plain file module, climbing further, non
   literal segments, gets skipped */
 pub fn rewrite_instance_requires(package_dir: &Path, entry: &str) -> Result<usize, Error> {
-    rewrite_requires(package_dir, entry, None)
+    rewrite_requires(package_dir, entry, None, RequireStyle::String)
 }
 
 /** the second half, run from the nested-link phase once every dependency's
 environment is known. maps chains that climb exactly one level past the
 module root, wally's alias zone, onto the package's OWN nested links,
 `packages/<env>/<alias>`. `aliases` is alias -> environment folder name.
-aliases absent from it stay untouched, like any other unmappable chain. */
+aliases absent from it stay untouched, like any other unmappable chain.
+with `RequireStyle::Instance` the new requires are instance chains, and the
+chains inside the module stay as the package wrote them. */
 pub fn rewrite_escape_requires(
     package_dir: &Path,
     entry: &str,
     aliases: &BTreeMap<String, String>,
+    style: RequireStyle,
 ) -> Result<usize, Error> {
-    rewrite_requires(package_dir, entry, Some(aliases))
+    rewrite_requires(package_dir, entry, Some(aliases), style)
 }
 
 /** what the `roblox` environment's folder was called before the rename,
@@ -244,6 +248,7 @@ fn rewrite_requires(
     package_dir: &Path,
     entry: &str,
     aliases: Option<&BTreeMap<String, String>>,
+    style: RequireStyle,
 ) -> Result<usize, Error> {
     let (module_root, files) = module_tree(package_dir, entry)?;
 
@@ -275,6 +280,7 @@ fn rewrite_requires(
             depth_in_module: dir_in_module,
             depth_in_package: dir_in_package,
             aliases,
+            style,
         };
         let mut found = 0;
         if let Some((updated, count)) = rewrite_source(&source, &context) {
@@ -304,6 +310,8 @@ struct FileContext<'a> {
     depth_in_package: usize,
     /// alias -> environment folder for escape requires. None leaves them alone.
     aliases: Option<&'a BTreeMap<String, String>>,
+    /// how a rewritten require is written, as a string or as an instance chain.
+    style: RequireStyle,
 }
 
 /// every .luau/.lua file under `root`, recursively.
@@ -348,18 +356,18 @@ fn rewrite_source(source: &str, context: &FileContext) -> Option<(String, usize)
     // one splice pass over the recorded ranges
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
-    for (start, end, path) in &chains {
+    for (start, end, argument) in &chains {
         output.push_str(&source[cursor..*start]);
-        output.push_str("require(\"");
-        output.push_str(path);
-        output.push_str("\")");
+        output.push_str("require(");
+        output.push_str(argument);
+        output.push(')');
         cursor = *end;
     }
     output.push_str(&source[cursor..]);
     Some((output, chains.len()))
 }
 
-/// scan pass, finds every mappable chain as (start, end, replacement path).
+/// scan pass, finds every mappable chain as (start, end, replacement argument).
 fn find_chains(source: &str, context: &FileContext) -> Vec<(usize, usize, String)> {
     let bytes = source.as_bytes();
     let mut found = Vec::new();
@@ -577,6 +585,9 @@ fn parse_chain(
     and every Parent hop renders with one less "../" */
     let init_shift = usize::from(context.is_init);
     let path = if ups <= context.depth_in_module {
+        if context.style == RequireStyle::Instance {
+            return None; // inside the module, the chain already works as written
+        }
         if ups == 0 && context.is_init {
             format!("@self/{}", names.join("/"))
         } else {
@@ -598,7 +609,49 @@ fn parse_chain(
         return None; // climbing past the alias zone, nowhere to map that
     };
 
-    Some((position, path))
+    let argument = match context.style {
+        RequireStyle::String => format!("\"{path}\""),
+        RequireStyle::Instance => instance_chain(&path),
+    };
+    Some((position, argument))
+}
+
+/** a string require path as the instance chain Roblox reads the same way:
+`./x` is `script.Parent.x`, each `../` one more `.Parent`, and `@self/x` is
+`script.x`. a name that is no identifier goes in brackets, as `[".ember"]`. */
+pub fn instance_chain(path: &str) -> String {
+    let mut chain = String::from("script");
+    let rest = match path.strip_prefix("@self/") {
+        Some(rest) => rest,
+        None => {
+            chain.push_str(".Parent");
+            path.strip_prefix("./").unwrap_or(path)
+        }
+    };
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => chain.push_str(".Parent"),
+            name if is_identifier(name) => {
+                chain.push('.');
+                chain.push_str(name);
+            }
+            name => chain.push_str(&format!("[\"{name}\"]")),
+        }
+    }
+    chain
+}
+
+/// a Luau name that can follow a dot: an identifier and no reserved word.
+fn is_identifier(name: &str) -> bool {
+    const RESERVED: [&str; 21] = [
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+        "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+    ];
+    name.bytes().all(is_ident_byte)
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && !name.is_empty()
+        && !RESERVED.contains(&name)
 }
 
 /** the package's own nested link for `alias`, `packages/<env>/<alias>`,
@@ -795,6 +848,7 @@ mod tests {
             // package with module root "src", file dir depth is one more
             depth_in_package: depth_in_module + 1,
             aliases: None,
+            style: RequireStyle::String,
         }
     }
 
@@ -881,6 +935,7 @@ mod tests {
             depth_in_module: 0,
             depth_in_package: 0,
             aliases: Some(&aliases),
+            style: RequireStyle::String,
         };
         let (out, count) = rewrite_source(source, &root_init).unwrap();
         assert_eq!(count, 1);
@@ -900,6 +955,58 @@ mod tests {
         assert_eq!(count, 1);
         assert!(out.contains("require(\"./packages/shared/Signal\")"));
         assert!(out.contains("require(script.Parent.Mystery)"));
+    }
+
+    /// #43: with instance requires, embr writes dot chains and leaves the module's own alone.
+    #[test]
+    fn instance_style_retargets_escapes_and_keeps_the_rest() {
+        let aliases = linked(&[("Signal", "roblox")]);
+        let mut init = dir_module(0, true);
+        init.aliases = Some(&aliases);
+        init.style = RequireStyle::Instance;
+
+        let (out, count) = rewrite_source(
+            "local Signal = require(script.Parent.Signal)\n\
+             local Util = require(script.Util)\n",
+            &init,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            out,
+            "local Signal = require(script.Parent.packages.roblox.Signal)\n\
+             local Util = require(script.Util)\n"
+        );
+
+        // the first pass has no aliases, so it has nothing to do at all
+        let mut first = dir_module(0, true);
+        first.style = RequireStyle::Instance;
+        assert_eq!(rewrite_source("require(script.Util)\n", &first), None);
+    }
+
+    #[test]
+    fn string_paths_read_as_instance_chains() {
+        for (path, chain) in [
+            (
+                "./.ember/acme_thing/src",
+                "script.Parent[\".ember\"].acme_thing.src",
+            ),
+            (
+                "../../../jsdotlua_luau-polyfill/src",
+                "script.Parent.Parent.Parent.Parent[\"jsdotlua_luau-polyfill\"].src",
+            ),
+            (
+                "@self/packages/roblox/Signal",
+                "script.packages.roblox.Signal",
+            ),
+            (
+                "./ReactFiberWorkLoop.new",
+                "script.Parent[\"ReactFiberWorkLoop.new\"]",
+            ),
+            ("./end", "script.Parent[\"end\"]"),
+        ] {
+            assert_eq!(instance_chain(path), chain, "{path}");
+        }
     }
 
     /** haedrix/react@17.3.10 and the rest of jsdotlua's React, verbatim. they
@@ -1003,6 +1110,7 @@ mod tests {
             depth_in_module: 0,
             depth_in_package: 0,
             aliases: Some(&aliases),
+            style: RequireStyle::String,
         };
         assert_eq!(
             escaped_alias("./Charm", &root_init).as_deref(),

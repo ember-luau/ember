@@ -3,7 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::progress::{Progress, Task};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
-use crate::project::manifest::{self, Environment, Language, Manifest, Tool};
+use crate::project::manifest::{self, Environment, Language, Manifest, RequireStyle, Tool};
 use crate::project::package;
 use crate::project::requires;
 use crate::project::rojo;
@@ -400,6 +400,7 @@ fn install_project(
                 context: package.context(),
                 in_place,
                 redirects: package.redirects.clone(),
+                requires: manifest.require_style(package.context()),
             }
         })
         .collect();
@@ -1249,8 +1250,11 @@ fn install_one(
             like require(script.Parent.X), wally stuff especially but ports
             published to pesde or our index too. rewrite what we can into
             string requires so they work without an instance tree. string
-            require packages come through unchanged */
-            requires::rewrite_instance_requires(&storage, &entry)?;
+            require packages come through unchanged. a project that asks
+            for instance requires keeps them as the package wrote them */
+            if manifest.require_style(job.context) == RequireStyle::String {
+                requires::rewrite_instance_requires(&storage, &entry)?;
+            }
             let types = link_types(&storage, &entry, &job.name, &mut warner(progress));
             (Some(entry), types)
         }
@@ -1295,6 +1299,7 @@ fn write_registry_link(
                     &format!("{up}/.ember/{folder}"),
                     entry,
                     &extracted.types,
+                    manifest.require_style(job.context),
                 ),
             )?;
         }
@@ -1339,7 +1344,12 @@ fn link_workspace_member(
             let exports = link_types(member_dir, &entry, &job.name, &mut warner(progress));
             fs::write(
                 &link_path,
-                package::link_contents_at(&root, &entry, &exports),
+                package::link_contents_at(
+                    &root,
+                    &entry,
+                    &exports,
+                    manifest.require_style(job.context),
+                ),
             )?;
         }
         (_, None) => warn_no_entry(&job.name, progress),
@@ -1387,6 +1397,8 @@ struct StoredPackage {
     redirects: BTreeMap<String, String>,
     /// the module a link to this package points at, see [`entry_for`]. None = nothing here to link.
     entry: Option<String>,
+    /// how its nested links and rewritten requires are written, from its context
+    requires: RequireStyle,
 }
 
 /** link files inside a stored package for its own declared dependencies,
@@ -1490,7 +1502,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             let link_path = link_dir.join(format!("{alias}.luau"));
             match fs::write(
                 &link_path,
-                package::link_contents_at(&root, &entry, &exports),
+                package::link_contents_at(&root, &entry, &exports, package.requires),
             ) {
                 /* only now is the alias safe to retarget escape requires
                 at. rewriting toward a link that failed to write would
@@ -1517,9 +1529,12 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             couldn't map on the workers since dependency environments weren't
             known yet, now the nested links are decided so retarget them at
             packages/<env>/<alias> */
-            if let Err(error) =
-                requires::rewrite_escape_requires(&package.storage, &entry, &escape_aliases)
-            {
+            if let Err(error) = requires::rewrite_escape_requires(
+                &package.storage,
+                &entry,
+                &escape_aliases,
+                package.requires,
+            ) {
                 warn(format!(
                     "warning: could not rewrite requires in {} ({error})",
                     package.name
@@ -2765,6 +2780,7 @@ mod tests {
             context,
             in_place: false,
             redirects: BTreeMap::new(),
+            requires: RequireStyle::String,
         }
     }
 
@@ -3165,6 +3181,7 @@ mod tests {
                 context: Environment::Roblox,
                 in_place: true,
                 redirects: BTreeMap::new(),
+                requires: RequireStyle::String,
             },
             stored("acme/extras", consumer.clone(), Environment::Roblox),
         ];
