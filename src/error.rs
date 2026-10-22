@@ -309,6 +309,15 @@ pub enum Error {
     #[error("Failed to fetch index {url}: {reason}")]
     IndexFetch { url: String, reason: String },
 
+    #[error(
+        "The host of index {url} failed {attempts} times with a server error or a stalled transfer ({reason}); it may be down, so try again later"
+    )]
+    IndexUnavailable {
+        url: String,
+        attempts: u32,
+        reason: String,
+    },
+
     #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,
 
