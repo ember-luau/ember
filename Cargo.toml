@@ -20,6 +20,11 @@ categories = ["command-line-utilities", "development-tools"]
 # dropped by cargo already.
 exclude = [".github/", "scripts/", "CLAUDE.md"]
 
+# the library is what the Alloy CLI links for alloy add, install, and publish
+[lib]
+name = "embr"
+path = "src/lib.rs"
+
 [[bin]]
 name = "embr"
 path = "src/main.rs"

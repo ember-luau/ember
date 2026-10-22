@@ -1,15 +1,6 @@
-mod art;
-mod commands;
-mod error;
-mod net;
-mod project;
-mod registry;
-mod sys;
-mod tools;
-mod ui;
-
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::self_cmd::SelfCommand;
+use embr::{art, commands, project, tools, ui};
 
 #[derive(Parser, Debug)]
 #[command(name = "embr", bin_name = "embr", version, about, styles = ui::help_styles())]
