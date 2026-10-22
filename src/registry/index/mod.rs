@@ -183,6 +183,19 @@ impl Index {
             ),
         }
     }
+
+    /** every entry of `name`, yanked ones included, and the package-wide
+    deprecation reason. it reads pesde-format indices only, which the ember
+    index is. */
+    pub fn read(&self, name: &str) -> Result<(Vec<pesde::Candidate>, Option<String>), Error> {
+        match &self.kind {
+            Kind::Pesde(_) => pesde::read(&self.root, &self.url, name),
+            Kind::Wally(_) => Err(Error::IndexFetch {
+                url: self.url.clone(),
+                reason: "a wally index lists no versions this way".to_string(),
+            }),
+        }
+    }
 }
 
 /** Downloads and extracts a resolved package into `dest`. All downloads are

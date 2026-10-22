@@ -29,16 +29,17 @@ pub fn load_config(root: &Path) -> Result<Config, Error> {
     )?)?)
 }
 
-struct Candidate {
-    version: semver::Version,
+/// one entry of a package file: a version, published for one target.
+pub struct Candidate {
+    pub version: semver::Version,
     /** Raw target string like "luau" or "roblox", from the entry key or the
     entry's own target table. Fills {PACKAGE_TARGET} in download URLs. */
-    target: Option<String>,
-    environment: Option<Environment>,
-    language: Language,
-    yanked: bool,
-    deprecated: Option<String>,
-    entry: Value,
+    pub target: Option<String>,
+    pub environment: Option<Environment>,
+    pub language: Language,
+    pub yanked: bool,
+    pub deprecated: Option<String>,
+    pub entry: Value,
 }
 
 pub fn resolve(
@@ -50,6 +51,60 @@ pub fn resolve(
     prefer_environment: Option<Environment>,
     pinned: &[semver::Version],
 ) -> Result<ResolvedPackage, Error> {
+    let (candidates, package_deprecated) = read(root, index_url, name)?;
+    /* cargo's rule: a yanked version stays out of fresh picks, but a
+    lockfile that already pins it keeps installing it. pesde writes the
+    same `yanked = true`, so its own yanks count too. */
+    let candidates: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|c| req.matches(&c.version) && (!c.yanked || pinned.contains(&c.version)))
+        .collect();
+
+    let Some(best_version) = candidates.iter().map(|c| &c.version).max().cloned() else {
+        return Err(Error::NoMatchingVersion {
+            name: name.to_string(),
+            req: req.to_string(),
+        });
+    };
+
+    /* Among the best version's targets, prefer the one matching the
+    project's environment, otherwise take the first. */
+    let mut same_version: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|c| c.version == best_version)
+        .collect();
+    let picked = prefer_environment
+        .and_then(|preferred| {
+            same_version
+                .iter()
+                .position(|c| c.environment == Some(preferred))
+        })
+        .unwrap_or(0);
+    let candidate = same_version.swap_remove(picked);
+
+    let dependencies = parse_dependencies(&candidate.entry, index_url)?;
+    let source = download_source(config, index_url, name, &candidate)?;
+
+    Ok(ResolvedPackage {
+        version: candidate.version,
+        environment: candidate.environment,
+        language: candidate.language,
+        yanked: candidate.yanked,
+        deprecated: candidate.deprecated,
+        package_deprecated,
+        dependencies,
+        source,
+    })
+}
+
+/** every entry of `name` that this embr can read, yanked ones included,
+in file order, plus the package-wide `[meta] deprecated` reason. resolve
+picks from these, and `embr mcp` lists them. */
+pub fn read(
+    root: &Path,
+    index_url: &str,
+    name: &str,
+) -> Result<(Vec<Candidate>, Option<String>), Error> {
     let (scope, package) = split_package_name(name)?;
     let path = root.join(scope).join(package);
     if !path.exists() {
@@ -90,9 +145,6 @@ pub fn resolve(
         let Ok(version) = semver::Version::parse(version_part) else {
             continue; // not a version entry, like a metadata table
         };
-        if !req.matches(&version) {
-            continue;
-        }
 
         /* The entry's own target is authoritative, a table with an
         `environment` for pesde or a bare string for embr API entries. The
@@ -107,13 +159,7 @@ pub fn resolve(
         let Ok(environment) = target.map(parse_environment).transpose() else {
             continue; // published for a target embr doesn't support
         };
-        /* cargo's rule: a yanked version stays out of fresh picks, but a
-        lockfile that already pins it keeps installing it. pesde writes
-        the same `yanked = true`, so its own yanks count too. */
         let yanked = entry.get("yanked").and_then(Value::as_bool) == Some(true);
-        if yanked && !pinned.contains(&version) {
-            continue;
-        }
         let language = match entry.get("language").and_then(Value::as_str) {
             None | Some("luau") => Language::Luau,
             Some("alloy") => Language::Alloy,
@@ -133,45 +179,11 @@ pub fn resolve(
         });
     }
 
-    let Some(best_version) = candidates.iter().map(|c| &c.version).max().cloned() else {
-        return Err(Error::NoMatchingVersion {
-            name: name.to_string(),
-            req: req.to_string(),
-        });
-    };
-
-    /* Among the best version's targets, prefer the one matching the
-    project's environment, otherwise take the first. */
-    let mut same_version: Vec<Candidate> = candidates
-        .into_iter()
-        .filter(|c| c.version == best_version)
-        .collect();
-    let picked = prefer_environment
-        .and_then(|preferred| {
-            same_version
-                .iter()
-                .position(|c| c.environment == Some(preferred))
-        })
-        .unwrap_or(0);
-    let candidate = same_version.swap_remove(picked);
-
-    let dependencies = parse_dependencies(&candidate.entry, index_url)?;
-    let source = download_source(config, index_url, name, &candidate)?;
-
-    Ok(ResolvedPackage {
-        version: candidate.version,
-        environment: candidate.environment,
-        language: candidate.language,
-        yanked: candidate.yanked,
-        deprecated: candidate.deprecated,
-        package_deprecated,
-        dependencies,
-        source,
-    })
+    Ok((candidates, package_deprecated))
 }
 
 /// Accepts both embr environment names and pesde's, "roblox" -> shared and so on.
-fn parse_environment(environment: &str) -> Result<Environment, Error> {
+pub(crate) fn parse_environment(environment: &str) -> Result<Environment, Error> {
     Environment::from_embr(environment).or_else(|_| Environment::from_pesde(environment))
 }
 
@@ -219,7 +231,10 @@ fn download_source(
     Ok(DownloadSource::TarGz { url })
 }
 
-fn parse_dependencies(entry: &Value, index_url: &str) -> Result<Vec<TransitiveDependency>, Error> {
+pub fn parse_dependencies(
+    entry: &Value,
+    index_url: &str,
+) -> Result<Vec<TransitiveDependency>, Error> {
     let Some(Value::Table(dependencies)) = entry.get("dependencies") else {
         return Ok(Vec::new());
     };

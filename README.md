@@ -80,6 +80,40 @@ hands your terminal straight to it — nothing is added to any manifest. Names
 pinned under `[tools]` run their pinned version; other bare names come from
 embr's shorthand list; anything else is `owner/repo`.
 
+## `embr mcp`: package search for coding agents
+
+`embr mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio. A coding agent uses it to find ember packages. The server
+only reads. It does not change files, install packages, or publish.
+
+It gives the agent two tools:
+
+- `search_packages` finds packages by name or description. It can filter by
+  environment and language. Each result gives the latest version, the
+  download count, and the `embr add` command that installs the package.
+- `package_info` shows one package. It lists every version with its target,
+  its language, and yanked or deprecated marks. It also gives the
+  dependencies of the newest version that is not yanked.
+
+To register it with Claude Code:
+
+```sh
+claude mcp add ember -- embr mcp
+```
+
+Other clients read an `mcpServers` block like this one:
+
+```json
+{
+  "mcpServers": {
+    "ember": {
+      "command": "embr",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
 ## Docs
 
 Commands, the manifest, workspaces, publishing — everything lives at

@@ -91,6 +91,9 @@ enum Commands {
     /// Mark a package, or one version, as deprecated, with a reason
     Deprecate(commands::deprecate::DeprecateArgs),
 
+    /// Serve package search to a coding agent, as an MCP server on stdio
+    Mcp,
+
     /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
@@ -161,6 +164,11 @@ fn main() {
         Commands::Publish(args) => commands::publish::run(args),
         Commands::Yank(args) => commands::yank::run(args),
         Commands::Deprecate(args) => commands::deprecate::run(args),
+        /* the protocol owns stdout, so no "Done in" line may follow it */
+        Commands::Mcp => match commands::mcp::run() {
+            Ok(()) => return,
+            Err(err) => Err(err),
+        },
         Commands::Cache(command) => commands::cache::run(command),
         Commands::SelfManage(command) => commands::self_cmd::run(command),
         Commands::Tool(command) => commands::tool::run(command),
