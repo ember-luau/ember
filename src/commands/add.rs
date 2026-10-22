@@ -26,6 +26,10 @@ pub struct AddArgs {
     /// what a host tool lets its users install. no flag: embr sets none
     #[arg(skip)]
     pub allow: Option<crate::registry::resolver::Allow>,
+    /** ask for the index when --index is absent. a host tool calls add with
+    no terminal to ask on, so it takes the default index instead */
+    #[arg(skip = true)]
+    pub prompt: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -43,7 +47,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let index_key = match args.index {
         Some(key) => Some(key),
-        None => prompt_index_key(&manifest)?,
+        None if args.prompt => prompt_index_key(&manifest)?,
+        None => None,
     };
     let index_url = manifest.index_url(index_key.as_deref())?.to_string();
 

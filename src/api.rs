@@ -23,6 +23,7 @@ pub fn add(package: &str, version: Option<&str>, allow: Option<Allow>) -> Result
         alias: None,
         refresh: false,
         allow,
+        prompt: false,
     })
 }
 
