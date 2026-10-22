@@ -464,7 +464,7 @@ fn configure_settings(path: &Path) -> Result<Association, Error> {
         String::from("{}\n")
     };
 
-    let association = upsert_association(&text).map_err(&settings_error)?;
+    let association = upsert_association(&text).map_err(settings_error)?;
     match &association {
         Association::Current => {}
         Association::Added(new_text) | Association::Updated { text: new_text, .. } => {
