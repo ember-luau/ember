@@ -632,11 +632,12 @@ fn fast_path(
         });
     }
 
-    if lock
-        .packages
-        .iter()
-        .any(|package| matches!(package.source, index::DownloadSource::Workspace { .. }))
-    {
+    if lock.packages.iter().any(|package| {
+        /* a local publish can replace a version, and the lock would
+        not see it, so a local package always installs again */
+        matches!(package.source, index::DownloadSource::Workspace { .. })
+            || package.index == crate::registry::local::NAME
+    }) {
         return Ok(FastPath::Full);
     }
     let environments: BTreeSet<Environment> = lock

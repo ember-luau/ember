@@ -123,6 +123,33 @@ The first target is the project's own. `embr add` and `embr install` use
 it to pick a target of each dependency. They prefer the same environment
 and language, then the same environment in plain Luau.
 
+## Local packages
+
+A local package is a package that only this computer can install. Use it
+for a library that you use in more than one of your projects but do not
+publish.
+
+```sh
+cd my-lib && embr publish --local    # no login, no upload
+cd my-game && embr add my-lib        # a name with no scope is a local package
+embr install
+```
+
+- `embr publish --local` packs the same archive as `embr publish`, with
+  each target, `--target` and the build. It writes the archive and its index
+  entry to `~/.ember/local`.
+- `embr add my-lib` finds the package by its name in every scope. If two
+  scopes have that name, use `embr add me/my-lib --index local`.
+- The dependency is `{ name = "me/my-lib", version = "^", index = "local" }`.
+  The index `local` needs no `[indices]` entry.
+- Publish the same version again after a change. The next `embr install`
+  installs the new archive.
+- ember's index stays the default. To make `local` the default for this
+  computer, run `embr self default-index local`.
+
+`embr yank` and `embr deprecate` change the registry only. They do not
+change a local package.
+
 ## `embr mcp`: package search for coding agents
 
 `embr mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)

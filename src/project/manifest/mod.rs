@@ -1,6 +1,7 @@
 pub mod edit;
 
 use crate::error::Error;
+use crate::registry::local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -947,6 +948,8 @@ impl Manifest {
                 .indices
                 .get(key)
                 .map(String::as_str)
+                // the local registry needs no [indices] entry
+                .or((key == local::NAME).then_some(local::NAME))
                 .ok_or_else(|| Error::UnknownIndex(key.to_string())),
         }
     }

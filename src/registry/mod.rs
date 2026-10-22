@@ -9,5 +9,6 @@ sends to that API, see `net::registry`.
 */
 
 pub mod index;
+pub mod local;
 pub mod pack;
 pub mod resolver;

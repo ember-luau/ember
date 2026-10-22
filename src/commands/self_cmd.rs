@@ -23,7 +23,7 @@ pub enum SelfCommand {
     Code,
     /// Show or set the index a dependency uses when ember.toml names none
     DefaultIndex {
-        /// ember, wally, pesde, or an index URL. Omit it to print the current one
+        /// ember, local, wally, pesde, or an index URL. Omit it to print the current one
         index: Option<String>,
         /// Go back to ember's own index
         #[arg(long, conflicts_with = "index")]

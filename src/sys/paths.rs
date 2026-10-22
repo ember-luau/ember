@@ -81,6 +81,11 @@ pub fn index_cache_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("index-cache"))
 }
 
+/// ~/.ember/local, the registry that `embr publish --local` writes.
+pub fn local_dir() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("local"))
+}
+
 /// ~/.ember/archive-cache, downloaded package archives. `embr cache clean` deletes it.
 pub fn archive_cache_root() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("archive-cache"))

@@ -4,6 +4,7 @@ pub mod wally;
 use crate::error::Error;
 use crate::net::http;
 use crate::project::manifest::{Environment, Language};
+use crate::registry::local;
 use crate::sys::git;
 use crate::sys::hash::{fnv1a, fnv1a_parts};
 use crate::sys::paths;
@@ -122,6 +123,9 @@ impl Index {
     If the refresh fails but a cached copy exists, the stale copy is used
     with a warning. */
     pub fn open(url: &str, refresh: Refresh) -> Result<Self, Error> {
+        if url == local::NAME {
+            return Ok(Index::local_at(local::index_dir()?));
+        }
         let (root, ttl_skipped) = ensure_cached(url, refresh)?;
         let kind = if root.join("config.json").exists() {
             Kind::Wally(wally::load_config(&root)?)
@@ -142,6 +146,20 @@ impl Index {
             kind,
             ttl_skipped,
         })
+    }
+
+    /** the local registry with its index files in `root`. it is a folder,
+    not a git clone, so there is nothing to refresh. */
+    pub(crate) fn local_at(root: PathBuf) -> Self {
+        Index {
+            url: local::NAME.to_string(),
+            root,
+            kind: Kind::Pesde(pesde::Config {
+                api: None,
+                github_oauth_id: None,
+            }),
+            ttl_skipped: false,
+        }
     }
 
     /** whether a requested refresh was skipped because the cache was still
@@ -282,6 +300,12 @@ fn fetch_archive(
     cache: CachePolicy,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(Vec<u8>, bool), Error> {
+    if let Some(bytes) = local::read_archive(url) {
+        let bytes = bytes?;
+        let size = bytes.len() as u64;
+        on_bytes(size, Some(size));
+        return Ok((bytes, false));
+    }
     let entry = archive_entry(url);
 
     if cache == CachePolicy::Use

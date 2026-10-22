@@ -3,13 +3,14 @@ use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{Manifest, parse_version_req, split_package_name};
 use crate::registry::index::{Index, Refresh};
+use crate::registry::local;
 use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Package to add, as scope/name
+    /// Package to add, as scope/name, or a bare name for a package published with --local
     pub package: String,
     /// Version requirement, defaults to "^" meaning latest
     #[arg(long)]
@@ -37,7 +38,15 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let lifecycle = Lifecycle::of(&manifest, hooks::ADD);
     lifecycle.before()?;
 
-    let name = args.package.to_lowercase();
+    /* ember names always carry a scope, so a bare name can only mean a
+    package that `embr publish --local` wrote */
+    let is_local =
+        !args.package.contains('/') && args.index.as_deref().is_none_or(|key| key == local::NAME);
+    let name = if is_local {
+        local::find(&args.package)?
+    } else {
+        args.package.to_lowercase()
+    };
     let (_, short_name) = split_package_name(&name)?;
     let alias = match args.alias {
         Some(alias) => alias,
@@ -48,6 +57,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let index_key = match args.index {
         Some(key) => Some(key),
+        None if is_local => Some(local::NAME.to_string()),
         None => prompt_index_key(&manifest)?,
     };
     let index_url = manifest.index_url(index_key.as_deref())?.to_string();
@@ -123,13 +133,16 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
 /** asks which index to search. empty input means the default index,
 the `default` key under [indices] if set, else embr's. anything else
-has to be a key under [indices]. */
+has to be a key under [indices], or `local`. */
 fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
     inquire::set_global_render_config(crate::ui::render_config());
 
-    let known_keys: Vec<String> = manifest.indices.keys().cloned().collect();
+    let mut known_keys: Vec<String> = manifest.indices.keys().cloned().collect();
+    known_keys.push(local::NAME.to_string());
     let key = inquire::Text::new("index:")
-        .with_help_message("Key from [indices] in ember.toml; press enter to use EMBR's index")
+        .with_help_message(
+            "Key from [indices] in ember.toml, or local; press enter to use EMBR's index",
+        )
         .with_validator(move |input: &str| {
             let input = input.trim();
             if input.is_empty() || known_keys.iter().any(|key| key == input) {
