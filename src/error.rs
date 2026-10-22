@@ -306,6 +306,20 @@ pub enum Error {
         path: String,
     },
 
+    #[error(
+        "Dependency key '{0}' can't name a link file; use a plain name, or the package's lowercase scope/name"
+    )]
+    LinkAliasInvalid(String),
+
+    #[error(
+        "Dependency keys '{plain}' and '{scoped}' collide in the {context} tree: '{plain}.luau' and the '{plain}' scope folder share a name; rename one of them"
+    )]
+    LinkScopeCollision {
+        plain: String,
+        scoped: String,
+        context: Environment,
+    },
+
     #[error("Failed to fetch index {url}: {reason}")]
     IndexFetch { url: String, reason: String },
 
