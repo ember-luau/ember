@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 pub use crate::error::Error;
 
-/** adds `package` (`scope/name`) to ember.toml and installs, `embr add`.
-`version` is a requirement such as `^1.2`, None meaning the latest. */
+/** adds `package` (`scope/name`) to ember.toml, `embr add`. it does not
+install; [`install`] does. `version` is a requirement such as `^1.2`, None
+meaning the latest. */
 pub fn add(package: &str, version: Option<&str>) -> Result<(), Error> {
     add::run(add::AddArgs {
         package: package.to_string(),
