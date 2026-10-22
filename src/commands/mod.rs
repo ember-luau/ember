@@ -1,4 +1,5 @@
 pub mod add;
+pub mod auth;
 pub mod cache;
 pub mod deprecate;
 pub mod execute;

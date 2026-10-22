@@ -93,6 +93,9 @@ pub enum Commands {
     /// List the dependencies with a newer release; installs nothing
     Outdated(commands::outdated::OutdatedArgs),
 
+    /// Log in to the registry, log out, or show the stored login
+    Auth(commands::auth::AuthArgs),
+
     /// Mark a published version so new installs skip it
     Yank(commands::yank::YankArgs),
 
@@ -135,6 +138,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),
         Commands::Outdated(args) => done(commands::outdated::run(args)),
+        Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
