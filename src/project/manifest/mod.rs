@@ -250,11 +250,21 @@ impl Language {
         }
     }
 
-    /** whether a project in `self` can use a package in `package`. Luau,
-    Alloy, and Loom packages ship Luau, which every project runs. Luwu reads
-    Luau too, but nothing else reads Luwu. */
+    /** whether a project in `self` takes a package in `package`: its own
+    language, or plain Luau, the base every language reads. languages do
+    not reach into each other, so a Luau project takes no Alloy package. */
     pub fn accepts(self, package: Language) -> bool {
-        package != Language::Luwu || self == Language::Luwu
+        package == self || package == Language::Luau
+    }
+
+    /// the name people write: "Luau", "Alloy", "Loom", "Luwu".
+    pub fn title(self) -> &'static str {
+        match self {
+            Language::Luau => "Luau",
+            Language::Alloy => "Alloy",
+            Language::Loom => "Loom",
+            Language::Luwu => "Luwu",
+        }
     }
 }
 
@@ -348,12 +358,14 @@ impl Environment {
     }
 
     /** whether a project in `self` can use a package published for
-    `package`. portable Luau runs anywhere, and a Roblox server runs shared
-    Roblox code, wally's realm rule. */
+    `package`. portable Luau runs anywhere, a Roblox server runs shared
+    Roblox code (wally's realm rule), and Lune runs Roblox code through
+    its `@lune/roblox` DOM. */
     pub fn accepts(self, package: Environment) -> bool {
         self == package
             || package == Environment::Luau
-            || (self == Environment::Server && package == Environment::Roblox)
+            || (matches!(self, Environment::Server | Environment::Lune)
+                && package == Environment::Roblox)
     }
 }
 
@@ -1828,12 +1840,15 @@ mod tests {
         assert!(Seal.accepts(Luau));
         assert!(Server.accepts(Roblox));
         // nothing else does
+        // Lune runs Roblox code through its DOM
+        assert!(Lune.accepts(Roblox));
+        assert!(!Lune.accepts(Server));
+        assert!(!Lute.accepts(Roblox));
         assert!(!Roblox.accepts(Server));
         assert!(!Roblox.accepts(Lune));
         assert!(!Luau.accepts(Lune));
         assert!(!Seal.accepts(Lute));
 
-        // Alloy and Loom ship Luau, so only Luwu needs a project of its own
         let all = [
             Language::Luau,
             Language::Alloy,
@@ -1841,11 +1856,14 @@ mod tests {
             Language::Luwu,
         ];
         for project in all {
-            assert!(project.accepts(Language::Luau));
-            assert!(project.accepts(Language::Alloy));
-            assert!(project.accepts(Language::Loom));
-            // only a Luwu project runs Luwu
-            assert_eq!(project.accepts(Language::Luwu), project == Language::Luwu);
+            for package in all {
+                // its own language, or plain Luau, the base every language reads
+                assert_eq!(
+                    project.accepts(package),
+                    package == project || package == Language::Luau,
+                    "{project} taking {package}"
+                );
+            }
         }
     }
 }

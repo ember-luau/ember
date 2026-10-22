@@ -70,10 +70,10 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("{who} installs {summary}; {package} is {what}")]
+    #[error("This {project} takes {takes}; {package} is {what}")]
     NotAllowed {
-        who: &'static str,
-        summary: &'static str,
+        project: String,
+        takes: String,
         package: String,
         what: String,
     },

@@ -65,7 +65,11 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         Err(error) => return Err(error),
     };
     if let Some(allow) = crate::registry::resolver::Allow::for_project(&manifest)
-        && !allow.admits(package.language, package.environment)
+        && !allow.admits(
+            package.language,
+            package.environment,
+            Some(allow.environment),
+        )
     {
         return Err(allow.refusal(
             format!("{name}@{}", package.version),
