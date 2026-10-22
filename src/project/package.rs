@@ -874,7 +874,13 @@ pub fn flatten_single_dir(dir: &Path) -> Result<(), Error> {
 fn toml_string(dir: &Path, file: &str, keys: &[&str]) -> Option<String> {
     let mut value: toml::Value = fs::read_to_string(dir.join(file)).ok()?.parse().ok()?;
     for key in keys {
-        value = value.get(key)?.clone();
+        value = match value.get(key)? {
+            // `[[target]]`: the first table is the project's own
+            toml::Value::Array(tables) if tables.first().is_some_and(toml::Value::is_table) => {
+                tables[0].clone()
+            }
+            found => found.clone(),
+        };
     }
     value.as_str().map(str::to_string)
 }
@@ -919,6 +925,17 @@ mod tests {
         let embr = base.join("embr");
         write_package(&embr, "ember.toml", "[target]\nenvironment = \"lune\"");
         assert_eq!(environment(&embr), Some(Environment::Lune));
+
+        // a workspace member with several targets reads as its first one
+        let several = base.join("several");
+        write_package(
+            &several,
+            "ember.toml",
+            "[[target]]\nenvironment = \"zune\"\nmain = \"src/init.luau\"\n\n\
+             [[target]]\nenvironment = \"zune\"\nlanguage = \"alloy\"\nmain = \"out/init.luau\"\n",
+        );
+        assert_eq!(environment(&several), Some(Environment::Zune));
+        assert_eq!(entry_point(&several).as_deref(), Some("src"));
 
         let pesde = base.join("pesde");
         write_package(&pesde, "pesde.toml", "[target]\nenvironment = \"roblox\"");

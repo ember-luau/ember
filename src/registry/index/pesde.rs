@@ -32,8 +32,9 @@ pub fn load_config(root: &Path) -> Result<Config, Error> {
 /// one entry of a package file: a version, published for one target.
 pub struct Candidate {
     pub version: semver::Version,
-    /** Raw target string like "luau" or "roblox", from the entry key or the
-    entry's own target table. Fills {PACKAGE_TARGET} in download URLs. */
+    /** Raw target ID like "luau", "roblox", or "roblox-alloy", from the
+    entry key, else from the entry's own target. Fills {PACKAGE_TARGET} in
+    download URLs. */
     pub target: Option<String>,
     pub environment: Option<Environment>,
     pub language: Language,
@@ -42,13 +43,16 @@ pub struct Candidate {
     pub entry: Value,
 }
 
+/** the highest version of `name` that `req` matches, and of that version
+the target that suits `prefer`, a project's environment and language, see
+[`preferred`]. */
 pub fn resolve(
     root: &Path,
     index_url: &str,
     config: &Config,
     name: &str,
     req: &semver::VersionReq,
-    prefer_environment: Option<Environment>,
+    prefer: Option<(Environment, Language)>,
     pinned: &[semver::Version],
 ) -> Result<ResolvedPackage, Error> {
     let (candidates, package_deprecated) = read(root, index_url, name)?;
@@ -67,18 +71,12 @@ pub fn resolve(
         });
     };
 
-    /* Among the best version's targets, prefer the one matching the
-    project's environment, otherwise take the first. */
     let mut same_version: Vec<Candidate> = candidates
         .into_iter()
         .filter(|c| c.version == best_version)
         .collect();
-    let picked = prefer_environment
-        .and_then(|preferred| {
-            same_version
-                .iter()
-                .position(|c| c.environment == Some(preferred))
-        })
+    let picked = prefer
+        .and_then(|(environment, language)| preferred(&same_version, environment, language))
         .unwrap_or(0);
     let candidate = same_version.swap_remove(picked);
 
@@ -95,6 +93,32 @@ pub fn resolve(
         dependencies,
         source,
     })
+}
+
+/** which of one version's `targets` a project in `environment` written in
+`language` takes. the order of preference is the exact language, then
+plain Luau, then any language that `language` accepts, each in
+`environment`. None leaves the choice to the caller. */
+fn preferred(targets: &[Candidate], environment: Environment, language: Language) -> Option<usize> {
+    let rank = |candidate: &Candidate| {
+        if candidate.environment != Some(environment) {
+            None
+        } else if candidate.language == language {
+            Some(0)
+        } else if candidate.language == Language::Luau {
+            Some(1)
+        } else if language.accepts(candidate.language) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    targets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| rank(candidate).map(|rank| (rank, index)))
+        .min()
+        .map(|(_, index)| index)
 }
 
 /** every entry of `name` that this embr can read, yanked ones included,
@@ -117,7 +141,8 @@ pub fn read(
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
     /* Newer pesde files nest entries under an "entries" table with sibling
     metadata like `meta`, older ones put them at the top level. Keys are
-    "<version> <target>", the target part optional in embr indices. */
+    "<version> <target>", the target part optional in embr indices. A target
+    is "<environment>" for Luau, else "<environment>-<language>". */
     let entries = match file.get("entries") {
         Some(Value::Table(entries)) => entries,
         _ => file.as_table().ok_or_else(|| Error::PackageNotFound {
@@ -146,31 +171,39 @@ pub fn read(
             continue; // not a version entry, like a metadata table
         };
 
+        /* pesde environments use `_`, never `-`, so the first `-` of a
+        key's target ends the environment */
+        let (key_environment, key_language) = match key_target {
+            Some(target) => match target.split_once('-') {
+                Some((environment, language)) => (Some(environment), Some(language)),
+                None => (Some(target), None),
+            },
+            None => (None, None),
+        };
         /* The entry's own target is authoritative, a table with an
         `environment` for pesde or a bare string for embr API entries. The
         key's target part covers entries that don't carry one. */
-        let target = entry
-            .get("target")
-            .and_then(|target| match target {
-                Value::String(target) => Some(target.as_str()),
-                table => table.get("environment").and_then(Value::as_str),
-            })
-            .or(key_target);
-        let Ok(environment) = target.map(parse_environment).transpose() else {
+        let entry_target = entry.get("target").and_then(|target| match target {
+            Value::String(target) => Some(target.as_str()),
+            table => table.get("environment").and_then(Value::as_str),
+        });
+        let environment = entry_target.or(key_environment);
+        let Ok(environment) = environment.map(parse_environment).transpose() else {
             continue; // published for a target embr doesn't support
         };
         let yanked = entry.get("yanked").and_then(Value::as_bool) == Some(true);
-        let language = match entry.get("language").and_then(Value::as_str) {
-            None | Some("luau") => Language::Luau,
-            Some("alloy") => Language::Alloy,
-            Some("loom") => Language::Loom,
-            Some("luwu") => Language::Luwu,
-            Some(_) => continue, // a language this embr does not know
+        let language = entry
+            .get("language")
+            .and_then(Value::as_str)
+            .or(key_language)
+            .map_or(Some(Language::Luau), Language::parse);
+        let Some(language) = language else {
+            continue; // a language this embr does not know
         };
 
         candidates.push(Candidate {
             version,
-            target: target.map(str::to_string),
+            target: key_target.or(entry_target).map(str::to_string),
             environment,
             language,
             yanked,
@@ -640,7 +673,7 @@ mod tests {
             &config,
             "scope/multi",
             &semver::VersionReq::STAR,
-            Some(Environment::Lune),
+            Some((Environment::Lune, Language::Luau)),
             &[],
         )
         .unwrap();
@@ -729,6 +762,183 @@ mod tests {
         // a language this embr does not know is skipped like an unknown target
         assert_eq!(resolved.version, semver::Version::new(0, 1, 0));
         assert_eq!(resolved.language, Language::Alloy);
+    }
+
+    /** a package file with one entry for each target ID, the shape the
+    registry writes: `target` holds the environment, `language` appears
+    only when it is not luau, and each download is named after its ID. */
+    fn targets_file(version: &str, ids: &[&str]) -> String {
+        let mut text = String::new();
+        for id in ids {
+            let (environment, language) = id.split_once('-').unwrap_or((id, "luau"));
+            text.push_str(&format!(
+                "[\"{version} {id}\"]\ntarget = \"{environment}\"\n"
+            ));
+            if language != "luau" {
+                text.push_str(&format!("language = \"{language}\"\n"));
+            }
+            text.push_str(&format!(
+                "download = \"https://cdn.example.com/{version}/{id}.tar.gz\"\n\n"
+            ));
+        }
+        text
+    }
+
+    /// the target ID that a project in `environment` written in `language` installs.
+    fn picked(
+        index: &TempIndex,
+        name: &str,
+        environment: Environment,
+        language: Language,
+    ) -> String {
+        let config = load_config(&index.root).unwrap();
+        let resolved = resolve(
+            &index.root,
+            "https://example.com/index",
+            &config,
+            name,
+            &semver::VersionReq::STAR,
+            Some((environment, language)),
+            &[],
+        )
+        .unwrap();
+        let DownloadSource::TarGz { url } = resolved.source else {
+            panic!("expected tarball source");
+        };
+        url.rsplit('/')
+            .next()
+            .unwrap()
+            .trim_end_matches(".tar.gz")
+            .to_string()
+    }
+
+    #[test]
+    fn keys_carry_the_language_after_the_environment() {
+        let index = TempIndex::new("key-language", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/multi",
+            &(targets_file("1.0.0", &["roblox", "roblox-alloy", "roblox_server-loom"])
+                // the key alone can say the language
+                + "[\"1.0.0 luau-luwu\"]\ntarget = \"luau\"\n\n"
+                // targets this embr does not know are skipped
+                + "[\"1.0.0 roblox-cobol\"]\ntarget = \"roblox\"\n\n"
+                + "[\"1.0.0 mars-alloy\"]\ntarget = \"mars\"\n\n"),
+        );
+
+        let (candidates, _) = read(&index.root, "https://example.com/index", "acme/multi").unwrap();
+        let read: Vec<(&str, Option<Environment>, Language)> = candidates
+            .iter()
+            .map(|c| (c.target.as_deref().unwrap(), c.environment, c.language))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("luau-luwu", Some(Environment::Luau), Language::Luwu),
+                ("roblox", Some(Environment::Roblox), Language::Luau),
+                ("roblox-alloy", Some(Environment::Roblox), Language::Alloy),
+                (
+                    "roblox_server-loom",
+                    Some(Environment::Server),
+                    Language::Loom
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_picks_the_target_that_fits_the_project() {
+        use Environment::{Lune, Roblox};
+        use Language::{Alloy, Luau, Luwu};
+        let index = TempIndex::new("preference", r#"github_oauth_id = "Ov23abc""#);
+        let ids = ["luau", "luau-luwu", "roblox-loom", "roblox", "roblox-alloy"];
+        index.write_package("acme/every", &targets_file("1.0.0", &ids));
+        index.write_package(
+            "acme/no-alloy",
+            &targets_file("1.0.0", &["roblox-loom", "roblox"]),
+        );
+        index.write_package(
+            "acme/loom-only",
+            &targets_file("1.0.0", &["luau", "roblox-loom"]),
+        );
+        index.write_package(
+            "acme/luwu-only",
+            &targets_file("1.0.0", &["lune", "roblox-luwu"]),
+        );
+
+        // (a) the exact environment and language
+        assert_eq!(picked(&index, "acme/every", Roblox, Alloy), "roblox-alloy");
+        assert_eq!(
+            picked(&index, "acme/every", Environment::Luau, Luwu),
+            "luau-luwu"
+        );
+        assert_eq!(picked(&index, "acme/every", Roblox, Luau), "roblox");
+        // (b) the environment in plain Luau, before another language
+        assert_eq!(picked(&index, "acme/no-alloy", Roblox, Alloy), "roblox");
+        /* (c) the environment in a language the project accepts. an Alloy
+        project accepts only Alloy and Luau, so Loom is never a pick, and
+        (d) applies */
+        assert_eq!(picked(&index, "acme/loom-only", Roblox, Alloy), "luau");
+        // (d) nothing in the environment fits, so the first entry, as before
+        assert_eq!(picked(&index, "acme/luwu-only", Roblox, Luau), "lune");
+        assert_eq!(picked(&index, "acme/loom-only", Lune, Luau), "luau");
+    }
+
+    #[test]
+    fn old_keys_still_resolve() {
+        let index = TempIndex::new("old-keys", r#"github_oauth_id = "Ov23abc""#);
+        // what the registry wrote before targets had IDs
+        index.write_package(
+            "acme/old",
+            r#"
+            ["1.0.0 shared"]
+            target = "shared"
+            download = "https://cdn.example.com/1.0.0/shared.tar.gz"
+
+            ["1.0.0 lune"]
+            target = "lune"
+            download = "https://cdn.example.com/1.0.0/lune.tar.gz"
+            "#,
+        );
+        use Environment::*;
+        assert_eq!(
+            picked(&index, "acme/old", Roblox, Language::Alloy),
+            "shared"
+        );
+        assert_eq!(picked(&index, "acme/old", Roblox, Language::Luau), "shared");
+        assert_eq!(picked(&index, "acme/old", Lune, Language::Luau), "lune");
+    }
+
+    #[test]
+    fn a_yanked_target_steps_aside_for_the_others() {
+        let index = TempIndex::new("yanked-target", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/thing",
+            &targets_file("1.0.0", &["roblox", "roblox-alloy"]).replace(
+                "language = \"alloy\"\n",
+                "language = \"alloy\"\nyanked = true\n",
+            ),
+        );
+        let config = load_config(&index.root).unwrap();
+        let pick = |pinned: &[semver::Version]| {
+            let resolved = resolve(
+                &index.root,
+                "https://example.com/index",
+                &config,
+                "acme/thing",
+                &semver::VersionReq::STAR,
+                Some((Environment::Roblox, Language::Alloy)),
+                pinned,
+            )
+            .unwrap();
+            (resolved.language, resolved.yanked)
+        };
+        // a fresh Alloy pick takes the Luau target of the same version
+        assert_eq!(pick(&[]), (Language::Luau, false));
+        // a lockfile that pins the version keeps the yanked target, flagged
+        assert_eq!(
+            pick(&[semver::Version::new(1, 0, 0)]),
+            (Language::Alloy, true)
+        );
     }
 
     #[test]

@@ -107,6 +107,12 @@ pub enum Error {
     #[error("Publishing failed for {}: {}", ui_plural_packages(.0.len()), .0.join(", "))]
     WorkspacePublishFailed(Vec<String>),
 
+    #[error("Publishing failed for {} target{}: {}", .0.len(), if .0.len() == 1 { "" } else { "s" }, .0.join(", "))]
+    TargetPublishFailed(Vec<String>),
+
+    #[error("No target has the ID '{id}'; the targets in ember.toml are {valid}")]
+    UnknownTarget { id: String, valid: String },
+
     #[error("Invalid [patches] key '{key}': {reason}")]
     PatchKeyInvalid { key: String, reason: String },
 

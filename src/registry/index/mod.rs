@@ -162,25 +162,20 @@ impl Index {
     }
 
     /** Finds the highest version of `name` matching `req`. For pesde
-    indices, `prefer_environment` picks between a version's targets. */
+    indices, `prefer`, a project's environment and language, picks between
+    a version's targets, see [`pesde::resolve`]. */
     pub fn resolve(
         &self,
         name: &str,
         req: &semver::VersionReq,
-        prefer_environment: Option<Environment>,
+        prefer: Option<(Environment, Language)>,
         pinned: &[semver::Version],
     ) -> Result<ResolvedPackage, Error> {
         match &self.kind {
             Kind::Wally(config) => wally::resolve(&self.root, &self.url, config, name, req),
-            Kind::Pesde(config) => pesde::resolve(
-                &self.root,
-                &self.url,
-                config,
-                name,
-                req,
-                prefer_environment,
-                pinned,
-            ),
+            Kind::Pesde(config) => {
+                pesde::resolve(&self.root, &self.url, config, name, req, prefer, pinned)
+            }
         }
     }
 
