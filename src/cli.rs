@@ -107,6 +107,20 @@ pub enum Commands {
     SelfManage(SelfCommand),
 }
 
+/** `embr build:prod` is `embr run build:prod`. clap matches a subcommand by
+its whole name, so a shortcut, a colon, and more gets its `run` here, before
+the parse (#52). `args` starts with the program name. */
+pub fn expand_shortcut(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    if args
+        .get(1)
+        .and_then(|word| word.to_str())
+        .is_some_and(|word| word.contains(':') && commands::run::is_shortcut(word))
+    {
+        args.insert(1, "run".into());
+    }
+    args
+}
+
 /// how a command ended, which decides what its caller prints after it.
 pub enum Outcome {
     /// it finished, and the caller may say how long it took
