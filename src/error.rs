@@ -294,7 +294,7 @@ pub enum Error {
     },
 
     #[error(
-        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'server', or 'lune'"
+        "Invalid target '{target}' for dependency '{alias}': use an environment name, such as 'roblox', 'roblox_server', or 'lune'"
     )]
     DependencyTargetInvalid { alias: String, target: String },
 

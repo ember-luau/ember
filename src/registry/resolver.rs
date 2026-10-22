@@ -958,7 +958,7 @@ mod tests {
                     "{}@{} {}/{}",
                     install.name,
                     install.version,
-                    install.context,
+                    install.context.dir_name(),
                     install.link.as_deref().unwrap_or("-")
                 )
             })
@@ -1643,7 +1643,7 @@ mod tests {
             server
                 .refusal("acme/x@1.0.0".to_string(), Loom, Some(Environment::Roblox))
                 .to_string(),
-            "This Luau project for server takes Luau packages for server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
+            "This Luau project for roblox_server takes Luau packages for roblox_server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
         );
     }
 

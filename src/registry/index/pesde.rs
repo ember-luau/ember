@@ -897,6 +897,10 @@ mod tests {
             ["1.0.0 lune"]
             target = "lune"
             download = "https://cdn.example.com/1.0.0/lune.tar.gz"
+
+            ["1.0.0 server"]
+            target = "server"
+            download = "https://cdn.example.com/1.0.0/server.tar.gz"
             "#,
         );
         use Environment::*;
@@ -906,6 +910,8 @@ mod tests {
         );
         assert_eq!(picked(&index, "acme/old", Roblox, Language::Luau), "shared");
         assert_eq!(picked(&index, "acme/old", Lune, Language::Luau), "lune");
+        // `server` is the old name of roblox_server
+        assert_eq!(picked(&index, "acme/old", Server, Language::Luau), "server");
     }
 
     #[test]

@@ -355,7 +355,10 @@ pub enum Environment {
     since every already-published manifest and lockfile says it. */
     #[serde(alias = "shared")]
     Roblox,
-    /// Roblox server-side only
+    /** Roblox server-side only. it takes pesde's name, `roblox_server`, and
+    reads `server`, the name before, everywhere. its packages folder keeps the
+    name `server`, see [`Environment::dir_name`]. */
+    #[serde(rename = "roblox_server", alias = "server")]
     Server,
     /// needs the Lune runtime
     Lune,
@@ -380,6 +383,9 @@ impl Environment {
         Environment::Zune,
     ];
 
+    /** the folder under packages/ that this environment's packages install
+    to. it differs from [`Environment::as_str`] only for `roblox_server`,
+    whose folder stays `server` so existing Rojo project paths keep working. */
     pub fn dir_name(self) -> &'static str {
         match self {
             Environment::Roblox => "roblox",
@@ -389,6 +395,14 @@ impl Environment {
             Environment::Lute => "lute",
             Environment::Seal => "seal",
             Environment::Zune => "zune",
+        }
+    }
+
+    /// the name that embr writes and prints, such as `roblox_server`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Environment::Server => "roblox_server",
+            other => other.dir_name(),
         }
     }
 
@@ -413,11 +427,12 @@ impl Environment {
         }
     }
 
-    /// parses embr's own environment names like "roblox" and "lune". `shared` is the pre-rename spelling of `roblox`.
+    /** parses embr's own environment names like "roblox" and "lune". `shared`
+    is the pre-rename spelling of `roblox`, and `server` of `roblox_server`. */
     pub fn from_embr(environment: &str) -> Result<Self, Error> {
         match environment {
             "roblox" | "shared" => Ok(Environment::Roblox),
-            "server" => Ok(Environment::Server),
+            "roblox_server" | "server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
             "luau" => Ok(Environment::Luau),
             "lute" => Ok(Environment::Lute),
@@ -441,7 +456,7 @@ impl Environment {
 
 impl fmt::Display for Environment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.dir_name())
+        f.write_str(self.as_str())
     }
 }
 
@@ -557,7 +572,7 @@ fn default_workspace_version() -> String {
 
 impl Dependency {
     /** the `target` an entry states, e.g.
-    `Chief = { name = "chief/core", version = "^", target = "server" }`.
+    `Chief = { name = "chief/core", version = "^", target = "roblox_server" }`.
 
     it overrides which environment tree a *direct* dependency installs
     under, so a package published for Roblox can be pulled into the server
@@ -1258,6 +1273,58 @@ mod tests {
             serialized.contains(r#"environment = "roblox""#),
             "{serialized}"
         );
+    }
+
+    /** `roblox_server` is pesde's name, and `server` the name before it.
+    the old name parses in every reader, embr writes only the new one, and
+    the packages folder keeps the old name so Rojo paths do not move. */
+    #[test]
+    fn server_is_still_read_as_roblox_server() {
+        assert_eq!(
+            Environment::from_embr("server").unwrap(),
+            Environment::Server
+        );
+        assert_eq!(
+            Environment::from_embr("roblox_server").unwrap(),
+            Environment::Server
+        );
+        assert_eq!(Environment::Server.to_string(), "roblox_server");
+        assert_eq!(Environment::Server.dir_name(), "server");
+
+        let old: Manifest = toml::from_str(
+            "[config]\nserver-packages-out = \"src/ServerPackages\"\n\n\
+             [target]\nenvironment = \"server\"\nlanguage = \"alloy\"\n\n\
+             [dependencies]\nChief = { name = \"chief/core\", version = \"^\", target = \"server\" }\n",
+        )
+        .unwrap();
+        let target = old.target().unwrap();
+        assert_eq!(target.environment, Environment::Server);
+        assert_eq!(target.id(), "roblox_server-alloy");
+        assert_eq!(
+            dependency_target("Chief", &old.dependencies["Chief"]).unwrap(),
+            Some(Environment::Server)
+        );
+        assert_eq!(
+            old.packages_out(Environment::Server),
+            std::path::PathBuf::from("src/ServerPackages")
+        );
+        let bare: Manifest = toml::from_str("").unwrap();
+        assert_eq!(
+            bare.packages_out(Environment::Server),
+            std::path::PathBuf::from("packages").join("server")
+        );
+
+        // a new write takes the new name, and keeps the config key
+        let written = toml::to_string(&old).unwrap();
+        assert!(
+            written.contains(r#"environment = "roblox_server""#),
+            "{written}"
+        );
+        assert!(written.contains("server-packages-out"), "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.target().unwrap().environment, Environment::Server);
+        // the fit rule is unchanged: a roblox_server project takes roblox packages
+        assert!(Environment::Server.accepts(Environment::Roblox));
     }
 
     /** [package] is only what a *publishable* package needs. a project that
@@ -2001,7 +2068,7 @@ mod tests {
         );
         for environment in Environment::ALL {
             assert_eq!(
-                Environment::from_embr(environment.dir_name()).unwrap(),
+                Environment::from_embr(environment.as_str()).unwrap(),
                 environment
             );
         }

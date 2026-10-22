@@ -117,7 +117,7 @@ fn initialize(params: &Value) -> Value {
 }
 
 fn tools() -> Value {
-    let environments: Vec<&str> = Environment::ALL.iter().map(|env| env.dir_name()).collect();
+    let environments: Vec<&str> = Environment::ALL.iter().map(|env| env.as_str()).collect();
     let languages = [
         Language::Luau,
         Language::Alloy,
@@ -145,7 +145,7 @@ fn tools() -> Value {
                         "type": "string",
                         "enum": environments,
                         "description": "Return only the packages for this environment. \
-                            roblox is Roblox code for the client or the server, and server is Roblox server code. \
+                            roblox is Roblox code for the client or the server, and roblox_server is Roblox server code. \
                             luau is portable Luau, which also runs in every other environment."
                     },
                     "language": {
