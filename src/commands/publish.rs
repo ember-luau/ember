@@ -17,10 +17,10 @@ pub struct PublishArgs {
     /// Show what would be published without uploading anything
     #[arg(long)]
     pub dry_run: bool,
-    /** the alloy binary for `language = "alloy"`. no flag: the Alloy CLI
-    sets it to itself, and `embr publish` finds `alloy` on PATH. */
+    /** the compiler of a language that builds to Luau, `alloy` say. no
+    flag: the Alloy CLI sets it to itself, and `embr publish` looks on PATH. */
     #[arg(skip)]
-    pub alloy: Option<PathBuf>,
+    pub compiler: Option<PathBuf>,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -44,9 +44,9 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     };
     let oidc_token = oidc_token.as_deref();
 
-    let alloy = args.alloy.as_deref();
+    let compiler = args.compiler.as_deref();
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, args.dry_run, oidc_token, alloy)?;
+        publish_project(manifest, args.dry_run, oidc_token, compiler)?;
         return lifecycle.after();
     }
 
@@ -57,7 +57,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, alloy) {
+    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, compiler) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -71,7 +71,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, args.dry_run, oidc_token, alloy)?;
+            publish_project(manifest, args.dry_run, oidc_token, compiler)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -95,7 +95,7 @@ fn publish_project(
     mut manifest: Manifest,
     dry_run: bool,
     oidc_token: Option<&str>,
-    alloy: Option<&Path>,
+    compiler: Option<&Path>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -140,9 +140,10 @@ fn publish_project(
     };
     /* a dry run builds too: it shows the archive a real publish would
     produce, and that archive holds the build output */
-    if language == Language::Alloy {
-        build_alloy(Path::new("."), &manifest, alloy)?;
+    if let Some(program) = language.builder() {
+        build_to_luau(Path::new("."), &manifest, program, compiler)?;
     }
+    validate_logo(Path::new("."), package.logo.as_deref())?;
     let package_name = package.name.clone();
     let (scope, name) = {
         let (scope, name) = split_package_name(&package_name)?;
@@ -334,45 +335,78 @@ pub(crate) fn oauth_client_id() -> Result<String, Error> {
         .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
-/** an Alloy package ships its sources and the Luau that `alloy build`
-writes from them, so a plain Luau project can use it. the build runs here
-and not in a hook, so a forgotten hook cannot publish stale output. */
-fn build_alloy(root: &Path, manifest: &Manifest, alloy: Option<&Path>) -> Result<(), Error> {
-    println!("Running alloy build");
-    let program = alloy.unwrap_or(Path::new("alloy"));
-    let status = std::process::Command::new(program)
+/** an Alloy or Loom package ships its sources and the Luau that the
+compiler's `build` writes from them, so a plain Luau project can use it.
+the build runs here and not in a hook, so a forgotten hook cannot publish
+stale output. `compiler` overrides the program found on PATH. */
+fn build_to_luau(
+    root: &Path,
+    manifest: &Manifest,
+    program: &'static str,
+    compiler: Option<&Path>,
+) -> Result<(), Error> {
+    println!("Running {program} build");
+    let failed = |reason: String| Error::LanguageBuild { program, reason };
+    let status = std::process::Command::new(compiler.unwrap_or(Path::new(program)))
         .arg("build")
         .current_dir(root)
         .status()
         .map_err(|error| {
-            Error::AlloyBuild(match error.kind() {
-                std::io::ErrorKind::NotFound => "the alloy command is not on PATH".to_string(),
+            failed(match error.kind() {
+                std::io::ErrorKind::NotFound => format!("the {program} command is not on PATH"),
                 _ => format!("it could not start: {error}"),
             })
         })?;
     if !status.success() {
-        return Err(Error::AlloyBuild(match status.code() {
+        return Err(failed(match status.code() {
             Some(code) => format!("it exited with status {code}"),
             None => "a signal stopped it".to_string(),
         }));
     }
 
+    let not_built = |detail: String| Error::MainNotBuilt { program, detail };
     let main = manifest
         .target
         .as_ref()
         .and_then(|target| target.main.as_deref());
     match main {
-        None => Err(Error::AlloyMainNotBuilt(
-            "ember.toml has no main".to_string(),
-        )),
-        Some(main) if !main.ends_with(".luau") => Err(Error::AlloyMainNotBuilt(format!(
-            "ember.toml says '{main}'"
-        ))),
-        Some(main) if !root.join(main).is_file() => Err(Error::AlloyMainNotBuilt(format!(
+        None => Err(not_built("ember.toml has no main".to_string())),
+        Some(main) if !main.ends_with(".luau") => {
+            Err(not_built(format!("ember.toml says '{main}'")))
+        }
+        Some(main) if !root.join(main).is_file() => Err(not_built(format!(
             "'{main}' does not exist after the build"
         ))),
         Some(_) => Ok(()),
     }
+}
+
+/** checked here so a bad logo fails before the upload. the registry checks
+the file's bytes again, this only catches the plain mistakes. */
+fn validate_logo(root: &Path, logo: Option<&str>) -> Result<(), Error> {
+    let Some(logo) = logo else {
+        return Ok(());
+    };
+    let extension = Path::new(logo)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    if !matches!(extension.as_deref(), Some("png" | "jpg" | "jpeg" | "webp")) {
+        return Err(Error::LogoInvalid(format!(
+            "'{logo}' must be a .png, .jpg, or .webp file"
+        )));
+    }
+    let size = std::fs::metadata(root.join(logo))
+        .map_err(|_| Error::LogoInvalid(format!("'{logo}' does not exist")))?
+        .len();
+    if size > registry::MAX_LOGO_BYTES {
+        return Err(Error::LogoInvalid(format!(
+            "'{logo}' is {} KiB; the registry takes at most {} KiB",
+            size.div_ceil(1024),
+            registry::MAX_LOGO_BYTES / 1024
+        )));
+    }
+    Ok(())
 }
 
 /// published packages must say where their code runs, the index entry is keyed by it.
@@ -489,8 +523,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn alloy_publishes_need_a_build_and_a_built_main() {
-        let base = std::env::temp_dir().join("embr-test-publish-alloy");
+    fn built_languages_need_a_build_and_a_built_main() {
+        let base = std::env::temp_dir().join("embr-test-publish-build");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("out")).unwrap();
         let manifest = |main: &str| -> Manifest {
@@ -499,28 +533,57 @@ mod tests {
             ))
             .unwrap()
         };
-        // `true` stands in for a build that works, `false` for one that fails
-        let builds = Some(Path::new("true"));
+        let build = |main: &str, compiler: &str| {
+            build_to_luau(&base, &manifest(main), "alloy", Some(Path::new(compiler)))
+        };
 
+        // `true` stands in for a build that works, `false` for one that fails
         assert!(matches!(
-            build_alloy(&base, &manifest("out/init.luau"), Some(Path::new("false"))),
-            Err(Error::AlloyBuild(_))
+            build("out/init.luau", "false"),
+            Err(Error::LanguageBuild { .. })
         ));
         assert!(matches!(
-            build_alloy(&base, &manifest("out/init.luau"), Some(Path::new("embr-test-no-alloy"))),
-            Err(Error::AlloyBuild(message)) if message.contains("PATH")
+            build("out/init.luau", "embr-test-no-compiler"),
+            Err(Error::LanguageBuild { reason, .. }) if reason.contains("PATH")
         ));
         // main must name built Luau, and the build must have written it
         assert!(matches!(
-            build_alloy(&base, &manifest("src/init.aly"), builds),
-            Err(Error::AlloyMainNotBuilt(_))
+            build("src/init.aly", "true"),
+            Err(Error::MainNotBuilt { .. })
         ));
         assert!(matches!(
-            build_alloy(&base, &manifest("out/init.luau"), builds),
-            Err(Error::AlloyMainNotBuilt(_))
+            build("out/init.luau", "true"),
+            Err(Error::MainNotBuilt { .. })
         ));
         fs::write(base.join("out/init.luau"), "return {}").unwrap();
-        assert!(build_alloy(&base, &manifest("out/init.luau"), builds).is_ok());
+        assert!(build("out/init.luau", "true").is_ok());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn logos_are_small_pictures_that_exist() {
+        let base = std::env::temp_dir().join("embr-test-publish-logo");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("assets")).unwrap();
+        fs::write(base.join("assets/logo.png"), [0u8; 16]).unwrap();
+        fs::write(base.join("assets/logo.svg"), "<svg/>").unwrap();
+        fs::write(
+            base.join("assets/huge.webp"),
+            vec![0u8; registry::MAX_LOGO_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        assert!(validate_logo(&base, None).is_ok());
+        assert!(validate_logo(&base, Some("assets/logo.png")).is_ok());
+        for (logo, says) in [
+            ("assets/logo.svg", ".png, .jpg, or .webp"),
+            ("assets/missing.png", "does not exist"),
+            ("assets/huge.webp", "at most 512 KiB"),
+        ] {
+            let error = validate_logo(&base, Some(logo)).unwrap_err().to_string();
+            assert!(error.contains(says), "{logo}: {error}");
+        }
 
         let _ = fs::remove_dir_all(&base);
     }

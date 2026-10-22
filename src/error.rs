@@ -51,13 +51,20 @@ pub enum Error {
     )]
     PublishTooLarge { size_mb: f64, limit_mb: u64 },
 
-    #[error("Publishing an Alloy package runs `alloy build` first, and {0}")]
-    AlloyBuild(String),
+    #[error("`{program} build` runs before publish, and {reason}")]
+    LanguageBuild {
+        program: &'static str,
+        reason: String,
+    },
 
-    #[error(
-        "An Alloy package's `main` must name the built Luau file, such as \"out/init.luau\", and {0}"
-    )]
-    AlloyMainNotBuilt(String),
+    #[error("`main` must name the Luau file that `{program} build` writes, and {detail}")]
+    MainNotBuilt {
+        program: &'static str,
+        detail: String,
+    },
+
+    #[error("[package] logo {0}")]
+    LogoInvalid(String),
 
     #[error("Index {0} does not accept publishes (its config.toml has no github_oauth_id)")]
     PublishNotSupported(String),

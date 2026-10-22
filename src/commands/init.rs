@@ -211,6 +211,7 @@ pub fn run() -> Result<(), Error> {
             authors: parse_authors(&authors_input),
             repository: non_empty(repository),
             license: Some(license.to_string()),
+            logo: None,
         }),
         target: Some(Target {
             environment: Environment::from_embr(environment)?,

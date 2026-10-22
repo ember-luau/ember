@@ -106,6 +106,7 @@ pub fn resolve(
         let language = match entry.get("language").and_then(Value::as_str) {
             None | Some("luau") => Language::Luau,
             Some("alloy") => Language::Alloy,
+            Some("loom") => Language::Loom,
             Some("luwu") => Language::Luwu,
             Some(_) => continue, // a language this embr does not know
         };

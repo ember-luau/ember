@@ -171,6 +171,10 @@ pub struct Package {
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /** a picture of the package, a .png, .jpg, or .webp file inside it. the
+    registry shows it in place of the box icon. it always ships. */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -207,15 +211,18 @@ pub struct Target {
     pub language: Language,
 }
 
-/** the language of a package's own files. Alloy builds to plain Luau, so
-an Alloy package installs wherever a Luau one does. Luwu runs only on a Luwu
-host, so its packages need a Luwu project. */
+/** the language of a package's own files. Alloy and Loom build to plain
+Luau, so their packages install wherever a Luau one does. Luwu runs only on
+a Luwu host, so its packages need a Luwu project. */
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     #[default]
     Luau,
+    /// a strict superset of Luau, built by `alloy build`
     Alloy,
+    /// a Roblox DSL, built by `loom build`
+    Loom,
     Luwu,
 }
 
@@ -228,13 +235,24 @@ impl Language {
         match self {
             Language::Luau => "luau",
             Language::Alloy => "alloy",
+            Language::Loom => "loom",
             Language::Luwu => "luwu",
         }
     }
 
-    /** whether a project in `self` can use a package in `package`. Luau and
-    Alloy packages ship Luau, which every project runs. Luwu reads Luau
-    too, but nothing else reads Luwu. */
+    /** the compiler whose `build` writes this language's Luau before a
+    publish. None for languages that ship their sources as they are. */
+    pub fn builder(self) -> Option<&'static str> {
+        match self {
+            Language::Alloy => Some("alloy"),
+            Language::Loom => Some("loom"),
+            Language::Luau | Language::Luwu => None,
+        }
+    }
+
+    /** whether a project in `self` can use a package in `package`. Luau,
+    Alloy, and Loom packages ship Luau, which every project runs. Luwu reads
+    Luau too, but nothing else reads Luwu. */
     pub fn accepts(self, package: Language) -> bool {
         package != Language::Luwu || self == Language::Luwu
     }
@@ -1815,13 +1833,19 @@ mod tests {
         assert!(!Luau.accepts(Lune));
         assert!(!Seal.accepts(Lute));
 
-        // Alloy ships Luau, so only Luwu needs a project of its own
-        for project in [Language::Luau, Language::Alloy, Language::Luwu] {
+        // Alloy and Loom ship Luau, so only Luwu needs a project of its own
+        let all = [
+            Language::Luau,
+            Language::Alloy,
+            Language::Loom,
+            Language::Luwu,
+        ];
+        for project in all {
             assert!(project.accepts(Language::Luau));
             assert!(project.accepts(Language::Alloy));
+            assert!(project.accepts(Language::Loom));
+            // only a Luwu project runs Luwu
+            assert_eq!(project.accepts(Language::Luwu), project == Language::Luwu);
         }
-        assert!(Language::Luwu.accepts(Language::Luwu));
-        assert!(!Language::Luau.accepts(Language::Luwu));
-        assert!(!Language::Alloy.accepts(Language::Luwu));
     }
 }

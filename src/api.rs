@@ -27,9 +27,9 @@ pub fn install(locked: bool) -> Result<(), Error> {
     })
 }
 
-/** publishes the package, `embr publish`. `alloy` is the binary that
-builds a `language = "alloy"` package, so the Alloy CLI passes its own
-path. None looks for `alloy` on PATH. */
-pub fn publish(dry_run: bool, alloy: Option<PathBuf>) -> Result<(), Error> {
-    publish::run(publish::PublishArgs { dry_run, alloy })
+/** publishes the package, `embr publish`. `compiler` builds a package
+whose language compiles to Luau, so the Alloy CLI passes its own path.
+None looks for the compiler on PATH. */
+pub fn publish(dry_run: bool, compiler: Option<PathBuf>) -> Result<(), Error> {
+    publish::run(publish::PublishArgs { dry_run, compiler })
 }
