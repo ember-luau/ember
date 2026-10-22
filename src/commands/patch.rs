@@ -134,6 +134,7 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
                 Path::new("."),
                 index::Refresh::Ttl,
                 &resolver::Pinned::new(),
+                None,
                 &mut warnings,
             )
         })?;

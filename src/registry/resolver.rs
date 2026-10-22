@@ -1,12 +1,56 @@
 use crate::error::Error;
 use crate::project::manifest::{
-    Dependency, Environment, Manifest, Override, dependency_target, override_paths,
+    Dependency, Environment, Language, Manifest, Override, dependency_target, override_paths,
     parse_version_req,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
+
+/** what a host tool lets its users install. embr itself sets none. the
+Alloy CLI takes Alloy packages and Roblox Luau, and nothing from the
+runtimes or the other languages. */
+#[derive(Clone, Copy, Debug)]
+pub struct Allow {
+    /// the host's command, for the error: `alloy`
+    pub host: &'static str,
+    /// what the host takes, for the error
+    pub summary: &'static str,
+    /// the languages a package may be written in
+    pub languages: &'static [Language],
+    /** the environments a plain Luau package may target. a package in
+    another allowed language passes in every environment. */
+    pub environments: &'static [Environment],
+}
+
+impl Allow {
+    pub fn admits(&self, language: Language, environment: Option<Environment>) -> bool {
+        self.languages.contains(&language)
+            && (language != Language::Luau
+                || environment.is_some_and(|environment| self.environments.contains(&environment)))
+    }
+
+    /// the refusal for `package`, a resolved `name@version`.
+    pub fn refusal(
+        &self,
+        package: String,
+        language: Language,
+        environment: Option<Environment>,
+    ) -> Error {
+        let what = match (language, environment) {
+            (Language::Luau, Some(environment)) => format!("a Luau package for {environment}"),
+            (Language::Luau, None) => "a Luau package with no environment".to_string(),
+            (language, _) => format!("a {language} package"),
+        };
+        Error::NotAllowed {
+            host: self.host,
+            summary: self.summary,
+            package,
+            what,
+        }
+    }
+}
 
 /** the versions an existing lockfile holds, by lowercase package name.
 a yanked version stays installable while it is in here. */
@@ -111,6 +155,7 @@ pub fn resolve(
     project_dir: &Path,
     refresh: Refresh,
     pinned: &Pinned,
+    allow: Option<&Allow>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let mut ttl_skipped = false;
@@ -119,6 +164,7 @@ pub fn resolve(
         project_dir,
         refresh,
         pinned,
+        allow,
         &mut ttl_skipped,
         warnings,
     ) {
@@ -134,6 +180,7 @@ pub fn resolve(
                 project_dir,
                 Refresh::Force,
                 pinned,
+                allow,
                 &mut ignored,
                 warnings,
             )
@@ -147,6 +194,7 @@ fn resolve_once(
     project_dir: &Path,
     refresh: Refresh,
     pinned: &Pinned,
+    allow: Option<&Allow>,
     ttl_skipped: &mut bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
@@ -284,6 +332,15 @@ fn resolve_once(
                 };
                 let pins = pinned.get(&name).map(Vec::as_slice).unwrap_or_default();
                 let package = index.resolve(&name, &req, preferred, pins)?;
+                if let Some(allow) = allow
+                    && !allow.admits(package.language, package.environment)
+                {
+                    return Err(allow.refusal(
+                        format!("{name}@{}", package.version),
+                        package.language,
+                        package.environment,
+                    ));
+                }
                 let direct = context.is_none() && target.is_none();
                 warn_on_fit(&name, &package, direct, manifest, warnings);
 
@@ -689,6 +746,7 @@ mod tests {
             &member_dir,
             Refresh::Never,
             &Pinned::new(),
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -718,6 +776,7 @@ mod tests {
             &base,
             Refresh::Never,
             &Pinned::new(),
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -851,6 +910,7 @@ mod tests {
                 &origin,
                 Refresh::Never,
                 &Pinned::new(),
+                None,
                 &mut Vec::new(),
             )
         };
@@ -995,6 +1055,7 @@ mod tests {
                 &origin,
                 Refresh::Never,
                 &Pinned::new(),
+                None,
                 &mut Vec::new(),
             )
         };
@@ -1202,6 +1263,7 @@ mod tests {
                 &project,
                 Refresh::Never,
                 &Pinned::new(),
+                None,
                 &mut Vec::new(),
             )
         };
@@ -1317,7 +1379,14 @@ mod tests {
                  [indices]\ndefault = \"{url}\"\n\n{extra}"
             ))
             .unwrap();
-            resolve(&manifest, &origin, Refresh::Never, &Pinned::new(), warnings)
+            resolve(
+                &manifest,
+                &origin,
+                Refresh::Never,
+                &Pinned::new(),
+                None,
+                warnings,
+            )
         };
         let summary = |installs: &[ResolvedInstall]| -> Vec<String> {
             installs
@@ -1470,6 +1539,7 @@ mod tests {
                 &base,
                 Refresh::Never,
                 &Pinned::new(),
+                None,
                 &mut Vec::new()
             ),
             Err(Error::NotInWorkspace(_))
@@ -1531,6 +1601,36 @@ mod tests {
                 "warning: acme/thing is deprecated: use acme/new",
                 "warning: acme/thing@1.0.0 is deprecated: leaks",
             ]
+        );
+    }
+
+    #[test]
+    fn a_host_allow_list_refuses_by_language_and_environment() {
+        use crate::project::manifest::Language::*;
+        let alloy = Allow {
+            host: "alloy",
+            summary: "Alloy packages and Roblox Luau",
+            languages: &[Luau, Alloy],
+            environments: &[Environment::Roblox, Environment::Server],
+        };
+        // an allowed language other than Luau passes in every environment
+        assert!(alloy.admits(Alloy, Some(Environment::Lune)));
+        assert!(alloy.admits(Luau, Some(Environment::Roblox)));
+        assert!(alloy.admits(Luau, Some(Environment::Server)));
+        // plain Luau must target an allowed environment
+        assert!(!alloy.admits(Luau, Some(Environment::Lune)));
+        assert!(!alloy.admits(Luau, Some(Environment::Luau)));
+        assert!(!alloy.admits(Luau, None));
+        // and the other languages stay out
+        assert!(!alloy.admits(Loom, Some(Environment::Roblox)));
+        assert!(!alloy.admits(Luwu, Some(Environment::Luau)));
+
+        let refusal = alloy
+            .refusal("acme/fs@1.0.0".to_string(), Luau, Some(Environment::Lune))
+            .to_string();
+        assert_eq!(
+            refusal,
+            "alloy installs Alloy packages and Roblox Luau; acme/fs@1.0.0 is a Luau package for lune"
         );
     }
 }

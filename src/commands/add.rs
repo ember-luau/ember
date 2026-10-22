@@ -23,6 +23,9 @@ pub struct AddArgs {
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
     pub refresh: bool,
+    /// what a host tool lets its users install. no flag: embr sets none
+    #[arg(skip)]
+    pub allow: Option<crate::registry::resolver::Allow>,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -64,6 +67,15 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         }
         Err(error) => return Err(error),
     };
+    if let Some(allow) = &args.allow
+        && !allow.admits(package.language, package.environment)
+    {
+        return Err(allow.refusal(
+            format!("{name}@{}", package.version),
+            package.language,
+            package.environment,
+        ));
+    }
 
     /* edit the raw document instead of re-serializing `manifest`,
     so comments and formatting in ember.toml survive */

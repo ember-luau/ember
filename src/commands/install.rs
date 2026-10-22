@@ -42,6 +42,10 @@ pub struct InstallArgs {
     /// Re-resolve, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
     pub refresh: bool,
+
+    /// what a host tool lets its users install. no flag: embr sets none
+    #[arg(skip)]
+    pub allow: Option<resolver::Allow>,
 }
 
 struct Job {
@@ -225,7 +229,14 @@ fn install_project(
         let mut warnings = Vec::new();
         let pinned = pinned_versions();
         let resolved = ui::with_spinner("Resolving dependencies", || {
-            resolver::resolve(manifest, Path::new("."), mode, &pinned, &mut warnings)
+            resolver::resolve(
+                manifest,
+                Path::new("."),
+                mode,
+                &pinned,
+                args.allow.as_ref(),
+                &mut warnings,
+            )
         })?;
         for warning in &warnings {
             eprintln!("{warning}");

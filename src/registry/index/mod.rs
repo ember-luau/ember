@@ -646,6 +646,7 @@ mod tests {
             &origin,
             Refresh::Ttl,
             &Default::default(),
+            None,
             &mut Vec::new(),
         )
         .unwrap();
