@@ -6,6 +6,7 @@ pub mod index;
 pub mod init;
 pub mod install;
 pub mod mcp;
+pub mod outdated;
 pub mod patch;
 pub mod publish;
 pub mod run;

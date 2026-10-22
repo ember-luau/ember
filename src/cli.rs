@@ -90,6 +90,9 @@ pub enum Commands {
     /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
 
+    /// List the dependencies with a newer release; installs nothing
+    Outdated(commands::outdated::OutdatedArgs),
+
     /// Mark a published version so new installs skip it
     Yank(commands::yank::YankArgs),
 
@@ -131,6 +134,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Install(args) => done(commands::install::run(args)),
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),
+        Commands::Outdated(args) => done(commands::outdated::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
