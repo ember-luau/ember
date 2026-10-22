@@ -23,13 +23,6 @@ pub struct AddArgs {
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
     pub refresh: bool,
-    /// what a host tool lets its users install. no flag: embr sets none
-    #[arg(skip)]
-    pub allow: Option<crate::registry::resolver::Allow>,
-    /** ask for the index when --index is absent. a host tool calls add with
-    no terminal to ask on, so it takes the default index instead */
-    #[arg(skip = true)]
-    pub prompt: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -47,8 +40,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
     let index_key = match args.index {
         Some(key) => Some(key),
-        None if args.prompt => prompt_index_key(&manifest)?,
-        None => None,
+        None => prompt_index_key(&manifest)?,
     };
     let index_url = manifest.index_url(index_key.as_deref())?.to_string();
 
@@ -72,7 +64,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         }
         Err(error) => return Err(error),
     };
-    if let Some(allow) = &args.allow
+    if let Some(allow) = crate::registry::resolver::Allow::for_project(&manifest)
         && !allow.admits(package.language, package.environment)
     {
         return Err(allow.refusal(

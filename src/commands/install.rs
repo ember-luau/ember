@@ -3,7 +3,7 @@ use crate::net::github::GithubAPI;
 use crate::progress::{Progress, Task};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
-use crate::project::manifest::{self, Environment, Manifest, Tool};
+use crate::project::manifest::{self, Environment, Language, Manifest, Tool};
 use crate::project::package;
 use crate::project::requires;
 use crate::project::rojo;
@@ -42,10 +42,6 @@ pub struct InstallArgs {
     /// Re-resolve, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
     pub refresh: bool,
-
-    /// what a host tool lets its users install. no flag: embr sets none
-    #[arg(skip)]
-    pub allow: Option<resolver::Allow>,
 }
 
 struct Job {
@@ -87,6 +83,52 @@ const LEGACY_STORE_DIR: &str = ".lpm";
 
 /// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
+
+/** an Alloy project builds each installed Alloy package again from its
+.aly, .alx, and .d.aly sources with the `alloy` on PATH, so it runs code
+from the Alloy it reads and not from the publisher's compiler. a package
+that does not build keeps the Luau it was published with, so this warns
+and goes on. the output is captured: the live display owns the terminal. */
+fn build_alloy_packages(
+    manifest: &Manifest,
+    stored: &[StoredPackage],
+    warn: &mut impl FnMut(String),
+) {
+    if manifest.target.as_ref().map(|target| target.language) != Some(Language::Alloy) {
+        return;
+    }
+    for package in stored
+        .iter()
+        .filter(|package| !package.in_place && is_alloy_package(&package.storage))
+    {
+        let built = std::process::Command::new("alloy")
+            .arg("build")
+            .current_dir(&package.storage)
+            .output();
+        match built {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                warn("warning: alloy is not on PATH, so the Alloy packages keep the Luau they were published with".to_string());
+                return;
+            }
+            Ok(output) if output.status.success() => {}
+            _ => warn(format!(
+                "warning: {} does not build from its Alloy sources, so it keeps its published Luau",
+                package.name
+            )),
+        }
+    }
+}
+
+/// a package whose ember.toml says `language = "alloy"` and that ships an Alloy config to build with.
+fn is_alloy_package(dir: &Path) -> bool {
+    let has_config = dir.join("alloy.toml").is_file() || dir.join(".config.aly").is_file();
+    has_config
+        && fs::read_to_string(dir.join(crate::project::manifest::MANIFEST_FILE))
+            .ok()
+            .and_then(|text| toml::from_str::<Manifest>(&text).ok())
+            .and_then(|manifest| manifest.target)
+            .is_some_and(|target| target.language == Language::Alloy)
+}
 
 /** what the current ember.lock pins, so a yanked version it holds keeps
 installing. no lockfile, or one that does not parse, pins nothing. */
@@ -237,7 +279,7 @@ fn install_project(
             Path::new("."),
             mode,
             &pinned,
-            args.allow.as_ref(),
+            resolver::Allow::for_project(manifest).as_ref(),
             &mut warnings,
         );
         // around the live line, a bare eprintln would land mid-frame
@@ -363,6 +405,7 @@ fn install_project(
     let nested_started = Instant::now();
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
+    build_alloy_packages(manifest, &stored, &mut |message| progress.warn(&message));
 
     let package_count = locked.len();
     let changes = package_changes(
@@ -1700,8 +1743,8 @@ anything printed, so the caller can separate it. */
 fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[InstalledTool]) -> bool {
     use crossterm::style::Stylize;
 
-    let added = || "+".with(ui::rgb(ui::palette().top));
-    let removed = || "-".with(ui::rgb(ui::palette().bottom));
+    let added = || "+".with(ui::rgb(ui::GOLD));
+    let removed = || "-".with(ui::rgb(ui::CRIMSON));
     let mut printed = false;
 
     for (environment, changes) in packages {
@@ -3027,5 +3070,28 @@ mod tests {
         assert!(!member.join("packages").exists());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_alloy_packages_with_a_config_build_again() {
+        let dir = std::env::temp_dir().join("embr-test-alloy-package");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let write = |file: &str, text: &str| fs::write(dir.join(file), text).unwrap();
+
+        write("ember.toml", "[target]\nenvironment = \"roblox\"\n");
+        write("alloy.toml", "[build]\nin = \"src\"\nout = \"out\"\n");
+        assert!(!is_alloy_package(&dir), "a Luau package keeps its Luau");
+
+        write(
+            "ember.toml",
+            "[target]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\n",
+        );
+        assert!(is_alloy_package(&dir));
+
+        fs::remove_file(dir.join("alloy.toml")).unwrap();
+        assert!(!is_alloy_package(&dir), "no config, nothing to build with");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

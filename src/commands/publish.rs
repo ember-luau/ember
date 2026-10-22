@@ -10,17 +10,13 @@ use crate::registry::index::Index;
 use crate::registry::pack;
 use crate::ui;
 use clap::Args;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
     /// Show what would be published without uploading anything
     #[arg(long)]
     pub dry_run: bool,
-    /** the compiler of a language that builds to Luau, `alloy` say. no
-    flag: the Alloy CLI sets it to itself, and `embr publish` looks on PATH. */
-    #[arg(skip)]
-    pub compiler: Option<PathBuf>,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -44,9 +40,8 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     };
     let oidc_token = oidc_token.as_deref();
 
-    let compiler = args.compiler.as_deref();
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, args.dry_run, oidc_token, compiler)?;
+        publish_project(manifest, args.dry_run, oidc_token)?;
         return lifecycle.after();
     }
 
@@ -57,7 +52,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, compiler) {
+    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -71,7 +66,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, args.dry_run, oidc_token, compiler)?;
+            publish_project(manifest, args.dry_run, oidc_token)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -95,7 +90,6 @@ fn publish_project(
     mut manifest: Manifest,
     dry_run: bool,
     oidc_token: Option<&str>,
-    compiler: Option<&Path>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -141,7 +135,7 @@ fn publish_project(
     /* a dry run builds too: it shows the archive a real publish would
     produce, and that archive holds the build output */
     if let Some(program) = language.builder() {
-        build_to_luau(Path::new("."), &manifest, program, compiler)?;
+        build_to_luau(Path::new("."), &manifest, program, None)?;
     }
     validate_logo(Path::new("."), package.logo.as_deref())?;
     let package_name = package.name.clone();
@@ -338,7 +332,7 @@ pub(crate) fn oauth_client_id() -> Result<String, Error> {
 /** an Alloy or Loom package ships its sources and the Luau that the
 compiler's `build` writes from them, so a plain Luau project can use it.
 the build runs here and not in a hook, so a forgotten hook cannot publish
-stale output. `compiler` overrides the program found on PATH. */
+stale output. `compiler` stands in for the program on PATH, for tests. */
 fn build_to_luau(
     root: &Path,
     manifest: &Manifest,

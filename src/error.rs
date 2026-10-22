@@ -70,9 +70,9 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("{host} installs {summary}; {package} is {what}")]
+    #[error("{who} installs {summary}; {package} is {what}")]
     NotAllowed {
-        host: &'static str,
+        who: &'static str,
         summary: &'static str,
         package: String,
         what: String,

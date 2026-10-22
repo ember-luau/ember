@@ -1,6 +1,5 @@
 /*! embr's command line: every command, and what each one runs. the embr
-binary parses into it, and a host tool runs it under its own name through
-[`crate::api::run`]. */
+binary parses into it and runs it. */
 
 use crate::commands::{self, self_cmd::SelfCommand};
 use crate::error::Error;

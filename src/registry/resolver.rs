@@ -8,14 +8,14 @@ use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-/** what a host tool lets its users install. embr itself sets none. the
-Alloy CLI takes Alloy packages and Roblox Luau, and nothing from the
-runtimes or the other languages. */
+/** what a project may install, set by its own language. an Alloy project
+takes Alloy packages and Roblox Luau, and nothing from the runtimes or the
+other languages. a Luau project takes everything the fit rules allow. */
 #[derive(Clone, Copy, Debug)]
 pub struct Allow {
-    /// the host's command, for the error: `alloy`
-    pub host: &'static str,
-    /// what the host takes, for the error
+    /// who installs, for the error: "An Alloy project"
+    pub who: &'static str,
+    /// what it takes, for the error
     pub summary: &'static str,
     /// the languages a package may be written in
     pub languages: &'static [Language],
@@ -24,7 +24,20 @@ pub struct Allow {
     pub environments: &'static [Environment],
 }
 
+/// the rule of a project whose `[target] language` is alloy.
+const ALLOY_PROJECT: Allow = Allow {
+    who: "An Alloy project",
+    summary: "Alloy packages, and Luau packages for Roblox or a Roblox server",
+    languages: &[Language::Luau, Language::Alloy],
+    environments: &[Environment::Roblox, Environment::Server],
+};
+
 impl Allow {
+    /// the rule `manifest`'s own language sets, None when it sets none.
+    pub fn for_project(manifest: &Manifest) -> Option<Allow> {
+        (manifest.target.as_ref()?.language == Language::Alloy).then_some(ALLOY_PROJECT)
+    }
+
     pub fn admits(&self, language: Language, environment: Option<Environment>) -> bool {
         self.languages.contains(&language)
             && (language != Language::Luau
@@ -44,7 +57,7 @@ impl Allow {
             (language, _) => format!("a {language} package"),
         };
         Error::NotAllowed {
-            host: self.host,
+            who: self.who,
             summary: self.summary,
             package,
             what,
@@ -1607,12 +1620,7 @@ mod tests {
     #[test]
     fn a_host_allow_list_refuses_by_language_and_environment() {
         use crate::project::manifest::Language::*;
-        let alloy = Allow {
-            host: "alloy",
-            summary: "Alloy packages and Roblox Luau",
-            languages: &[Luau, Alloy],
-            environments: &[Environment::Roblox, Environment::Server],
-        };
+        let alloy = ALLOY_PROJECT;
         // an allowed language other than Luau passes in every environment
         assert!(alloy.admits(Alloy, Some(Environment::Lune)));
         assert!(alloy.admits(Luau, Some(Environment::Roblox)));
@@ -1630,7 +1638,20 @@ mod tests {
             .to_string();
         assert_eq!(
             refusal,
-            "alloy installs Alloy packages and Roblox Luau; acme/fs@1.0.0 is a Luau package for lune"
+            "An Alloy project installs Alloy packages, and Luau packages for Roblox or a Roblox server; acme/fs@1.0.0 is a Luau package for lune"
         );
+    }
+
+    #[test]
+    fn only_an_alloy_project_sets_a_rule() {
+        let project = |language: &str| -> Manifest {
+            toml::from_str(&format!(
+                "[target]\nenvironment = \"roblox\"\nlanguage = \"{language}\"\n"
+            ))
+            .unwrap()
+        };
+        assert!(Allow::for_project(&project("alloy")).is_some());
+        assert!(Allow::for_project(&project("luau")).is_none());
+        assert!(Allow::for_project(&project("luwu")).is_none());
     }
 }
