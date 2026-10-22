@@ -18,7 +18,7 @@ categories = ["command-line-utilities", "development-tools"]
 # Repo furniture that does not belong in the published crate. src/, the
 # lockfile, the readme and the license ship; target/ and gitignored files are
 # dropped by cargo already.
-exclude = [".github/", "scripts/", "packaging/", "CLAUDE.md"]
+exclude = [".github/", "scripts/", "packaging/", "assets/", "CLAUDE.md"]
 
 # the library is what the Alloy CLI links for alloy add, install, and publish
 [lib]

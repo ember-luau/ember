@@ -57,16 +57,19 @@ jobs:
 
           # Discord caps a description at 4096 characters and the whole embed
           # at 6000; long notes get cut with a link to the rest.
+          # The icon is the Discord server's, kept in assets/ so its URL
+          # works the moment this merges, with no site deploy.
           jq '
-            .release as $release
+            "https://raw.githubusercontent.com/ember-luau/ember/master/assets/discord-icon.png" as $icon
+            | .release as $release
             | ($release.body | gsub("\r\n"; "\n")) as $body
             | (if ($body | length) > 3900
                  then $body[0:3900] + "…\n\n[Read the full notes](" + $release.html_url + ")"
                  else $body
                end) as $description
             | {
-                username: "embr",
-                avatar_url: "https://luaupm.com/lpm-logo.png",
+                username: "Ember",
+                avatar_url: $icon,
                 # The role ping lives in content, above the embed. Discord only
                 # notifies when the message is first posted, so later PATCHes of
                 # the same message never re-ping. allowed_mentions pins the ping
@@ -74,17 +77,20 @@ jobs:
                 content: "<@&1531061263843590296>",
                 allowed_mentions: { roles: ["1531061263843590296"] },
                 embeds: [{
+                  author: { name: "embr release", url: "https://luaupm.com", icon_url: $icon },
                   title: (if ($release.name // "") == "" then $release.tag_name else $release.name end),
                   url: $release.html_url,
                   description: $description,
-                  color: 15077448,
+                  # #F23C1B, the ember accent
+                  color: 15874075,
                   timestamp: ($release.published_at // $release.created_at),
-                  thumbnail: { url: "https://luaupm.com/lpm-logo.png" },
+                  thumbnail: { url: "https://luaupm.com/ember.png" },
                   footer: {
                     text: (if $release.prerelease
                              then "Pre-release · embr self update stays on the latest stable"
                              else "Update with: embr self update"
-                           end)
+                           end),
+                    icon_url: $icon
                   }
                 }]
               }
