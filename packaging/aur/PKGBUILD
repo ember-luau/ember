@@ -1,9 +1,12 @@
 # Maintainer: savruun <https://github.com/savruun>
+#
+# The template for the AUR package. .github/workflows/aur.yml sets pkgver and
+# the checksums for each release and pushes the result to the AUR.
 
 pkgname=embr-bin
 pkgver=0.6.0
 pkgrel=1
-pkgdesc="A package manager built for Luau: dependencies, tools and scripts for Luau and Roblox projects"
+pkgdesc="A package manager built for Luau: publish, discover, and install packages for Luau and everything built on it"
 arch=('x86_64')
 url="https://github.com/ember-luau/ember"
 license=('MIT')

@@ -1,5 +1,5 @@
 pkgbase = embr-bin
-	pkgdesc = A package manager built for Luau: dependencies, tools and scripts for Luau and Roblox projects
+	pkgdesc = A package manager built for Luau: publish, discover, and install packages for Luau and everything built on it
 	pkgver = 0.6.0
 	pkgrel = 1
 	url = https://github.com/ember-luau/ember
