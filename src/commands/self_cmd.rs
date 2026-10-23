@@ -29,6 +29,17 @@ pub enum SelfCommand {
         #[arg(long, conflicts_with = "index")]
         reset: bool,
     },
+    /// Show or set whether `embr add` asks which index to use when --index is not given
+    IndexPrompt {
+        /// on or off. Omit it to print the current value
+        state: Option<OnOff>,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 pub fn run(command: SelfCommand) -> Result<(), Error> {
@@ -38,7 +49,28 @@ pub fn run(command: SelfCommand) -> Result<(), Error> {
         SelfCommand::Uninstall => uninstall(),
         SelfCommand::Code => code(),
         SelfCommand::DefaultIndex { index, reset } => default_index(index, reset),
+        SelfCommand::IndexPrompt { state } => index_prompt(state),
     }
+}
+
+/** whether `embr add` asks for an index, in ~/.ember/config.toml. on is
+the default, so turning it on again removes the key. */
+fn index_prompt(state: Option<OnOff>) -> Result<(), Error> {
+    use crate::project::settings;
+
+    let mut current = settings::load();
+    let Some(state) = state else {
+        let on = current.index_prompt.unwrap_or(true);
+        println!("{}", if on { "on" } else { "off" });
+        return Ok(());
+    };
+    current.index_prompt = (state == OnOff::Off).then_some(false);
+    settings::save(&current)?;
+    crate::ui::print_success(match state {
+        OnOff::On => "embr add asks which index to use when --index is not given",
+        OnOff::Off => "embr add uses the default index when --index is not given",
+    });
+    Ok(())
 }
 
 /** the machine-wide default index, in ~/.ember/config.toml. a project's

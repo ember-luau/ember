@@ -7,6 +7,7 @@ use crate::registry::local;
 use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
+use std::io::IsTerminal;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
@@ -58,7 +59,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let index_key = match args.index {
         Some(key) => Some(key),
         None if is_local => Some(local::NAME.to_string()),
-        None => prompt_index_key(&manifest)?,
+        /* no terminal (CI, a script) can't answer, so it gets the default
+        index, as an empty answer would */
+        None if crate::project::settings::index_prompt() && std::io::stdin().is_terminal() => {
+            prompt_index_key(&manifest)?
+        }
+        None => None,
     };
     let index_url = manifest.index_url(index_key.as_deref())?.to_string();
 

@@ -53,6 +53,10 @@ pub enum Error {
     #[error("{0}")]
     DeprecateArgs(&'static str),
 
+    /// a bad flag combination for `embr init`, or an answer it cannot guess
+    #[error("{0}")]
+    InitArgs(String),
+
     #[error(
         "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"
     )]

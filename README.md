@@ -76,6 +76,32 @@ Points your VS Code (or Insiders / VSCodium / Cursor) settings at the
 [ember.toml schema](https://emberpm.dev/ember.schema.json). Comments and existing
 entries in `settings.json` survive the edit.
 
+## Start a project or a package
+
+`embr init` writes `ember.toml`. It asks three questions:
+
+1. **Project or package.** A project is code you run, such as a game or a
+   tool. A package is code you publish, so it also asks for a name, a
+   version, authors and a license.
+2. **Language:** Luau, Alloy, Loom, or Luwu.
+3. **Runtime:** Roblox, Roblox Server, Lune, Lute, Seal, Zune, or portable
+   Luau. Loom offers the two Roblox sides only, and Luwu code is portable
+   Luau to embr, so Luwu gets no question.
+
+The answers go into `[target]`, so the project takes only packages it can
+run. Flags answer the questions for scripts and CI:
+
+```sh
+embr init --kind package --language alloy --environment lune --name me/tool --yes
+```
+
+Without a terminal, or with `--yes`, each question that has no flag takes
+its default: a Roblox project in Luau.
+
+`embr add scope/name` asks which index to use. To skip the question and
+use the default index, run `embr self index-prompt off`. Run
+`embr self index-prompt on` to get it back.
+
 ## `embx`: run without installing
 
 ```sh

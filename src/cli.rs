@@ -18,7 +18,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Create an ember.toml manifest in the current directory
-    Init,
+    Init(commands::init::InitArgs),
 
     /// Runs a script from ember.toml, or lists them all when given no name
     Run(commands::run::RunArgs),
@@ -145,7 +145,7 @@ pub enum Outcome {
 pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
     let done = |result: Result<(), Error>| result.map(|()| Outcome::Done);
     match command {
-        Commands::Init => done(commands::init::run()),
+        Commands::Init(args) => done(commands::init::run(args)),
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),

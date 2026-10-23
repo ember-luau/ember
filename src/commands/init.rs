@@ -1,36 +1,125 @@
 use crate::error::Error;
 use crate::net::auth;
-use crate::project::manifest::{Environment, Manifest, Package, Target, is_github_username};
+use crate::project::manifest::{
+    Environment, Language, Manifest, Package, Target, is_github_username,
+};
 use crate::sys::git;
+use clap::Args;
 use inquire::{Select, Text, validator::Validation};
+use std::io::IsTerminal;
 use std::path::Path;
 
-const ENVIRONMENTS: &[&str] = &[
-    "roblox",
-    "roblox_server",
-    "lune",
-    "luau",
-    "lute",
-    "seal",
-    "zune",
+#[derive(Args, Debug, Default)]
+pub struct InitArgs {
+    /// Project (code you run) or package (code you publish)
+    #[arg(long, value_enum)]
+    pub kind: Option<Kind>,
+    /// The language: luau, alloy, loom, or luwu
+    #[arg(long, value_parser = parse_language)]
+    pub language: Option<Language>,
+    /// Where the code runs: roblox, roblox_server, lune, lute, seal, zune, or luau for portable Luau
+    #[arg(long, value_parser = parse_environment)]
+    pub environment: Option<Environment>,
+    /// The package name, as scope/name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Take the default for every question that no flag answers
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    /// code you run; it consumes packages and never publishes
+    #[default]
+    Project,
+    /// code you publish to the registry
+    Package,
+}
+
+fn parse_language(name: &str) -> Result<Language, String> {
+    Language::parse(name).ok_or_else(|| format!("'{name}' is not luau, alloy, loom, or luwu"))
+}
+
+fn parse_environment(name: &str) -> Result<Environment, String> {
+    Environment::from_embr(name).map_err(|error| error.to_string())
+}
+
+const LANGUAGES: [Language; 4] = [
+    Language::Luau,
+    Language::Alloy,
+    Language::Loom,
+    Language::Luwu,
 ];
 
-/// what the first question offers, in the order it offers them.
-const KINDS: &[&str] = &[PROJECT, PACKAGE];
-const PROJECT: &str = "project";
-const PACKAGE: &str = "package";
+/** the environments a language can target, the first one the default.
+Alloy builds to plain Luau, so it can target what Luau can. Loom is a
+Roblox DSL. Luwu runs on its own host, so its code is portable Luau to
+embr. */
+fn environment_choices(language: Language) -> &'static [Environment] {
+    match language {
+        Language::Luau | Language::Alloy => &[
+            Environment::Roblox,
+            Environment::Server,
+            Environment::Lune,
+            Environment::Lute,
+            Environment::Seal,
+            Environment::Zune,
+            Environment::Luau,
+        ],
+        Language::Loom => &[Environment::Roblox, Environment::Server],
+        Language::Luwu => &[Environment::Luau],
+    }
+}
+
+/// the name the site uses for an environment.
+fn environment_label(environment: Environment) -> &'static str {
+    match environment {
+        Environment::Roblox => "Roblox",
+        Environment::Server => "Roblox Server",
+        Environment::Lune => "Lune",
+        Environment::Lute => "Lute",
+        Environment::Seal => "Seal",
+        Environment::Zune => "Zune",
+        Environment::Luau => "Portable Luau (any runtime)",
+    }
+}
+
+/// the entry point a new package of this language starts from.
+fn default_main(language: Language) -> &'static str {
+    match language {
+        Language::Luau => "src/init.luau",
+        // `alloy build` and `loom build` write the Luau that publish ships
+        Language::Alloy => "out/init.luau",
+        Language::Loom => "dist/init.luau",
+        Language::Luwu => "src/init.luwu",
+    }
+}
 
 /** the whole manifest a `project` answer produces. a project consumes
-packages and never publishes, so it needs no [package] table and nothing
-else has to be asked -- see [`Manifest::package`]. the empty table is there
-so `embr add` has somewhere obvious to write, and so the file doesn't read
-as an accident. */
-const PROJECT_MANIFEST: &str = "\
+packages and never publishes, so it needs no [package] table -- see
+[`Manifest::package`]. its [target] gives it the install rule for its
+environment and language. the empty [dependencies] table is there so
+`embr add` has somewhere obvious to write. */
+fn project_manifest(environment: Environment, language: Language) -> String {
+    let language = if language.is_luau() {
+        String::new()
+    } else {
+        format!("language = \"{language}\"\n", language = language.as_str())
+    };
+    format!(
+        "\
 # Manifest for this project. See https://emberpm.dev/docs
 # Add dependencies with `embr add <scope/name>`, then run `embr install`.
 
+[target]
+environment = \"{environment}\"
+{language}
 [dependencies]
-";
+",
+        environment = environment.as_str(),
+    )
+}
 
 const LICENSES: &[&str] = &[
     "MIT",
@@ -126,54 +215,148 @@ fn sanitize_name_part(part: &str) -> String {
         .to_lowercase()
 }
 
-pub fn run() -> Result<(), Error> {
+pub fn run(args: InitArgs) -> Result<(), Error> {
     let manifest_path = Path::new("ember.toml");
     if manifest_path.exists() {
         return Err(Error::ManifestExists);
     }
 
-    println!("{INTRO}");
+    /* a flag answers its question. without one, a terminal gets the
+    question, and anything else (CI, a script, --yes) gets the default */
+    let interactive = !args.yes && std::io::stdin().is_terminal();
+    if interactive {
+        println!("{INTRO}");
+        inquire::set_global_render_config(crate::ui::render_config());
+    }
 
-    inquire::set_global_render_config(crate::ui::render_config());
+    /* asked first because the answer decides whether the registry metadata
+    below is worth asking. a project is the common case */
+    let kind = match args.kind {
+        Some(kind) => kind,
+        None if interactive => {
+            let package = Select::new("initialize:", vec!["project", "package"])
+                .with_help_message("A project is code you run; a package is code you publish")
+                .prompt()?
+                == "package";
+            if package {
+                Kind::Package
+            } else {
+                Kind::Project
+            }
+        }
+        None => Kind::Project,
+    };
 
-    /* asked first because the answer decides whether anything else is worth
-    asking. a project is the common case and everything below it -- name,
-    version, license, entry point -- is registry metadata it will never use */
-    let kind = Select::new("initialize:", KINDS.to_vec())
-        .with_help_message("A project consumes packages; a package is published to the registry")
-        .prompt()?;
-    if kind == PROJECT {
-        return write_manifest(manifest_path, PROJECT_MANIFEST);
+    let language = match args.language {
+        Some(language) => language,
+        None if interactive => {
+            let titles: Vec<&str> = LANGUAGES.iter().map(|language| language.title()).collect();
+            let title = Select::new("language:", titles)
+                .with_help_message("The language of your own files")
+                .prompt()?;
+            LANGUAGES
+                .into_iter()
+                .find(|language| language.title() == title)
+                .unwrap_or_default()
+        }
+        None => Language::Luau,
+    };
+
+    let choices = environment_choices(language);
+    let environment = match args.environment {
+        Some(environment) if choices.contains(&environment) => environment,
+        Some(environment) => {
+            return Err(Error::InitArgs(format!(
+                "{} code does not run in {}; choose one of: {}",
+                language.title(),
+                environment.as_str(),
+                choices
+                    .iter()
+                    .map(|choice| choice.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        None if interactive && choices.len() > 1 => {
+            let labels: Vec<&str> = choices
+                .iter()
+                .map(|choice| environment_label(*choice))
+                .collect();
+            let label = Select::new("runtime:", labels)
+                .with_help_message("Where the code runs")
+                .prompt()?;
+            choices
+                .iter()
+                .copied()
+                .find(|choice| environment_label(*choice) == label)
+                .unwrap_or(choices[0])
+        }
+        None => choices[0],
+    };
+    /* seal resolves `.luau` only, so a dependency with `.lua` files breaks
+    there at require time. better said now than in the first bug report. */
+    if environment == Environment::Seal {
+        eprintln!("note: seal loads .luau files only, and its @std is not lute's @std");
+    }
+
+    if kind == Kind::Project {
+        return write_manifest(manifest_path, &project_manifest(environment, language));
     }
 
     let defaults = Defaults::guess();
+    let ask = |prompt: Text<'_>, default: Option<&str>| -> Result<String, Error> {
+        if interactive {
+            Ok(prompt.prompt()?)
+        } else {
+            Ok(default.unwrap_or_default().to_string())
+        }
+    };
 
-    let mut name_prompt = Text::new("name:")
-        .with_help_message("Scoped as 'scope/name'; letters and numbers only")
-        .with_validator(|input: &str| match validate_name(input) {
-            Ok(()) => Ok(Validation::Valid),
-            Err(message) => Ok(Validation::Invalid(message.into())),
-        });
-    if let Some(default) = &defaults.name {
-        name_prompt = name_prompt.with_default(default);
-    }
-    let name = name_prompt.prompt()?;
+    let name = match args.name {
+        Some(name) => {
+            validate_name(&name).map_err(Error::InitArgs)?;
+            name
+        }
+        None if interactive => {
+            let mut name_prompt = Text::new("name:")
+                .with_help_message("Scoped as 'scope/name'; letters and numbers only")
+                .with_validator(|input: &str| match validate_name(input) {
+                    Ok(()) => Ok(Validation::Valid),
+                    Err(message) => Ok(Validation::Invalid(message.into())),
+                });
+            if let Some(default) = &defaults.name {
+                name_prompt = name_prompt.with_default(default);
+            }
+            name_prompt.prompt()?
+        }
+        None => match &defaults.name {
+            Some(name) if validate_name(name).is_ok() => name.clone(),
+            _ => {
+                return Err(Error::InitArgs(
+                    "embr cannot guess a package name here; pass --name scope/name".to_string(),
+                ));
+            }
+        },
+    };
 
-    let version = Text::new("version:")
-        .with_default("0.1.0")
-        .with_validator(
-            |input: &str| match input.trim().parse::<semver::Version>() {
-                Ok(_) => Ok(Validation::Valid),
-                Err(error) => Ok(Validation::Invalid(
-                    format!("Invalid version: {error}").into(),
-                )),
-            },
-        )
-        .prompt()?;
+    let version = ask(
+        Text::new("version:")
+            .with_default("0.1.0")
+            .with_validator(
+                |input: &str| match input.trim().parse::<semver::Version>() {
+                    Ok(_) => Ok(Validation::Valid),
+                    Err(error) => Ok(Validation::Invalid(
+                        format!("Invalid version: {error}").into(),
+                    )),
+                },
+            ),
+        Some("0.1.0"),
+    )?;
 
-    let description = Text::new("description:")
-        .with_help_message("Short description; press enter to skip")
-        .prompt()?;
+    let description = ask(
+        Text::new("description:").with_help_message("Short description; press enter to skip"),
+        None,
+    )?;
 
     let mut authors_prompt = Text::new("authors:")
         .with_help_message(
@@ -183,51 +366,62 @@ pub fn run() -> Result<(), Error> {
     if let Some(default) = &defaults.authors {
         authors_prompt = authors_prompt.with_default(default);
     }
-    let authors_input = authors_prompt.prompt()?;
+    let authors_input = ask(authors_prompt, defaults.authors.as_deref())?;
 
-    let repository = match &defaults.repository {
-        Some(default) => Text::new("repository:").with_default(default),
-        None => {
-            Text::new("repository:").with_help_message("Link to repository; press enter to skip")
-        }
-    }
-    .prompt()?;
+    let repository = ask(
+        match &defaults.repository {
+            Some(default) => Text::new("repository:").with_default(default),
+            None => Text::new("repository:")
+                .with_help_message("Link to repository; press enter to skip"),
+        },
+        defaults.repository.as_deref(),
+    )?;
 
-    let license = Select::new("license:", LICENSES.to_vec())
-        .with_page_size(8)
-        .prompt()?;
+    let license = if interactive {
+        Select::new("license:", LICENSES.to_vec())
+            .with_page_size(8)
+            .prompt()?
+    } else {
+        LICENSES[0]
+    };
 
-    let environment = Select::new("environment:", ENVIRONMENTS.to_vec())
-        .with_help_message("Where this package's Luau code runs")
-        .prompt()?;
-    /* seal resolves `.luau` only, so a dependency with `.lua` files breaks
-    there at require time. better said now than in the first bug report. */
-    if environment == "seal" {
-        eprintln!("note: seal loads .luau files only, and its @std is not lute's @std");
-    }
-    let main = Text::new("main:")
-        .with_help_message("Entry point of your package")
-        .with_default("src/init.luau")
-        .prompt()?;
+    let main = ask(
+        Text::new("main:")
+            .with_help_message("Entry point of your package")
+            .with_default(default_main(language)),
+        Some(default_main(language)),
+    )?;
 
-    let manifest = Manifest {
-        package: Some(Package {
-            name,
-            version: version.trim().to_string(),
-            private: false,
-            description: non_empty(description),
-            authors: parse_authors(&authors_input),
-            repository: non_empty(repository),
-            license: Some(license.to_string()),
-            logo: None,
-        }),
+    let package = Package {
+        name,
+        version: version.trim().to_string(),
+        private: false,
+        description: non_empty(description),
+        authors: parse_authors(&authors_input),
+        repository: non_empty(repository),
+        license: Some(license.to_string()),
+        logo: None,
+    };
+    let manifest = package_manifest(package, environment, language, non_empty(main));
+    write_manifest(manifest_path, &toml::to_string(&manifest)?)
+}
+
+/// the manifest a `package` answer produces: the package and its one target.
+fn package_manifest(
+    package: Package,
+    environment: Environment,
+    language: Language,
+    main: Option<String>,
+) -> Manifest {
+    Manifest {
+        package: Some(package),
         targets: vec![Target {
-            environment: Environment::from_embr(environment)?,
-            main: non_empty(main),
+            environment,
+            main,
             includes: Vec::new(),
             excludes: Vec::new(),
             workspace: Vec::new(),
-            language: Default::default(),
+            language,
         }],
         config: Default::default(),
         indices: Default::default(),
@@ -237,9 +431,7 @@ pub fn run() -> Result<(), Error> {
         tools: Default::default(),
         scripts: Default::default(),
         studio: Default::default(),
-    };
-
-    write_manifest(manifest_path, &toml::to_string(&manifest)?)
+    }
 }
 
 /// writes the new manifest and git-ignores what installs generate, the tail both answers share.
@@ -355,28 +547,86 @@ mod tests {
     nothing else validates it. it has to parse, declare no package, and be
     somewhere `embr add` can write. */
     #[test]
-    fn the_project_template_is_a_package_less_manifest() {
-        let manifest: Manifest = toml::from_str(PROJECT_MANIFEST).unwrap();
-        assert!(manifest.package.is_none());
-        assert!(manifest.dependencies.is_empty());
+    fn a_project_gets_a_target_and_no_package() {
+        for language in LANGUAGES {
+            for &environment in environment_choices(language) {
+                let text = project_manifest(environment, language);
+                let manifest: Manifest = toml::from_str(&text).unwrap();
+                assert!(manifest.package.is_none(), "{text}");
+                assert!(manifest.dependencies.is_empty());
+                let target = manifest.target().expect("a [target]");
+                assert_eq!(target.environment, environment);
+                assert_eq!(target.language, language);
+                assert!(target.main.is_none());
+                // plain Luau is the default, so the file leaves it out
+                assert_eq!(text.contains("language ="), !language.is_luau(), "{text}");
 
-        // `embr add` edits the raw document, so [dependencies] must be there
-        let document: toml_edit::DocumentMut = PROJECT_MANIFEST.parse().unwrap();
-        assert!(
-            document
-                .get("dependencies")
-                .is_some_and(|table| table.is_table())
-        );
+                // `embr add` edits the raw document, so [dependencies] must be there
+                let document: toml_edit::DocumentMut = text.parse().unwrap();
+                assert!(
+                    document
+                        .get("dependencies")
+                        .is_some_and(|table| table.is_table())
+                );
+            }
+        }
     }
 
     #[test]
-    fn the_environment_choices_are_the_ones_embr_parses() {
-        for environment in ENVIRONMENTS {
-            let parsed = Environment::from_embr(environment).unwrap();
-            // and each offers its own canonical spelling, not an alias
-            assert_eq!(parsed.as_str(), *environment);
+    fn a_package_gets_its_language_runtime_and_entry_point() {
+        let package = || Package {
+            name: "acme/rocket".to_string(),
+            version: "0.1.0".to_string(),
+            private: false,
+            description: None,
+            authors: Vec::new(),
+            repository: None,
+            license: Some("MIT".to_string()),
+            logo: None,
+        };
+        for language in LANGUAGES {
+            let environment = environment_choices(language)[0];
+            let main = Some(default_main(language).to_string());
+            let text =
+                toml::to_string(&package_manifest(package(), environment, language, main)).unwrap();
+            let manifest: Manifest = toml::from_str(&text).unwrap();
+            assert_eq!(manifest.package.as_ref().unwrap().name, "acme/rocket");
+            let target = manifest.target().unwrap();
+            assert_eq!(
+                (target.environment, target.language),
+                (environment, language),
+                "{text}"
+            );
+            assert_eq!(target.main.as_deref(), Some(default_main(language)));
         }
-        assert_eq!(KINDS, [PROJECT, PACKAGE]);
+        // Alloy and Loom publish the Luau that their build writes
+        assert!(default_main(Language::Alloy).ends_with(".luau"));
+        assert!(default_main(Language::Loom).ends_with(".luau"));
+    }
+
+    #[test]
+    fn each_language_offers_the_runtimes_it_can_target() {
+        assert_eq!(
+            environment_choices(Language::Luau).len(),
+            Environment::ALL.len()
+        );
+        assert_eq!(
+            environment_choices(Language::Alloy),
+            environment_choices(Language::Luau)
+        );
+        assert_eq!(
+            environment_choices(Language::Loom),
+            [Environment::Roblox, Environment::Server]
+        );
+        assert_eq!(environment_choices(Language::Luwu), [Environment::Luau]);
+        // every choice round-trips through the --environment spelling
+        for language in LANGUAGES {
+            for &environment in environment_choices(language) {
+                assert_eq!(parse_environment(environment.as_str()), Ok(environment));
+            }
+            assert_eq!(parse_language(language.as_str()), Ok(language));
+        }
+        assert!(parse_language("lua").is_err());
     }
 
     #[test]
