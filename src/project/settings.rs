@@ -1,6 +1,6 @@
 /*! ~/.ember/config.toml, the settings that hold for every project on this
-machine. `embr self default-index` writes it. a project's own ember.toml
-always wins over it. */
+machine. `embr self default-index` and `embr self index-prompt` write it. a
+project's own ember.toml always wins over it. */
 
 use crate::error::Error;
 use crate::sys::paths;
@@ -18,6 +18,14 @@ pub struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_index: Option<String>,
+    /** whether `embr add` without `--index` asks which index to use. None
+    means yes; `embr self index-prompt off` stores false. */
+    #[serde(
+        rename = "index-prompt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub index_prompt: Option<bool>,
 }
 
 /** the settings on disk. a missing or unreadable file reads as the
@@ -50,6 +58,11 @@ pub fn default_index() -> Option<&'static str> {
     DEFAULT.get_or_init(|| load().default_index).as_deref()
 }
 
+/// whether `embr add` asks for an index. on unless the user turned it off.
+pub fn index_prompt() -> bool {
+    load().index_prompt.unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,9 +72,14 @@ mod tests {
         assert_eq!(toml::to_string(&Settings::default()).unwrap(), "");
         let set = Settings {
             default_index: Some("https://github.com/pesde-pkg/index".to_string()),
+            index_prompt: Some(false),
         };
         let text = toml::to_string(&set).unwrap();
         assert!(text.contains("default-index = "), "{text}");
+        assert!(text.contains("index-prompt = false"), "{text}");
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), set);
+        // a file from before the setting existed still reads, prompt on
+        let old: Settings = toml::from_str("default-index = \"x\"\n").unwrap();
+        assert_eq!(old.index_prompt, None);
     }
 }
