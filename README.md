@@ -1,25 +1,25 @@
 <div align="center">
 
-<a href="https://luaupm.com">
-  <img src="https://luaupm.com/ember.png" alt="Ember logo" width="110" />
+<a href="https://emberpm.dev">
+  <img src="https://emberpm.dev/ember.png" alt="Ember logo" width="110" />
 </a>
 
 # ember
 
 **A package manager built for Luau.** The command is `embr`.
 
-<a href="https://luaupm.com"><img src="https://img.shields.io/badge/luaupm.com-F23C1B?style=flat-square&logoColor=white" alt="Website" /></a>
-<a href="https://luaupm.com/search"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.packages&label=packages&color=F23C1B&style=flat-square" alt="Packages" /></a>
-<a href="https://luaupm.com"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.downloads_total&label=downloads&color=F23C1B&style=flat-square" alt="Downloads" /></a>
+<a href="https://emberpm.dev"><img src="https://img.shields.io/badge/emberpm.dev-F23C1B?style=flat-square&logoColor=white" alt="Website" /></a>
+<a href="https://emberpm.dev/search"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.packages&label=packages&color=F23C1B&style=flat-square" alt="Packages" /></a>
+<a href="https://emberpm.dev"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.downloads_total&label=downloads&color=F23C1B&style=flat-square" alt="Downloads" /></a>
 <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="MIT license" />
 
-[Browse packages](https://luaupm.com/search) · [Docs](https://luaupm.com/docs) · [Policies](https://luaupm.com/policies)
+[Browse packages](https://emberpm.dev/search) · [Docs](https://emberpm.dev/docs) · [Policies](https://emberpm.dev/policies)
 
 </div>
 
 ---
 
-The CLI for [luaupm.com](https://luaupm.com): install Luau packages from the
+The CLI for [emberpm.dev](https://emberpm.dev): install Luau packages from the
 ember registry (plus wally, pesde, and Forest indices), publish your own, pin your
 project's tools, and run its scripts — one manifest, one lockfile, one binary.
 
@@ -63,7 +63,7 @@ embr self code    # ember.toml autocomplete + validation via Even Better TOML
 ```
 
 Points your VS Code (or Insiders / VSCodium / Cursor) settings at the
-[ember.toml schema](https://luaupm.com/lpm.schema.json). Comments and existing
+[ember.toml schema](https://emberpm.dev/ember.schema.json). Comments and existing
 entries in `settings.json` survive the edit.
 
 ## `embx`: run without installing
@@ -200,7 +200,7 @@ Other clients read an `mcpServers` block like this one:
 ## Docs
 
 Commands, the manifest, workspaces, publishing — everything lives at
-[luaupm.com/docs](https://luaupm.com/docs).
+[emberpm.dev/docs](https://emberpm.dev/docs).
 
 ## Contributing
 

@@ -77,14 +77,14 @@ jobs:
                 content: "<@&1531061263843590296>",
                 allowed_mentions: { roles: ["1531061263843590296"] },
                 embeds: [{
-                  author: { name: "embr release", url: "https://luaupm.com", icon_url: $icon },
+                  author: { name: "embr release", url: "https://emberpm.dev", icon_url: $icon },
                   title: (if ($release.name // "") == "" then $release.tag_name else $release.name end),
                   url: $release.html_url,
                   description: $description,
                   # #F23C1B, the ember accent
                   color: 15874075,
                   timestamp: ($release.published_at // $release.created_at),
-                  thumbnail: { url: "https://luaupm.com/ember.png" },
+                  thumbnail: { url: "https://emberpm.dev/ember.png" },
                   footer: {
                     text: (if $release.prerelease
                              then "Pre-release · embr self update stays on the latest stable"
