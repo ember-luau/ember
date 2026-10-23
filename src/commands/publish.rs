@@ -273,7 +273,7 @@ fn publish_target(
         file.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("rbxmx"))
     }) {
-        return Err(Error::XmlModel(xml.display().to_string()));
+        return Err(Error::XmlModel(pack::tar_path(xml)));
     }
     let archive = ui::with_spinner(&format!("Packing {id}"), || pack::pack(root, manifest))?;
 
