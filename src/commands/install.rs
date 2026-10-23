@@ -1830,13 +1830,13 @@ tools
   + rojo 7.4.4  rojo-rbx/rojo
 ```
 
-gold for what came, crimson for what went, the accent for a version that
-moved. a tool lists only when this install downloaded it. returns whether
+the accent for what came, crimson for what went, and a plain arrow for a
+version that moved. a tool lists only when this install downloaded it. returns whether
 anything printed, so the caller can separate it. */
 fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[InstalledTool]) -> bool {
     use crossterm::style::Stylize;
 
-    let added = || "+".with(ui::rgb(ui::GOLD));
+    let added = || "+".with(ui::accent());
     let removed = || "-".with(ui::rgb(ui::CRIMSON));
     let mut printed = false;
 
@@ -1877,7 +1877,7 @@ fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[Install
                     };
                     println!(
                         "  {} {link} {from} → {to}  {}",
-                        arrow.with(ui::accent()),
+                        arrow,
                         name.as_str().dark_grey()
                     );
                 }

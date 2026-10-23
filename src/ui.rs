@@ -8,7 +8,7 @@ use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Sty
 /// theme accent #F23C1B. the only place the colour lives, everything derives from it.
 pub const ACCENT: (u8, u8, u8) = (0xF2, 0x3C, 0x1B);
 
-/// gold, the hot top of the logo gradient. an install paints what it adds with it.
+/// gold, the hot top of the logo gradient. only the splash art uses it.
 pub const GOLD: (u8, u8, u8) = (0xFF, 0xC2, 0x4A);
 
 /// crimson, the spent bottom of the logo gradient. an install paints what it removes with it.
