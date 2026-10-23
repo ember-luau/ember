@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://luaupm.com">
-  <img src="https://luaupm.com/lpm-logo.png" alt="ember logo" width="110" />
+  <img src="https://luaupm.com/ember.png" alt="Ember logo" width="110" />
 </a>
 
 # ember
