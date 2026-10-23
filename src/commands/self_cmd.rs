@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// github repo `self update` pulls releases from
-const REPO: &str = "embr/embr";
+const REPO: &str = "ember-luau/ember";
 
 #[derive(Subcommand, Debug)]
 pub enum SelfCommand {
@@ -23,7 +23,7 @@ pub enum SelfCommand {
     Code,
     /// Show or set the index a dependency uses when ember.toml names none
     DefaultIndex {
-        /// ember, local, wally, pesde, or an index URL. Omit it to print the current one
+        /// ember, local, wally, pesde, forest, or an index URL. Omit it to print the current one
         index: Option<String>,
         /// Go back to ember's own index
         #[arg(long, conflicts_with = "index")]

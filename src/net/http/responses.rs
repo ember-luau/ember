@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn deserializes_github_release() {
         let json = r#"{
-            "url": "https://api.github.com/repos/embr/embr/releases/213371337213",
+            "url": "https://api.github.com/repos/ember-luau/ember/releases/213371337213",
             "html_url": "https://github.com/luaupm/embr/releases/tag/v0.1.0",
             "id": 213371337213,
             "node_id": "RE_kwDOLxAmM84MK9bd",
@@ -59,7 +59,7 @@ mod tests {
             "body": "Release notes here",
             "assets": [
                 {
-                    "url": "https://api.github.com/repos/embr/embr/releases/assets/1",
+                    "url": "https://api.github.com/repos/ember-luau/ember/releases/assets/1",
                     "id": 1,
                     "name": "embr-windows-x86_64.exe",
                     "content_type": "application/octet-stream",

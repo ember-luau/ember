@@ -1432,6 +1432,12 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
         /* alias -> environment folder, for the escape require rewrite
         below. only aliases that actually linked make it in */
         let mut escape_aliases: BTreeMap<String, String> = BTreeMap::new();
+        /* a package published to Forest requires its dependencies from a
+        folder beside its root module, so each link goes there too */
+        let forest_dir = package
+            .entry
+            .as_deref()
+            .and_then(|entry| package::forest_dependency_dir(&package.storage, entry));
         for (alias, declared) in package::declared_dependencies(&package.storage) {
             /* the shipped manifest declares the ORIGINAL package. an
             [overrides] redirect on this edge means the alias must link to
@@ -1477,17 +1483,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 continue;
             }
 
-            /* relative_path is lexical, so both sides go through
-            std::path::absolute first. that drops the "." component a
-            `[config]` dir like "./packages/roblox" would otherwise
-            contribute, and gives absolute out dirs a common prefix to
-            measure from */
-            let from = std::path::absolute(&link_dir).unwrap_or_else(|_| link_dir.clone());
-            let to = std::path::absolute(&dep.storage).unwrap_or_else(|_| dep.storage.clone());
-            let mut root = workspace::relative_path(&from, &to);
-            if !root.starts_with("..") {
-                root = format!("./{root}");
-            }
+            let root = relative_root(&link_dir, &dep.storage);
 
             let exports = types_cache
                 .entry((dependency.clone(), package.context))
@@ -1518,6 +1514,22 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                     "warning: could not write {} ({error})",
                     link_path.display()
                 )),
+            }
+
+            if let Some(forest_dir) = &forest_dir {
+                let link_path = forest_dir.join(format!("{alias}.luau"));
+                let root = relative_root(forest_dir, &dep.storage);
+                if let Err(error) = fs::create_dir_all(forest_dir).and_then(|()| {
+                    fs::write(
+                        &link_path,
+                        package::link_contents_at(&root, &entry, &exports, package.requires),
+                    )
+                }) {
+                    warn(format!(
+                        "warning: could not write {} ({error})",
+                        link_path.display()
+                    ));
+                }
             }
         }
 
@@ -1563,6 +1575,22 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
         finally mount the folder holding them. it wasn't there to mount when
         extraction rewrote that file, and Rojo syncs the tree, not the disk */
         rojo::mount_nested_packages(&package.storage, warn);
+    }
+}
+
+/** the require path from a link file in `from` to a package stored at `to`.
+relative_path is lexical, so both sides go through std::path::absolute
+first. that drops the "." component a `[config]` dir like
+"./packages/roblox" would otherwise contribute, and gives absolute out dirs
+a common prefix to measure from */
+fn relative_root(from: &Path, to: &Path) -> String {
+    let from = std::path::absolute(from).unwrap_or_else(|_| from.to_path_buf());
+    let to = std::path::absolute(to).unwrap_or_else(|_| to.to_path_buf());
+    let root = workspace::relative_path(&from, &to);
+    if root.starts_with("..") {
+        root
+    } else {
+        format!("./{root}")
     }
 }
 

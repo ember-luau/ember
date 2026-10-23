@@ -20,7 +20,7 @@
 ---
 
 The CLI for [luaupm.com](https://luaupm.com): install Luau packages from the
-ember registry (plus wally and pesde indices), publish your own, pin your
+ember registry (plus wally, pesde, and Forest indices), publish your own, pin your
 project's tools, and run its scripts — one manifest, one lockfile, one binary.
 
 ## Install
