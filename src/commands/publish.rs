@@ -267,6 +267,14 @@ fn publish_target(
     }
 
     let files = pack::packed_files(root, manifest)?;
+    /* binary .rbxm models ship as they are, and the registry scans them.
+    it refuses .rbxmx, so this says so before any upload */
+    if let Some(xml) = files.iter().find(|file| {
+        file.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("rbxmx"))
+    }) {
+        return Err(Error::XmlModel(xml.display().to_string()));
+    }
     let archive = ui::with_spinner(&format!("Packing {id}"), || pack::pack(root, manifest))?;
 
     /* the API answers 413 past its cap, failing here saves the upload
@@ -788,6 +796,60 @@ mod tests {
                 _ => assert!(result.is_ok(), "{id}: {result:?}"),
             }
         }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// .rbxm models ship byte for byte for the registry to scan, and an
+    /// .rbxmx stops the publish before anything is packed or uploaded.
+    #[test]
+    fn binary_models_ship_and_xml_models_stop_the_publish() {
+        let base = std::env::temp_dir().join("embr-test-publish-models");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/Models")).unwrap();
+        fs::write(
+            base.join("ember.toml"),
+            "[package]\nname = \"acme/rock\"\nversion = \"1.0.0\"\n\n[target]\nenvironment = \"roblox\"\n",
+        )
+        .unwrap();
+        fs::write(base.join("src/init.luau"), "return {}\n").unwrap();
+        let model = b"<roblox!\x89\xff\r\n\x1a\n\0\0 binary";
+        fs::write(base.join("src/Models/Rock.rbxm"), model).unwrap();
+        let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
+
+        let archive = pack::pack(&base, &manifest).unwrap();
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive.as_slice()));
+        let shipped = tar
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path().unwrap().ends_with("Rock.rbxm"))
+            .map(|mut entry| {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+                bytes
+            });
+        assert_eq!(shipped.as_deref(), Some(&model[..]));
+
+        fs::write(base.join("src/Models/Tree.rbxmx"), "<roblox/>").unwrap();
+        let result = publish_target(
+            &base,
+            &manifest,
+            &BTreeMap::new(),
+            "acme/rock@1.0.0",
+            &PublishArgs {
+                dry_run: true,
+                targets: Vec::new(),
+                local: false,
+            },
+            None,
+            &mut None,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.starts_with("src/Models/Tree.rbxmx: XML models (.rbxmx) are not accepted"),
+            "{error}"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

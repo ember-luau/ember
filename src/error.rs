@@ -58,6 +58,13 @@ pub enum Error {
     )]
     PublishTooLarge { size_mb: f64, limit_mb: u64 },
 
+    /// the registry refuses XML models; the same words as its 400, so
+    /// `--dry-run` and `--local` say it too
+    #[error(
+        "{0}: XML models (.rbxmx) are not accepted. Open the model in Roblox Studio and save it again as a binary .rbxm file"
+    )]
+    XmlModel(String),
+
     #[error("`{program} build` runs before publish, and {reason}")]
     LanguageBuild {
         program: &'static str,
