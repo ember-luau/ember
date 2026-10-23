@@ -1,3 +1,4 @@
+pub mod forest;
 pub mod pesde;
 pub mod wally;
 
@@ -60,7 +61,8 @@ pub(crate) fn index_ttl() -> Duration {
 }
 
 /** A package index, a git repo cached under ~/.ember/index-cache. Root
-config.json means wally, root config.toml means pesde. */
+config.json means wally, root config.toml means pesde. Forest's API is the
+one index that is no git repo, see [`forest::is_forest`]. */
 pub struct Index {
     url: String,
     root: PathBuf,
@@ -72,6 +74,7 @@ pub struct Index {
 enum Kind {
     Wally(wally::Config),
     Pesde(pesde::Config),
+    Forest,
 }
 
 /// A concrete package version picked from an index.
@@ -110,7 +113,7 @@ an index. */
 pub enum DownloadSource {
     /// Zip archive, wally registry APIs.
     Zip { url: String },
-    /// Gzipped tarball, pesde registry APIs.
+    /// Gzipped tarball, pesde registry APIs and Forest's CDN.
     TarGz { url: String },
     /** A workspace member, linked in place instead of downloaded. `path` is
     the member's directory relative to the consuming project. */
@@ -122,6 +125,15 @@ impl Index {
     If the refresh fails but a cached copy exists, the stale copy is used
     with a warning. */
     pub fn open(url: &str, refresh: Refresh) -> Result<Self, Error> {
+        // nothing to clone, every resolve asks the API
+        if forest::is_forest(url) {
+            return Ok(Index {
+                url: url.to_string(),
+                root: PathBuf::new(),
+                kind: Kind::Forest,
+                ttl_skipped: false,
+            });
+        }
         let (root, ttl_skipped) = ensure_cached(url, refresh)?;
         let kind = if root.join("config.json").exists() {
             Kind::Wally(wally::load_config(&root)?)
@@ -156,7 +168,7 @@ impl Index {
     never publishes to wally, so only pesde-format configs are consulted. */
     pub fn github_oauth_id(&self) -> Option<&str> {
         match &self.kind {
-            Kind::Wally(_) => None,
+            Kind::Wally(_) | Kind::Forest => None,
             Kind::Pesde(config) => config.github_oauth_id.as_deref(),
         }
     }
@@ -176,6 +188,7 @@ impl Index {
             Kind::Pesde(config) => {
                 pesde::resolve(&self.root, &self.url, config, name, req, prefer, pinned)
             }
+            Kind::Forest => forest::resolve(&self.url, name, req),
         }
     }
 
@@ -185,19 +198,19 @@ impl Index {
     pub fn read(&self, name: &str) -> Result<(Vec<pesde::Candidate>, Option<String>), Error> {
         match &self.kind {
             Kind::Pesde(_) => pesde::read(&self.root, &self.url, name),
-            Kind::Wally(_) => Err(Error::IndexFetch {
+            Kind::Wally(_) | Kind::Forest => Err(Error::IndexFetch {
                 url: self.url.clone(),
-                reason: "a wally index lists no versions this way".to_string(),
+                reason: "only a pesde-format index lists its versions this way".to_string(),
             }),
         }
     }
 }
 
 /** Downloads and extracts a resolved package into `dest`. All downloads are
-anonymous, ember's registry serves tarballs from a public CDN and wally/pesde
-registries are public too. If credentialed downloads ever come back, restore
-the old restraint of tokens only to GitHub-owned hosts, so an arbitrary
-registry url in an index entry can't harvest them. */
+anonymous, ember's registry serves tarballs from a public CDN and wally,
+pesde and Forest registries are public too. If credentialed downloads ever
+come back, restore the old restraint of tokens only to GitHub-owned hosts, so
+an arbitrary registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
     download_with(source, dest, cache, &mut |_, _| {})
 }

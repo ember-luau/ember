@@ -257,7 +257,9 @@ pub enum Error {
     #[error("Index '{0}' is not defined under [indices] in ember.toml")]
     UnknownIndex(String),
 
-    #[error("'{0}' names no index; use ember, wally, pesde, a key under [indices], or a URL")]
+    #[error(
+        "'{0}' names no index; use ember, wally, pesde, forest, a key under [indices], or a URL"
+    )]
     IndexName(String),
 
     #[error("No GitHub login is stored; run `embr auth login`")]
