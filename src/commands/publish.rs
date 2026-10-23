@@ -7,7 +7,7 @@ use crate::project::manifest::{
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::Index;
-use crate::registry::pack;
+use crate::registry::{local, pack};
 use crate::ui;
 use clap::Args;
 use std::collections::BTreeMap;
@@ -21,6 +21,9 @@ pub struct PublishArgs {
     /// Publish only this target, such as `roblox` or `roblox-alloy`; repeat it for more
     #[arg(long = "target", value_name = "ID")]
     pub targets: Vec<String>,
+    /// Publish to the local registry in ~/.ember/local, with no login and no upload
+    #[arg(long)]
+    pub local: bool,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
@@ -37,7 +40,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     fetches an OIDC token the registry can verify the build from. anywhere
     else, or on any failure, it's just None and nothing changes. fetched
     once so a workspace publish doesn't re-request per member */
-    let oidc_token = if args.dry_run {
+    let oidc_token = if args.dry_run || args.local {
         None
     } else {
         provenance::actions_token()
@@ -45,7 +48,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let oidc_token = oidc_token.as_deref();
 
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, args.dry_run, oidc_token, &args.targets)?;
+        publish_project(manifest, &args, oidc_token)?;
         return lifecycle.after();
     }
 
@@ -56,7 +59,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, args.dry_run, oidc_token, &args.targets) {
+    if let Err(error) = publish_project(manifest, &args, oidc_token) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -70,7 +73,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, args.dry_run, oidc_token, &args.targets)?;
+            publish_project(manifest, &args, oidc_token)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -94,9 +97,8 @@ failing. that's how a container root stays unpublished while its members
 go out. */
 fn publish_project(
     mut manifest: Manifest,
-    dry_run: bool,
+    args: &PublishArgs,
     oidc_token: Option<&str>,
-    selected: &[String],
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -128,7 +130,7 @@ fn publish_project(
         return Ok(());
     }
 
-    let ids = select_targets(manifest.targets(), selected)?;
+    let ids = select_targets(manifest.targets(), &args.targets)?;
     let root = Path::new(".");
     /* a dry run builds too: it shows the archives a real publish would
     produce, and they hold the build output. each compiler runs once, before
@@ -187,7 +189,7 @@ fn publish_project(
             &manifest,
             &builds,
             &format!("{package_name}@{version}"),
-            dry_run,
+            args,
             oidc_token,
             &mut token,
         );
@@ -202,8 +204,15 @@ fn publish_project(
         }
     }
 
-    if !dry_run && failed.len() < count {
-        println!("Install it with `embr add {package_name}`");
+    if !args.dry_run && failed.len() < count {
+        // a name with no scope is how `embr add` finds a local package
+        let (_, short_name) = split_package_name(&package_name)?;
+        let name = if args.local {
+            short_name
+        } else {
+            &package_name
+        };
+        println!("Install it with `embr add {name}`");
     }
     if !failed.is_empty() {
         return Err(Error::TargetPublishFailed(failed));
@@ -241,7 +250,7 @@ fn publish_target(
     manifest: &Manifest,
     builds: &BTreeMap<&'static str, Result<(), String>>,
     package: &str,
-    dry_run: bool,
+    args: &PublishArgs,
     oidc_token: Option<&str>,
     token: &mut Option<String>,
 ) -> Result<(), Error> {
@@ -269,15 +278,25 @@ fn publish_target(
         });
     }
 
-    if dry_run {
+    let destination = if args.local {
+        "the local registry"
+    } else {
+        registry::API_URL
+    };
+    if args.dry_run {
         println!(
-            "Would publish {package} ({id}) to {}, {} bytes:",
-            registry::API_URL,
+            "Would publish {package} ({id}) to {destination}, {} bytes:",
             archive.len()
         );
         for file in &files {
             println!("  {}", file.display());
         }
+        return Ok(());
+    }
+
+    if args.local {
+        local::publish(manifest, &archive)?;
+        ui::print_success(&format!("Published {package} ({id}) to the local registry"));
         return Ok(());
     }
 
@@ -747,7 +766,11 @@ mod tests {
                 &manifest,
                 &builds,
                 "acme/multi@1.0.0",
-                true,
+                &PublishArgs {
+                    dry_run: true,
+                    targets: Vec::new(),
+                    local: false,
+                },
                 None,
                 &mut None,
             );

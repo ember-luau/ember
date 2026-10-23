@@ -39,7 +39,7 @@ fn known_url(name: &str) -> Option<&'static str> {
         .map(|(_, url)| *url)
 }
 
-/** the index an argument names: `ember`, a known name like `wally`,
+/** the index an argument names: `ember`, `local`, a known name like `wally`,
 `pesde` or `forest`, a key of the project's [indices], or a URL. the commands that
 take `--index` on the command line read it through here. */
 pub(crate) fn index_url_for(manifest: Option<&Manifest>, name: &str) -> Result<String, Error> {
@@ -49,6 +49,9 @@ pub(crate) fn index_url_for(manifest: Option<&Manifest>, name: &str) -> Result<S
     }
     if let Some(url) = manifest.and_then(|manifest| manifest.indices.get(name)) {
         return Ok(url.clone());
+    }
+    if name.eq_ignore_ascii_case(crate::registry::local::NAME) {
+        return Ok(crate::registry::local::NAME.to_string());
     }
     if let Some(url) = known_url(name) {
         return Ok(url.to_string());
@@ -229,6 +232,30 @@ mod tests {
         );
         assert_eq!(known_url("forest"), Some("https://api.forest.dev"));
         assert_eq!(known_url("custom"), None);
+    }
+
+    #[test]
+    fn local_needs_no_indices_entry() {
+        let bare: Manifest = toml::from_str("").unwrap();
+        assert_eq!(index_url_for(None, "LOCAL").unwrap(), "local");
+        assert_eq!(bare.index_url(Some("local")).unwrap(), "local");
+        // the default stays ember's own index
+        assert_eq!(
+            bare.index_url(None).unwrap(),
+            crate::project::manifest::DEFAULT_INDEX_URL
+        );
+
+        // a project key with the same name wins, as it does for any name
+        let keyed: Manifest =
+            toml::from_str("[indices]\nlocal = \"https://example.com/index\"\n").unwrap();
+        assert_eq!(
+            index_url_for(Some(&keyed), "local").unwrap(),
+            "https://example.com/index"
+        );
+        assert_eq!(
+            keyed.index_url(Some("local")).unwrap(),
+            "https://example.com/index"
+        );
     }
 
     #[test]

@@ -101,6 +101,17 @@ pub enum Error {
     #[error("Workspace member {} has no ember.toml", .0.display())]
     WorkspaceMemberMissingManifest(PathBuf),
 
+    #[error(
+        "No local package is named '{0}'; run `embr publish --local` in the folder of that package first"
+    )]
+    LocalPackageMissing(String),
+
+    #[error(
+        "Several local packages are named '{name}': {}; run `embr add <scope>/{name} --index local`",
+        .found.join(", ")
+    )]
+    LocalPackageAmbiguous { name: String, found: Vec<String> },
+
     #[error("Invalid workspace glob '{glob}': {reason}")]
     WorkspaceGlobInvalid { glob: String, reason: String },
 
@@ -258,7 +269,7 @@ pub enum Error {
     UnknownIndex(String),
 
     #[error(
-        "'{0}' names no index; use ember, wally, pesde, forest, a key under [indices], or a URL"
+        "'{0}' names no index; use ember, local, wally, pesde, forest, a key under [indices], or a URL"
     )]
     IndexName(String),
 
