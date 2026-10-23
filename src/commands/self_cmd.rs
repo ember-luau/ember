@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// github repo `self update` pulls releases from
-const REPO: &str = "embr/embr";
+const REPO: &str = "ember-luau/ember";
 
 #[derive(Subcommand, Debug)]
 pub enum SelfCommand {
