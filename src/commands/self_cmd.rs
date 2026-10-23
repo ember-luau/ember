@@ -340,13 +340,17 @@ fn uninstall() -> Result<(), Error> {
     Ok(())
 }
 
-/// canonical schema URL, served from the embr website
-const SCHEMA_URL: &str = "https://luaupm.com/lpm.schema.json";
+/// canonical schema URL, served from the ember website
+const SCHEMA_URL: &str = "https://emberpm.dev/ember.schema.json";
 /** the file-path pattern the schema is associated with. Even Better TOML
 keys its associations by regex over the absolute document URI, which uses
 forward slashes on every platform, so this matches ember.toml after a path
 separator, but not e.g. not-ember.toml. */
-const ASSOCIATION_PATTERN: &str = "(^|[/\\\\])embr\\.toml$";
+const ASSOCIATION_PATTERN: &str = "(^|[/\\\\])ember\\.toml$";
+/** association keys that earlier versions wrote. They name `embr.toml`, a
+file no project has, so the schema never reached ember.toml. `self` removes
+them, so each editor keeps one association. */
+const LEGACY_PATTERNS: &[&str] = &["(^|[/\\\\])embr\\.toml$"];
 /// the Even Better TOML setting associations live under
 const ASSOCIATIONS_SETTING: &str = "evenBetterToml.schema.associations";
 /// the extension that reads the association, Taplo
@@ -564,6 +568,14 @@ fn upsert_association(text: &str) -> Result<Association, String> {
             format!("`{ASSOCIATIONS_SETTING}` is not an object; fix or remove it first")
         })?;
 
+    let mut removed_legacy = false;
+    for legacy in LEGACY_PATTERNS {
+        if let Some(entry) = associations.get(legacy) {
+            entry.remove();
+            removed_legacy = true;
+        }
+    }
+
     match associations.get(ASSOCIATION_PATTERN) {
         Some(entry) => {
             let current = entry
@@ -571,7 +583,12 @@ fn upsert_association(text: &str) -> Result<Association, String> {
                 .and_then(|value| value.as_string_lit())
                 .and_then(|lit| lit.decoded_value().ok());
             if current.as_deref() == Some(SCHEMA_URL) {
-                return Ok(Association::Current);
+                // the current entry is right; only a legacy key had to go
+                return Ok(if removed_legacy {
+                    Association::Added(format!("{bom}{root}"))
+                } else {
+                    Association::Current
+                });
             }
             entry.set_value(CstInputValue::String(SCHEMA_URL.to_string()));
             Ok(Association::Updated {
@@ -849,7 +866,7 @@ mod code_tests {
             assert!(written.contains(SCHEMA_URL), "in {written:?}");
             // the written pattern is JSON-escaped, backslashes doubled
             assert!(
-                written.contains(r#"(^|[/\\\\])embr\\.toml$"#),
+                written.contains(r#"(^|[/\\\\])ember\\.toml$"#),
                 "in {written:?}"
             );
         }
@@ -922,6 +939,46 @@ mod code_tests {
         assert!(written.contains(SCHEMA_URL));
         assert!(!written.contains("old.example.com"));
         assert_eq!(previous, "https://old.example.com/embr.json");
+    }
+
+    /// settings from an earlier embr: the embr.toml key and the old URL.
+    #[test]
+    fn replaces_the_legacy_embr_toml_key() {
+        let legacy = added("{}")
+            .replace("ember\\\\.toml", "embr\\\\.toml")
+            .replace(SCHEMA_URL, "https://luaupm.com/lpm.schema.json");
+        assert!(legacy.contains("embr\\\\.toml"));
+        let written = match upsert_association(&legacy).unwrap() {
+            Association::Added(text) => text,
+            _ => panic!("expected Added"),
+        };
+        assert!(!written.contains("embr\\\\.toml"));
+        assert!(!written.contains("lpm.schema.json"));
+        assert!(written.contains("ember\\\\.toml"));
+        assert!(written.contains(SCHEMA_URL));
+        // a second run finds it current
+        assert!(matches!(
+            upsert_association(&written).unwrap(),
+            Association::Current
+        ));
+    }
+
+    /// the legacy key goes even when the current key is already right.
+    #[test]
+    fn drops_a_legacy_key_beside_a_current_one() {
+        let both = r#"{
+  "evenBetterToml.schema.associations": {
+    "(^|[/\\\\])embr\\.toml$": "https://luaupm.com/lpm.schema.json",
+    "(^|[/\\\\])ember\\.toml$": "https://emberpm.dev/ember.schema.json"
+  }
+}"#;
+        let written = match upsert_association(both).unwrap() {
+            Association::Added(text) => text,
+            _ => panic!("expected Added"),
+        };
+        assert!(!written.contains("embr\\\\.toml"));
+        assert!(written.contains("ember\\\\.toml"));
+        assert!(written.contains(SCHEMA_URL));
     }
 
     #[test]

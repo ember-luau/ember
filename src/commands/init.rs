@@ -26,7 +26,7 @@ else has to be asked -- see [`Manifest::package`]. the empty table is there
 so `embr add` has somewhere obvious to write, and so the file doesn't read
 as an accident. */
 const PROJECT_MANIFEST: &str = "\
-# Manifest for this project. See https://luaupm.com/docs
+# Manifest for this project. See https://emberpm.dev/docs
 # Add dependencies with `embr add <scope/name>`, then run `embr install`.
 
 [dependencies]
