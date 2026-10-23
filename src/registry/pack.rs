@@ -181,7 +181,7 @@ fn starts_with_ignore_case(path: &Path, prefix: &Path) -> bool {
     })
 }
 
-fn tar_path(file: &Path) -> String {
+pub(crate) fn tar_path(file: &Path) -> String {
     file.iter()
         .map(|part| part.to_string_lossy())
         .collect::<Vec<_>>()

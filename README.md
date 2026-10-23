@@ -123,6 +123,19 @@ The first target is the project's own. `embr add` and `embr install` use
 it to pick a target of each dependency. They prefer the same environment
 and language, then the same environment in plain Luau.
 
+## Models in packages
+
+A Roblox package can ship `.rbxm` models next to its code: UI templates,
+rigs, effects. On install a model becomes an instance named after its file,
+so `src/Models/Rock.rbxm` is `script.Models.Rock`. The registry scans each
+model at publish and refuses:
+
+- a model with a `Script`, `LocalScript` or `ModuleScript` anywhere in it.
+  Code goes in `.luau` files, where anyone can read it;
+- a model file with more than one root. Save one model per file;
+- an XML model (`.rbxmx`). `embr publish` stops on it before the upload;
+- a package with models but fewer than 10 lines of code.
+
 ## Local packages
 
 A local package is a package that only this computer can install. Use it
