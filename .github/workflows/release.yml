@@ -145,3 +145,13 @@ jobs:
           # pre-release badge and are skipped by the releases/latest API that
           # `embr self update` polls.
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Each build job uploads its own assets, so the AUR job waits for all of
+  # them. aur.yml skips a prerelease tag with a notice.
+  aur:
+    name: AUR
+    needs: build
+    uses: ./.github/workflows/aur.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit
