@@ -152,7 +152,7 @@ fn tools() -> Value {
                         "type": "string",
                         "enum": languages,
                         "description": "Return only the packages in this language. \
-                            alloy and loom compile to Luau. luwu runs only on a luwu host."
+                            alloy and loom compile to Luau. luwu needs a luwu host, such as seal."
                     },
                     "limit": {
                         "type": "integer",

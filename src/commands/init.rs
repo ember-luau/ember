@@ -54,8 +54,8 @@ const LANGUAGES: [Language; 4] = [
 
 /** the environments a language can target, the first one the default.
 Alloy builds to plain Luau, so it can target what Luau can. Loom is a
-Roblox DSL. Luwu runs on its own host, so its code is portable Luau to
-embr. */
+Roblox DSL. A Luwu host such as Seal runs Luwu, and embr gives Luwu code
+the portable Luau environment. */
 fn environment_choices(language: Language) -> &'static [Environment] {
     match language {
         Language::Luau | Language::Alloy => &[
@@ -296,7 +296,7 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
     /* seal resolves `.luau` only, so a dependency with `.lua` files breaks
     there at require time. better said now than in the first bug report. */
     if environment == Environment::Seal {
-        eprintln!("note: seal loads .luau files only, and its @std is not lute's @std");
+        eprintln!("note: seal does not load .lua files, and its @std is not lute's @std");
     }
 
     if kind == Kind::Project {
