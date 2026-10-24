@@ -295,8 +295,8 @@ fn deserialize_targets<'de, D: serde::Deserializer<'de>>(
 }
 
 /** the language of a package's own files. Alloy and Loom build to plain
-Luau, so their packages install wherever a Luau one does. Luwu runs only on
-a Luwu host, so its packages need a Luwu project. */
+Luau, so their packages install wherever a Luau one does. Luwu needs a
+Luwu host, such as Seal, so its packages need a Luwu project. */
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {

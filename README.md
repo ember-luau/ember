@@ -85,8 +85,9 @@ entries in `settings.json` survive the edit.
    version, authors and a license.
 2. **Language:** Luau, Alloy, Loom, or Luwu.
 3. **Runtime:** Roblox, Roblox Server, Lune, Lute, Seal, Zune, or portable
-   Luau. Loom offers the two Roblox sides only, and Luwu code is portable
-   Luau to embr, so Luwu gets no question.
+   Luau. Loom offers the two Roblox sides only. Luwu gets no question:
+   embr gives Luwu code the portable Luau environment, and a Luwu host such as
+   [Seal](https://github.com/seal-runtime/seal) runs it.
 
 The answers go into `[target]`, so the project takes only packages it can
 run. Flags answer the questions for scripts and CI:
