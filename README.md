@@ -203,14 +203,22 @@ change a local package.
 ## `embr mcp`: package search for coding agents
 
 `embr mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
-server on stdio. A coding agent uses it to find ember packages. The server
-only reads. It does not change files, install packages, or publish.
+server on stdio. A coding agent uses it to find packages in the ember
+registry, and in Wally, pesde, and Forest. The server only reads. It does
+not change files, install packages, or publish.
 
-It gives the agent two tools:
+It gives the agent three tools:
 
-- `search_packages` finds packages by name or description. It can filter by
-  environment and language. Each result gives the latest version, the
-  download count, and the `embr add` command that installs the package.
+- `search_packages` finds ember packages by name or description. It can
+  filter by environment and language. Each result gives the latest version,
+  the download count, and the `embr add` command that installs the package.
+- `search_all` searches ember, Wally, pesde, and Forest at the same time.
+  Each result gives its registry, the latest version, and the `embr add`
+  command. For Wally, pesde, and Forest, that command adds `--index`, and
+  the project needs the index first: `embr index add wally` adds it once. A
+  registry that fails or does not answer in 10 seconds is listed with the
+  reason, and the other registries still answer. The results leave out
+  Forest's copies of Wally packages.
 - `package_info` shows one package. It lists every version with its target,
   its language, and yanked or deprecated marks. It also gives the
   dependencies of the newest version that is not yanked.

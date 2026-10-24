@@ -1,23 +1,32 @@
 /*!
 `embr mcp`, a Model Context Protocol server on stdio. A coding agent starts
-it and calls two tools: a package search and a package lookup. The server
-only reads. It writes no files, installs nothing, and publishes nothing.
+it and calls three tools: a search of the ember registry, a search of every
+registry embr installs from, and a package lookup. The server only reads.
+It writes no files, installs nothing, and publishes nothing.
 
 The protocol is JSON-RPC 2.0, one JSON object per line. Only protocol
 messages go to stdout, so any log goes to stderr.
 */
 
 use crate::error::Error;
-use crate::net::http;
+use crate::net::http::{self, error::HttpError};
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language, split_package_name};
+use crate::registry::index::forest;
 use crate::registry::index::pesde::{self, Candidate};
 use crate::registry::index::{Index, Refresh};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 /// the registry's search file, one entry for each package.
 const SEARCH_INDEX_URL: &str = "https://cdn.luaupm.com/search-index.json";
+
+/// the APIs behind the Wally and pesde search pages.
+const WALLY_API: &str = "https://api.wally.run";
+const PESDE_API: &str = "https://registry.pesde.dev";
 
 /** the protocol versions this server accepts. its messages use nothing that
 changed between them, so it answers each one the same way. */
@@ -31,13 +40,29 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "ember is a package manager for Luau and Roblox. \
-search_packages finds packages in the ember registry by name or description. \
-package_info shows the versions, deprecations, and dependencies of one package. \
-Both tools only read. Each answer gives the `embr add <scope/name>` command that installs a package.";
+It installs packages from the ember registry, and also from Wally, pesde, and Forest. \
+search_packages finds packages in the ember registry by name or description, and filters them by environment or language. \
+search_all searches the ember, Wally, pesde, and Forest registries at the same time. \
+Use it when the ember registry has no good match, or to compare packages from all registries. \
+package_info shows the versions, deprecations, and dependencies of one ember package. \
+The tools only read. Each answer gives the `embr add` command that installs a package.";
 
 /// the search answer holds this many packages when the call sets no limit.
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
+/// search_all lists this many packages from each registry when the call sets no limit.
+const DEFAULT_ALL_LIMIT: usize = 10;
+
+/** search_all asks the registries at the same time and waits this long for
+the answers. a registry that does not answer in time is listed as failed,
+and the other registries still answer. */
+const REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Forest refuses a shorter query, and Wally finds nothing for one.
+const MIN_QUERY_LENGTH: usize = 2;
+/** a Forest search row needs one more request when its scope is claimed,
+to read the version metadata. search_all makes this many at most. */
+// ponytail: a fixed cap, 1 claimed row in 104 for "signal" today; page the checks if originals grow
+const FOREST_CHECKS: usize = 10;
 
 pub fn run() -> Result<(), Error> {
     match serve(std::io::stdin().lock(), std::io::stdout().lock()) {
@@ -133,7 +158,8 @@ fn tools() -> Value {
                 An empty query matches every package. \
                 The answer lists the most downloaded packages first, one on each line. \
                 Each line gives the name, the latest version, the environments, and the download count. \
-                It also gives the language when it is not luau, the description, a deprecation reason, and the install command.",
+                It also gives the language when it is not luau, the description, a deprecation reason, and the install command. \
+                To also search Wally, pesde, and Forest, use search_all.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -160,6 +186,45 @@ fn tools() -> Value {
                         "maximum": MAX_LIMIT,
                         "default": DEFAULT_LIMIT,
                         "description": "The maximum number of packages to return."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "search_all",
+            "description": "Searches the ember, Wally, pesde, and Forest registries at the same time. \
+                The query matches package names and descriptions, and case does not matter. \
+                Wally, pesde, and Forest need a query of 2 or more characters. \
+                Use search_packages to filter ember packages by environment or language. \
+                The answer lists the packages of each registry in the order that the registry gives, one on each line. \
+                Each line gives the registry, the name, the latest version, the environments, the description, and the install command. \
+                For Wally, pesde, and Forest, the install command adds --index with the registry name. \
+                The project needs that index in ember.toml first, and `embr index add <name>` adds it once. \
+                An ember line also gives the language when it is not luau, the download count, and a deprecation reason. \
+                Forest copies every open-source Wally package, and the answer leaves out those copies. \
+                A registry that fails or does not answer in 10 seconds is listed at the end with the reason, \
+                and the other registries still answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The text to find in a package name or description, for example \"signal\"."
+                    },
+                    "registries": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": REGISTRIES.map(Registry::name) },
+                        "uniqueItems": true,
+                        "description": "Search only these registries. Without it, the tool searches all four."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_LIMIT,
+                        "default": DEFAULT_ALL_LIMIT,
+                        "description": "The maximum number of packages to return from each registry."
                     }
                 },
                 "required": ["query"],
@@ -201,6 +266,7 @@ fn call(params: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| json!({}));
     let outcome = match name {
         "search_packages" => search_packages(arguments),
+        "search_all" => search_all(arguments),
         "package_info" => package_info(arguments),
         _ => return Err(format!("Unknown tool: {name}")),
     };
@@ -313,6 +379,26 @@ fn search_packages(arguments: Value) -> Result<String, Error> {
 
 /// the matches for `args` in `entries`, most downloaded first, as text.
 fn search(entries: &[SearchEntry], args: &SearchArgs) -> String {
+    let matches = matches(entries, args);
+    if matches.is_empty() {
+        return format!("No package matches \"{}\".", args.query);
+    }
+
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let mut text = format!(
+        "{} of {} matching packages, most downloaded first:\n",
+        matches.len().min(limit),
+        matches.len()
+    );
+    for entry in matches.iter().take(limit) {
+        text.push_str(&entry.line());
+        text.push('\n');
+    }
+    text
+}
+
+/// the entries that match `args`, most downloaded first. `limit` is ignored.
+fn matches<'a>(entries: &'a [SearchEntry], args: &SearchArgs) -> Vec<&'a SearchEntry> {
     let query = args.query.trim().to_lowercase();
     let mut matches: Vec<&SearchEntry> = entries
         .iter()
@@ -332,27 +418,354 @@ fn search(entries: &[SearchEntry], args: &SearchArgs) -> String {
                 .is_none_or(|language| entry.language() == language.as_str())
         })
         .collect();
-    if matches.is_empty() {
-        return format!("No package matches \"{}\".", args.query);
-    }
-
     matches.sort_by(|a, b| {
         b.downloads
             .unwrap_or(0)
             .cmp(&a.downloads.unwrap_or(0))
             .then_with(|| a.name.cmp(&b.name))
     });
-    let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let mut text = format!(
-        "{} of {} matching packages, most downloaded first:\n",
-        matches.len().min(limit),
-        matches.len()
-    );
-    for entry in matches.iter().take(limit) {
-        text.push_str(&entry.line());
-        text.push('\n');
+    matches
+}
+
+/// a registry that search_all reads. embr installs from each one.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+enum Registry {
+    Ember,
+    Wally,
+    Pesde,
+    Forest,
+}
+
+const REGISTRIES: [Registry; 4] = [
+    Registry::Ember,
+    Registry::Wally,
+    Registry::Pesde,
+    Registry::Forest,
+];
+
+impl Registry {
+    /// also the known index name that `embr add --index` takes.
+    fn name(self) -> &'static str {
+        match self {
+            Registry::Ember => "ember",
+            Registry::Wally => "wally",
+            Registry::Pesde => "pesde",
+            Registry::Forest => "forest",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchAllArgs {
+    query: String,
+    registries: Option<Vec<Registry>>,
+    limit: Option<usize>,
+}
+
+/// asks one registry for a query, and gives the search_all lines of its matches.
+type Fetch = fn(Registry, &str) -> Result<Vec<String>, String>;
+
+fn search_all(arguments: Value) -> Result<String, Error> {
+    let args: SearchAllArgs = serde_json::from_value(arguments)?;
+    Ok(search_registries(&args, fetch, REGISTRY_TIMEOUT))
+}
+
+/** the search_all answer. `fetch` runs on its own thread for each registry,
+and a registry that has not answered after `timeout` is listed as failed. */
+fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> String {
+    let query = args.query.trim().to_lowercase();
+    let registries: Vec<Registry> = REGISTRIES
+        .into_iter()
+        .filter(|registry| {
+            args.registries
+                .as_ref()
+                .is_none_or(|chosen| chosen.is_empty() || chosen.contains(registry))
+        })
+        .collect();
+
+    let mut results = BTreeMap::new();
+    let (sender, receiver) = mpsc::channel();
+    for &registry in &registries {
+        if registry != Registry::Ember && query.chars().count() < MIN_QUERY_LENGTH {
+            let reason = format!("the query needs {MIN_QUERY_LENGTH} or more characters");
+            results.insert(registry, Err(reason));
+            continue;
+        }
+        let (sender, query) = (sender.clone(), query.clone());
+        /* not a scoped thread, because the answer must not wait for a slow
+        registry. a late thread stops at the HTTP agent's timeout, and its
+        send then fails, which does no harm */
+        std::thread::spawn(move || {
+            let _ = sender.send((registry, fetch(registry, &query)));
+        });
+    }
+    drop(sender);
+    let deadline = Instant::now() + timeout;
+    while let Ok((registry, result)) =
+        receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        results.insert(registry, result);
+    }
+
+    let limit = args.limit.unwrap_or(DEFAULT_ALL_LIMIT).clamp(1, MAX_LIMIT);
+    let (mut counts, mut lines, mut failures) = (Vec::new(), String::new(), String::new());
+    let mut needs_index = false;
+    for registry in registries {
+        let result = results
+            .remove(&registry)
+            .unwrap_or_else(|| Err(format!("no answer in {timeout:?}")));
+        match result {
+            Ok(found) => {
+                let shown = found.len().min(limit);
+                needs_index |= registry != Registry::Ember && shown > 0;
+                counts.push(format!("{} {shown} of {}", registry.name(), found.len()));
+                for line in &found[..shown] {
+                    lines.push_str(line);
+                    lines.push('\n');
+                }
+            }
+            Err(reason) => failures.push_str(&format!("- {}: {reason}\n", registry.name())),
+        }
+    }
+    let mut text = if counts.is_empty() {
+        "No registry answered.\n".to_string()
+    } else {
+        format!(
+            "Matches in each registry's own order: {}.\n{lines}",
+            counts.join(", ")
+        )
+    };
+    if needs_index {
+        text.push_str(
+            "Before the first `embr add --index <name>` in a project, run `embr index add <name>` \
+             once. It writes the index to [indices] in ember.toml.\n",
+        );
+    }
+    if !failures.is_empty() {
+        text.push_str(&format!("Failed registries:\n{failures}"));
     }
     text
+}
+
+/// the live [`Fetch`]: one search request, plus the mirror checks for Forest.
+fn fetch(registry: Registry, query: &str) -> Result<Vec<String>, String> {
+    let encoded = encode(query);
+    let lines = match registry {
+        Registry::Ember => http::get_json(SEARCH_INDEX_URL, &[])
+            .map(|entries: Vec<SearchEntry>| ember_lines(&entries, query)),
+        Registry::Wally => http::get_json(
+            &format!("{WALLY_API}/v1/package-search?query={encoded}"),
+            &[],
+        )
+        .map(wally_lines),
+        Registry::Pesde => {
+            http::get_json(&format!("{PESDE_API}/v1/search?query={encoded}"), &[]).map(pesde_lines)
+        }
+        // 50 is the most rows that Forest gives in one page
+        Registry::Forest => http::get_json(
+            &format!(
+                "{}/v1/search/packages?q={encoded}&limit=50",
+                forest::API_URL
+            ),
+            &[],
+        )
+        .and_then(|page: ForestPage| forest_lines(page.packages, forest_copy)),
+    };
+    lines.map_err(|error| error.to_string())
+}
+
+/// percent-encodes `text` for a URL, as JavaScript's encodeURIComponent does.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// one search_all line for a Wally, pesde, or Forest package.
+fn registry_line(
+    registry: Registry,
+    name: &str,
+    version: &str,
+    environments: &[String],
+    description: &Option<String>,
+) -> String {
+    let mut parts = vec![format!("{} {name} {version}", registry.name())];
+    if !environments.is_empty() {
+        parts.push(environments.join(", "));
+    }
+    if let Some(description) = non_empty(description) {
+        parts.push(description.to_string());
+    }
+    parts.push(format!(
+        "install: embr add {name} --index {}",
+        registry.name()
+    ));
+    format!("- {}", parts.join(" | "))
+}
+
+/// the search_packages lines with the registry name, most downloaded first.
+fn ember_lines(entries: &[SearchEntry], query: &str) -> Vec<String> {
+    let args = SearchArgs {
+        query: query.to_string(),
+        environment: None,
+        language: None,
+        limit: None,
+    };
+    matches(entries, &args)
+        .iter()
+        .map(|entry| entry.line().replacen("- ", "- ember ", 1))
+        .collect()
+}
+
+/// one result of Wally's `GET /v1/package-search`.
+#[derive(Deserialize)]
+struct WallyPackage {
+    scope: String,
+    name: String,
+    description: Option<String>,
+    /// newest first, so the first one is the latest.
+    versions: Vec<String>,
+}
+
+/// Wally has Roblox packages only, so its results carry no environment.
+fn wally_lines(packages: Vec<WallyPackage>) -> Vec<String> {
+    let roblox = [Environment::Roblox.to_string()];
+    packages
+        .iter()
+        .map(|package| {
+            let name = format!("{}/{}", package.scope, package.name);
+            let version = package.versions.first().map_or("", String::as_str);
+            registry_line(
+                Registry::Wally,
+                &name,
+                version,
+                &roblox,
+                &package.description,
+            )
+        })
+        .collect()
+}
+
+/// pesde's `GET /v1/search`, one page of 50 results.
+#[derive(Deserialize)]
+struct PesdePage {
+    data: Vec<PesdePackage>,
+}
+
+#[derive(Deserialize)]
+struct PesdePackage {
+    name: String,
+    version: String,
+    description: Option<String>,
+    #[serde(default)]
+    targets: Vec<PesdeTarget>,
+}
+
+#[derive(Deserialize)]
+struct PesdeTarget {
+    kind: String,
+}
+
+fn pesde_lines(page: PesdePage) -> Vec<String> {
+    page.data
+        .iter()
+        .map(|package| {
+            let mut environments = Vec::new();
+            for target in &package.targets {
+                let name = pesde::parse_environment(&target.kind)
+                    .map_or(target.kind.clone(), |env| env.to_string());
+                if !environments.contains(&name) {
+                    environments.push(name);
+                }
+            }
+            registry_line(
+                Registry::Pesde,
+                &package.name,
+                &package.version,
+                &environments,
+                &package.description,
+            )
+        })
+        .collect()
+}
+
+/// Forest's `GET /v1/search/packages`.
+#[derive(Deserialize)]
+struct ForestPage {
+    packages: Vec<ForestRow>,
+}
+
+#[derive(Deserialize)]
+struct ForestRow {
+    name: String,
+    /// the scope
+    owner: String,
+    /// `"unclaimed"` for a scope with no Forest account
+    #[serde(rename = "ownerType")]
+    owner_type: String,
+    /// roblox or uefn. embr installs Roblox packages only.
+    platform: String,
+    version: String,
+    description: Option<String>,
+}
+
+/// `GET /v1/package/{scope}/{platform}/{name}/{version}`, the field read here.
+#[derive(Deserialize)]
+struct ForestVersion {
+    /// the registry this version is copied from, `"wally"` today.
+    #[serde(default, rename = "mirroredFrom")]
+    mirrored_from: Option<String>,
+}
+
+/** Forest copies every open-source Wally package under the same name.
+search_all lists only the packages published to Forest itself, as the
+website does. an unclaimed scope has no Forest account, so only the copy
+publishes there, and its rows drop out with no request. `is_copy` decides
+each other row, at most [`FOREST_CHECKS`] of them. */
+fn forest_lines(
+    rows: Vec<ForestRow>,
+    is_copy: impl Fn(&ForestRow) -> Result<bool, HttpError>,
+) -> Result<Vec<String>, HttpError> {
+    let roblox = [Environment::Roblox.to_string()];
+    let mut lines = Vec::new();
+    for row in rows
+        .iter()
+        .filter(|row| row.owner_type != "unclaimed" && row.platform == "roblox")
+        .take(FOREST_CHECKS)
+    {
+        if !is_copy(row)? {
+            // embr keys names in lowercase, and Forest matches any case
+            let name = format!("{}/{}", row.owner, row.name).to_lowercase();
+            lines.push(registry_line(
+                Registry::Forest,
+                &name,
+                &row.version,
+                &roblox,
+                &row.description,
+            ));
+        }
+    }
+    Ok(lines)
+}
+
+/// the live `is_copy` of [`forest_lines`]: one request for the version metadata.
+fn forest_copy(row: &ForestRow) -> Result<bool, HttpError> {
+    let url = format!(
+        "{}/v1/package/{}/roblox/{}/{}",
+        forest::API_URL,
+        encode(&row.owner.to_lowercase()),
+        encode(&row.name.to_lowercase()),
+        encode(&row.version)
+    );
+    let version: ForestVersion = http::get_json(&url, &[])?;
+    Ok(version.mirrored_from.is_some())
 }
 
 #[derive(Deserialize)]
@@ -490,7 +903,7 @@ mod tests {
             result["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("search_packages")
+                .contains("search_all")
         );
 
         // a version the server does not know gets its default
@@ -505,20 +918,27 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_gives_both_tools_with_schemas() {
+    fn tools_list_gives_every_tool_with_a_schema() {
         let answers = exchange(&[r#"{"jsonrpc":"2.0","id":"t","method":"tools/list"}"#]);
         let tools = answers[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["search_packages", "package_info"]);
+        assert_eq!(names, ["search_packages", "search_all", "package_info"]);
         for tool in tools {
             assert!(!tool["description"].as_str().unwrap().is_empty());
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
         assert_eq!(tools[0]["inputSchema"]["required"], json!(["query"]));
-        assert_eq!(tools[1]["inputSchema"]["required"], json!(["name"]));
+        assert_eq!(tools[1]["inputSchema"]["required"], json!(["query"]));
+        assert_eq!(tools[2]["inputSchema"]["required"], json!(["name"]));
+        for registry in tools[1]["inputSchema"]["properties"]["registries"]["items"]["enum"]
+            .as_array()
+            .unwrap()
+        {
+            serde_json::from_value::<Registry>(registry.clone()).unwrap();
+        }
 
         // every name in the enums parses as the type the call reads
         let properties = &tools[0]["inputSchema"]["properties"];
@@ -558,9 +978,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_packages","arguments":{"environment":"roblox"}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_packages","arguments":{"query":"x","environment":"cobol"}}}"#,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"package_info","arguments":{"name":"not a name"}}}"#,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"install","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_all","arguments":{"query":"x","registries":["npm"]}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"install","arguments":{}}}"#,
         ]);
-        for answer in &answers[..3] {
+        for answer in &answers[..4] {
             assert_eq!(answer["result"]["isError"], true);
             assert_eq!(answer["result"]["content"][0]["type"], "text");
         }
@@ -572,8 +993,9 @@ mod tests {
         assert!(text(0).contains("query"), "{}", text(0));
         assert!(text(1).contains("cobol"), "{}", text(1));
         assert!(text(2).contains("not a name"), "{}", text(2));
+        assert!(text(3).contains("npm"), "{}", text(3));
         // a tool that does not exist is a protocol error
-        assert_eq!(answers[3]["error"]["code"], INVALID_PARAMS);
+        assert_eq!(answers[4]["error"]["code"], INVALID_PARAMS);
     }
 
     /// the live file's shape, plus an entry with every field the registry adds.
@@ -677,6 +1099,202 @@ mod tests {
             names(&search_for(json!({ "query": "", "limit": 500 }))).len(),
             5
         );
+    }
+
+    // trimmed from api.wally.run/v1/package-search?query=signal
+    const WALLY: &str = r#"[
+        {"description":"Signal class","name":"signal","scope":"sleitnick","versions":["2.0.3"]},
+        {"description":null,"name":"signal","scope":"ahmoin","versions":["1.0.1"]}]"#;
+
+    // trimmed from registry.pesde.dev/v1/search?query=signal
+    const PESDE: &str = r#"{"count":15,"data":[
+        {"name":"molyidev/signal","version":"1.0.3","description":"Signal library.","license":"MIT",
+         "published_at":"2026-02-04T21:48:17.91476814Z","targets":[{"bin":false,"kind":"roblox","lib":true}]},
+        {"name":"ewdev/signal","version":"0.1.0","description":"Cross runtime and typed signal implementation",
+         "published_at":"2025-11-01T06:30:05.174094223Z","targets":[{"bin":false,"kind":"roblox","lib":true},
+         {"bin":false,"kind":"lune","lib":true},{"bin":false,"kind":"luau","lib":true}]}]}"#;
+
+    // trimmed from api.forest.dev/v1/search/packages?q=signal&limit=50
+    const FOREST: &str = r#"{"packages":[
+        {"name":"signal","description":"Signal class","platform":"roblox",
+         "version":"3.2.0","owner":"finobinos","ownerType":"unclaimed","likes":0},
+        {"name":"Signal","description":"Custom event/signal implementation that avoids Roblox's deferred BindableEvent behavior.",
+         "platform":"roblox","version":"1.1.1","owner":"stratiz","ownerType":"user","likes":1}],
+        "page":1,"limit":50,"hasMore":true}"#;
+
+    // trimmed from api.forest.dev/v1/package/stratiz/roblox/signal/1.1.1
+    const FOREST_ORIGINAL: &str = r#"{"name":"Signal","scope":"stratiz","version":"1.1.1","dependencies":{},
+        "integrity":"73b0e11275f60547042a508caf7b08c61c27f25096a54119d6a272177b508e37",
+        "ownerType":"user","mirroredFrom":null}"#;
+
+    // trimmed from api.forest.dev/v1/package/sleitnick/roblox/knit/1.7.0
+    const FOREST_COPY: &str = r#"{"name":"knit","scope":"sleitnick","version":"1.7.0",
+        "integrity":"7999efe9356b4f0db3951c555cd36b2bafaf33328352d7417e2c771e4dc5a94e",
+        "ownerType":"unclaimed","mirroredFrom":"wally"}"#;
+
+    #[test]
+    fn registry_results_become_lines() {
+        assert_eq!(
+            ember_lines(&sample(), "SIGNAL"),
+            [
+                "- ember acme/signal 1.0.0 | roblox, lune | language: alloy | 3 downloads | \
+              Typed signals for Chief users. | deprecated: use acme/signal2 | install: embr add acme/signal"
+            ]
+        );
+        assert_eq!(
+            wally_lines(serde_json::from_str(WALLY).unwrap()),
+            [
+                "- wally sleitnick/signal 2.0.3 | roblox | Signal class | install: embr add sleitnick/signal --index wally",
+                "- wally ahmoin/signal 1.0.1 | roblox | install: embr add ahmoin/signal --index wally",
+            ]
+        );
+        assert_eq!(
+            pesde_lines(serde_json::from_str(PESDE).unwrap()),
+            [
+                "- pesde molyidev/signal 1.0.3 | roblox | Signal library. | install: embr add molyidev/signal --index pesde",
+                "- pesde ewdev/signal 0.1.0 | roblox, lune, luau | Cross runtime and typed signal implementation | \
+                 install: embr add ewdev/signal --index pesde",
+            ]
+        );
+    }
+
+    fn forest_row(owner: &str, name: &str, owner_type: &str, platform: &str) -> ForestRow {
+        ForestRow {
+            name: name.to_string(),
+            owner: owner.to_string(),
+            owner_type: owner_type.to_string(),
+            platform: platform.to_string(),
+            version: "1.0.0".to_string(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn forest_leaves_out_copies_of_wally_packages() {
+        let mut rows = serde_json::from_str::<ForestPage>(FOREST).unwrap().packages;
+        // a claimed scope that holds a copy, and a UEFN package
+        rows.push(forest_row("sleitnick", "knit", "user", "roblox"));
+        rows.push(forest_row("epic", "Signal", "organization", "uefn"));
+        let checked = std::cell::RefCell::new(Vec::new());
+        let lines = forest_lines(rows, |row| {
+            checked.borrow_mut().push(row.owner.clone());
+            Ok(row.name == "knit")
+        })
+        .unwrap();
+        assert_eq!(
+            lines,
+            [
+                "- forest stratiz/signal 1.1.1 | roblox | Custom event/signal implementation that avoids \
+              Roblox's deferred BindableEvent behavior. | install: embr add stratiz/signal --index forest"
+            ]
+        );
+        // the unclaimed row and the UEFN row cost no request
+        assert_eq!(*checked.borrow(), ["stratiz", "sleitnick"]);
+
+        // the live check reads mirroredFrom
+        let copy: ForestVersion = serde_json::from_str(FOREST_COPY).unwrap();
+        let original: ForestVersion = serde_json::from_str(FOREST_ORIGINAL).unwrap();
+        assert_eq!(copy.mirrored_from.as_deref(), Some("wally"));
+        assert_eq!(original.mirrored_from, None);
+
+        // the checks stop at the cap, and a failed check fails the registry
+        let many = || (0..20).map(|n| forest_row("acme", &format!("p{n}"), "user", "roblox"));
+        let count = std::cell::Cell::new(0);
+        let lines = forest_lines(many().collect(), |_| {
+            count.set(count.get() + 1);
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!((lines.len(), count.get()), (FOREST_CHECKS, FOREST_CHECKS));
+        assert!(forest_lines(many().collect(), |_| Err(HttpError::RateLimited)).is_err());
+    }
+
+    /// pesde fails, and Forest answers after the deadline of the tests.
+    fn fake(registry: Registry, query: &str) -> Result<Vec<String>, String> {
+        match registry {
+            Registry::Ember => Ok(vec![format!("- ember acme/{query}")]),
+            Registry::Wally => Ok((1..=30)
+                .map(|n| format!("- wally acme/{query}{n}"))
+                .collect()),
+            Registry::Pesde => Err("request failed: status code 503".to_string()),
+            Registry::Forest => {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(vec!["- forest late/package".to_string()])
+            }
+        }
+    }
+
+    const INDEX_NOTE: &str = "Before the first `embr add --index <name>` in a project, \
+        run `embr index add <name>` once. It writes the index to [indices] in ember.toml.\n";
+
+    fn search_fake(args: Value) -> String {
+        let args = serde_json::from_value(args).unwrap();
+        search_registries(&args, fake, Duration::from_millis(300))
+    }
+
+    #[test]
+    fn search_all_lists_failed_registries_and_keeps_the_rest() {
+        let started = Instant::now();
+        let text = search_fake(json!({ "query": " Signal " }));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the slow registry held the answer"
+        );
+        let wally: String = (1..=10)
+            .map(|n| format!("- wally acme/signal{n}\n"))
+            .collect();
+        assert_eq!(
+            text,
+            format!(
+                "Matches in each registry's own order: ember 1 of 1, wally 10 of 30.\n\
+                 - ember acme/signal\n\
+                 {wally}\
+                 {INDEX_NOTE}\
+                 Failed registries:\n\
+                 - pesde: request failed: status code 503\n\
+                 - forest: no answer in 300ms\n"
+            )
+        );
+    }
+
+    #[test]
+    fn search_all_limit_and_registries_choose_the_answer() {
+        assert_eq!(
+            search_fake(json!({ "query": "signal", "registries": ["wally"], "limit": 2 })),
+            format!(
+                "Matches in each registry's own order: wally 2 of 30.\n\
+                 - wally acme/signal1\n\
+                 - wally acme/signal2\n\
+                 {INDEX_NOTE}"
+            )
+        );
+        // the limit stays in range
+        let wally = |limit: usize| {
+            search_fake(json!({ "query": "signal", "registries": ["wally"], "limit": limit }))
+        };
+        assert!(wally(0).contains("wally 1 of 30"));
+        assert!(wally(500).contains("wally 30 of 30"));
+
+        // a short query reaches ember only
+        assert_eq!(
+            search_fake(json!({ "query": "a", "registries": ["wally", "ember"] })),
+            "Matches in each registry's own order: ember 1 of 1.\n\
+             - ember acme/a\n\
+             Failed registries:\n\
+             - wally: the query needs 2 or more characters\n"
+        );
+        assert_eq!(
+            search_fake(json!({ "query": "x", "registries": ["pesde"] })),
+            "No registry answered.\n\
+             Failed registries:\n\
+             - pesde: the query needs 2 or more characters\n"
+        );
+    }
+
+    #[test]
+    fn encode_escapes_what_a_query_cannot_hold() {
+        assert_eq!(encode("chief/core ü&q=1"), "chief%2Fcore%20%C3%BC%26q%3D1");
+        assert_eq!(encode("a-b_c.d~e"), "a-b_c.d~e");
     }
 
     fn candidate(version: &str, yanked: bool, deprecated: Option<&str>, entry: &str) -> Candidate {
