@@ -2,6 +2,7 @@
 
 pub mod hooks;
 pub mod lockfile;
+mod luwu;
 pub mod manifest;
 pub mod package;
 pub mod requires;
