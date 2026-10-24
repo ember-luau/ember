@@ -5,8 +5,8 @@ that's all a published package carries. */
 
 use crate::error::Error;
 use crate::project::manifest::{Environment, LEGACY_MANIFEST_FILE, MANIFEST_FILE, RequireStyle};
-use crate::project::requires;
 use crate::project::rojo::{PACKAGES_DIR, PROJECT_FILE};
+use crate::project::{luwu, requires};
 use full_moon::ast::luau::{ExportedTypeDeclaration, ExportedTypeFunction};
 use full_moon::visitors::Visitor;
 use std::fs;
@@ -167,7 +167,7 @@ module path.
 None for everything the link file can't reach: a named `@alias/` needs the
 package's own .luaurc, an instance require isn't a path at all, and a `../`
 chain that climbs out of the package has nothing on the other side. */
-fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> {
+pub(super) fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> {
     let (base, rest) = if let Some(rest) = raw.strip_prefix("@self/") {
         (frame.own.as_str(), rest)
     } else if raw.starts_with("./") || raw.starts_with("../") {
@@ -214,13 +214,20 @@ pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
 }
 
 /** the entry's source for the type parse. full_moon reads Luau only, so a
-`.luwu` entry links without types, and without a warning about it. */
+`.luwu` entry gives its Luau stand-in, see [`luwu`]. a default that full_moon
+can't read costs that default only, not every type in the package. */
 pub fn entry_luau_source(dir: &Path, entry: &str) -> Option<String> {
     let path = entry_source(dir, entry)?;
-    if path.extension().is_some_and(|ext| ext == "luwu") {
-        return None;
+    let source = fs::read_to_string(&path).ok()?;
+    if path.extension().is_none_or(|ext| ext != "luwu") {
+        return Some(source);
     }
-    fs::read_to_string(path).ok()
+    let frame = RequireFrame::of(dir, entry);
+    let stand_in = luwu::stand_in(dir, &source, &frame, true);
+    if exported_types(&stand_in, &frame).is_some() {
+        return Some(stand_in);
+    }
+    Some(luwu::stand_in(dir, &source, &frame, false))
 }
 
 /// full_moon recurses per nesting level, so deep sources need serious stack. parsing gets its own thread with this much.
@@ -249,18 +256,114 @@ argument spelled out beats one whose default is undefined.
 None = source couldn't be parsed, invalid, absurdly nested, or a parser panic.
 caller decides how loudly to say so. */
 pub fn exported_types(source: &str, frame: &RequireFrame) -> Option<Exports> {
+    let frame = frame.clone();
+    on_parse_thread(source, move |source| extract_types(source, &frame))
+}
+
+/// runs `parse` on `source` on a thread with [`PARSE_STACK_BYTES`]. None = too deeply nested, or what `parse` gives.
+fn on_parse_thread<T: Send + 'static>(
+    source: &str,
+    parse: impl FnOnce(&str) -> Option<T> + Send + 'static,
+) -> Option<T> {
     if bracket_depth(source) > MAX_NESTING_DEPTH {
         return None;
     }
     let source = source.to_string();
-    let frame = frame.clone();
     std::thread::Builder::new()
         .name("luau-parse".to_string())
         .stack_size(PARSE_STACK_BYTES)
-        .spawn(move || extract_types(&source, &frame))
+        .spawn(move || parse(&source))
         .ok()?
         .join()
         .ok()? // full_moon panic reads as "couldn't parse"
+}
+
+/** the Alloy side of a link file, for an Alloy package in an Alloy project.
+Alloy reads an import through the `.luau` link file as plain Luau: a struct
+is a table, and an enum has no variants to `match` on. Alloy resolves `.aly`
+before `.luau`, so this barrel goes beside the link file and passes on the
+names from the package's Alloy entry. Luau requires still find the `.luau`
+link file.
+
+```alloy
+export { Point, Shape, area } from "./.ember/scope_pkg/src"
+```
+
+`dir` is the package on disk, `root` the same folder as the link file
+requires it, and `entry` the built module. Alloy has no `export *`, so the
+names come from what the built module returns and the types it exports.
+None = no Alloy source for the entry, or nothing to pass on. */
+pub fn alloy_link_contents(
+    dir: &Path,
+    root: &str,
+    entry: &str,
+    exports: &Exports,
+) -> Option<String> {
+    let folder = |key: &str, default: &str| {
+        toml_string(dir, "alloy.toml", &["build", key])
+            .unwrap_or_else(|| default.to_string())
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    // `out` mirrors the tree under `in`, so `build/lib` was built from `src/lib`
+    let (input, output) = (folder("in", "src"), folder("out", "build"));
+    let rest = entry.strip_prefix(output.as_str())?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    let module = format!("{input}{rest}");
+    let has_source = ["aly", "alx"].iter().any(|ext| {
+        dir.join(format!("{module}.{ext}")).is_file()
+            || dir.join(&module).join(format!("init.{ext}")).is_file()
+    });
+    if !has_source {
+        return None;
+    }
+
+    let built = fs::read_to_string(entry_source(dir, entry)?).ok()?;
+    let mut names = on_parse_thread(&built, returned_keys).unwrap_or_default();
+    for line in &exports.types {
+        let name = line
+            .trim_start_matches("export type ")
+            .split(['<', ' '])
+            .next()
+            .unwrap_or_default();
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+    }
+    // `default` takes `export default`, which an `export { }` list can't name
+    names.retain(|name| !name.is_empty() && name != "default");
+    (!names.is_empty()).then(|| {
+        format!(
+            "export {{ {} }} from \"{root}/{module}\"\n",
+            names.join(", ")
+        )
+    })
+}
+
+/// the keys of the table that the module returns last, `Point` in `return { Point = Point }`.
+fn returned_keys(source: &str) -> Option<Vec<String>> {
+    use full_moon::ast::{Expression, Field, LastStmt};
+
+    let ast = full_moon::parse(source).ok()?;
+    let Some(LastStmt::Return(statement)) = ast.nodes().last_stmt() else {
+        return None;
+    };
+    let Some(Expression::TableConstructor(table)) = statement.returns().iter().next() else {
+        return None;
+    };
+    Some(
+        table
+            .fields()
+            .iter()
+            .filter_map(|field| match field {
+                Field::NameKey { key, .. } => Some(trimmed(key)),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /** deepest `(){}[]` nesting in `source`. cheap over-approximation of the parser's
@@ -407,6 +510,15 @@ impl SourceVisitor {
             for generic in &export.generics {
                 used.push(generic.parameter.clone());
                 declared.push(self.restate(export, generic, frame, &mut exports));
+            }
+            /* Luau wants the defaults last, so a dropped default drops each
+            one before it too. `<T = string, U>` is a parse error */
+            if let Some(bare) = declared
+                .iter()
+                .zip(&used)
+                .rposition(|(line, name)| line == name)
+            {
+                declared[..bare].clone_from_slice(&used[..bare]);
             }
             exports.types.push(reexport(&export.name, &declared, &used));
         }
@@ -1823,6 +1935,15 @@ mod tests {
                 "#,
                 "export type Of<T, U> = module.Of<T, U>",
             ),
+            // the defaults must come last, so `T` loses a default that it could keep
+            (
+                r#"
+                type Private = number
+                export type Pair<T = string, U = Private> = { T | U }
+                return {}
+                "#,
+                "export type Pair<T, U> = module.Pair<T, U>",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -1929,20 +2050,181 @@ mod tests {
     }
 
     #[test]
-    fn luwu_entries_resolve_but_skip_the_type_parse() {
+    fn luwu_entries_resolve() {
         let base = std::env::temp_dir().join("embr-test-luwu-entry");
         let _ = fs::remove_dir_all(&base);
-        write_package(
-            &base.join("src"),
-            "init.luwu",
-            "export type T = number\nreturn {}",
-        );
+        write_package(&base.join("src"), "init.luwu", "export type T = number\n");
 
         assert_eq!(entry_source(&base, "src"), Some(base.join("src/init.luwu")));
         assert_eq!(guess_entry(&base).as_deref(), Some("src"));
-        // full_moon reads Luau only, so a Luwu entry links without types
-        assert_eq!(entry_luau_source(&base, "src"), None);
         assert_eq!(normalize_entry("lib/vec.luwu"), "lib/vec");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// the link file of a Luwu package, written the way install writes it.
+    fn luwu_link(base: &Path) -> String {
+        let source = entry_luau_source(base, "").expect("the entry reads");
+        let exports =
+            exported_types(&source, &RequireFrame::of(base, "")).expect("the stand-in parses");
+        link_contents("deviaze_chimera", "", &exports)
+    }
+
+    /** chimera's shapes: traits and classes that `export .{ }` takes from
+    another module, `export type .{ }` from a binding, generic classes, and
+    syntax that full_moon can't read all around them. */
+    #[test]
+    fn luwu_entries_link_with_their_types() {
+        let base = std::env::temp_dir().join("embr-test-luwu-link");
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base,
+            "init.luwu",
+            r#"--!strict
+--[=[
+    shows `export type Fake = string` in a doc block
+
+    ```luwu
+    const chimera = require("@libraries/chimera")
+    ```
+]=]
+export .{
+    Component,
+    Container as Box,
+    helper,
+    Table,
+    helpers.{ count },
+} = require("@self/src/core/markup")
+
+export core = require("@self/src/core/markup")
+
+const core_types = require("@self/src/core/markup")
+export type .{
+    Content,
+} = core_types
+export type .{ Wrapped } = core
+
+export class Writer<T = string>(pretty = false, indent = "  ")
+    function write(self, text: T): string
+        return `{text} export type InInterpolation = {if self.pretty then "\n" else "}"}`
+    end
+end
+
+export trait Named
+    expect function name(self): string
+end
+
+class Hidden
+end
+
+export type Pair<K, V = Hidden> = { key: K, value: V }
+export type Doubled = typeof({ for _, n in { 1, 2 } give n * 2 })
+export type function Wrap(ty: type)
+    return ty
+end
+-- export type InAComment = string
+const text = "export type InAString = string"
+const long = [==[ export type InALongString = string ]==]
+"#,
+        );
+        write_package(
+            &base.join("src/core"),
+            "markup.luwu",
+            r#"export trait Component
+    expect function render(self): string
+end
+
+export trait Container
+end
+
+export const function helper() end
+
+export const helpers = { count = 1 }
+
+export trait Child
+end
+
+export class Table<Headings = "">()
+end
+
+export type Content = string | number | Child | { read string | number | Child | none }
+export type Wrapped<T = number, U = Child> = { T | U }
+"#,
+        );
+
+        assert_eq!(
+            luwu_link(&base),
+            "local module = require(\"./.ember/deviaze_chimera\")\n\
+             export type Component = module.Component\n\
+             export type Box = module.Box\n\
+             export type Table<Headings = \"\"> = module.Table<Headings>\n\
+             export type Content = module.Content\n\
+             export type Wrapped<T, U> = module.Wrapped<T, U>\n\
+             export type Writer<T = string> = module.Writer<T>\n\
+             export type Named = module.Named\n\
+             export type Pair<K, V> = module.Pair<K, V>\n\
+             export type Doubled = module.Doubled\n\
+             export type Wrap<ty> = module.Wrap<ty>\n\
+             return module\n"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// the barrel finds the Alloy module that `alloy build` built the entry from, through `[build]`.
+    #[test]
+    fn alloy_links_map_the_entry_back_to_its_source() {
+        let base = std::env::temp_dir().join("embr-test-alloy-barrel");
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base,
+            "alloy.toml",
+            "[build]\nin = \"./lib/\"\nout = \"out\"\n",
+        );
+        write_package(
+            &base.join("lib/shapes"),
+            "init.aly",
+            "export enum Shape as Empty end\n",
+        );
+        write_package(
+            &base.join("out/shapes"),
+            "init.luau",
+            "return { Shape = Shape }\n",
+        );
+        write_package(&base.join("out"), "plain.luau", "return { x = 1 }\n");
+        let types = type_lines(["export type Shape = module.Shape"]);
+        let link = |entry: &str| alloy_link_contents(&base, "./.ember/a_b", entry, &types);
+
+        assert_eq!(
+            link("out/shapes").as_deref(),
+            Some("export { Shape } from \"./.ember/a_b/lib/shapes\"\n")
+        );
+        // no `.aly` built `out/plain`, so Alloy reads it as Luau, the way it reads any Luau module
+        assert_eq!(link("out/plain"), None);
+        // outside `out`, the build wrote nothing there
+        assert_eq!(link("outer/shapes"), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a default that full_moon can't read costs the defaults, not the types.
+    #[test]
+    fn unreadable_luwu_defaults_keep_the_types() {
+        let base = std::env::temp_dir().join("embr-test-luwu-defaults");
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base,
+            "init.luwu",
+            "export type Odd<T = 1> = { T }\nexport type Plain<T = string> = T\n",
+        );
+
+        assert_eq!(
+            luwu_link(&base),
+            "local module = require(\"./.ember/deviaze_chimera\")\n\
+             export type Odd<T> = module.Odd<T>\n\
+             export type Plain<T> = module.Plain<T>\n\
+             return module\n"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

@@ -391,7 +391,7 @@ pub enum Environment {
     Luau,
     /// needs the Lute runtime
     Lute,
-    /// needs the seal runtime, which loads `.luau` files only
+    /// needs the Seal runtime, which runs Luau and Luwu
     Seal,
     /// needs the Zune runtime
     Zune,

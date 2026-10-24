@@ -119,6 +119,28 @@ fn build_alloy_packages(
     }
 }
 
+/** the `.aly` barrel beside the link file at `link_path`, when an Alloy
+project installs an Alloy package, so that its imports read the package's
+own declarations. see [`package::alloy_link_contents`]. */
+fn write_alloy_link(
+    manifest: &Manifest,
+    dir: &Path,
+    link_path: &Path,
+    root: &str,
+    entry: &str,
+    exports: &package::Exports,
+) -> std::io::Result<()> {
+    if manifest.target().map(|target| target.language) != Some(Language::Alloy)
+        || !is_alloy_package(dir)
+    {
+        return Ok(());
+    }
+    match package::alloy_link_contents(dir, root, entry, exports) {
+        Some(contents) => fs::write(link_path.with_extension("aly"), contents),
+        None => Ok(()),
+    }
+}
+
 /// a package whose ember.toml says `language = "alloy"` and that ships an Alloy config to build with.
 fn is_alloy_package(dir: &Path) -> bool {
     let has_config = dir.join("alloy.toml").is_file() || dir.join(".config.aly").is_file();
@@ -1297,14 +1319,24 @@ fn write_registry_link(
             let out = manifest.packages_out(job.context);
             let folder = job.name.replace('/', "_");
             let (link_path, up) = link_file(&out, link)?;
+            let root = format!("{up}/{STORE_DIR}/{folder}");
             fs::write(
                 &link_path,
                 package::link_contents_at(
-                    &format!("{up}/.ember/{folder}"),
+                    &root,
                     entry,
                     &extracted.types,
                     manifest.require_style(job.context),
                 ),
+            )?;
+            let storage = out.join(STORE_DIR).join(&folder);
+            write_alloy_link(
+                manifest,
+                &storage,
+                &link_path,
+                &root,
+                entry,
+                &extracted.types,
             )?;
         }
         // entry-less packages warn even without a link to write, nothing
@@ -1355,6 +1387,7 @@ fn link_workspace_member(
                     manifest.require_style(job.context),
                 ),
             )?;
+            write_alloy_link(manifest, member_dir, &link_path, &root, &entry, &exports)?;
         }
         (_, None) => warn_no_entry(&job.name, progress),
         // a transitively pulled member, link targets exist, no link written
@@ -3252,5 +3285,95 @@ mod tests {
         assert!(!is_alloy_package(&dir), "no config, nothing to build with");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /** an Alloy package links for both kinds of consumer. a Luau project
+    gets the `.luau` link file with the built types. an Alloy project also
+    gets an `.aly` barrel, which Alloy resolves first, so that its imports
+    read the declared structs and enums. */
+    #[test]
+    fn alloy_projects_get_an_alloy_link_beside_the_luau_one() {
+        let base = std::env::temp_dir().join("embr-test-alloy-link");
+        let _ = fs::remove_dir_all(&base);
+        let out = base.join("packages/luau");
+        let storage = out.join(STORE_DIR).join("fixture_geometry");
+        let write = |file: &str, text: &str| {
+            let path = storage.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "ember.toml",
+            "[target]\nenvironment = \"luau\"\nlanguage = \"alloy\"\nmain = \"build/init.luau\"\n",
+        );
+        write("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n");
+        write(
+            "src/init.aly",
+            "export struct Point\n    x: number\nend\n\nexport enum Shape<T> as\n    Empty\n    Tagged(T)\nend\n",
+        );
+        // the shape of what `alloy build` writes for it
+        write(
+            "build/init.luau",
+            "local Point = {} Point.__index = Point\n\
+             export type Point = typeof(setmetatable({} :: { x: number }, Point))\n\
+             local Shape = {} Shape.__index = Shape\n\
+             export type Shape<T> = \"Empty\" | typeof(setmetatable({} :: { tag: \"Tagged\", _1: T }, Shape))\n\
+             export type Pair<A, B = string> = { first: A, second: B }\n\
+             local function area(shape: Shape<string>): number return 0 end\n\
+             return { Point = Point, Shape = Shape, area = area }\n",
+        );
+
+        let manifest = |language: &str| -> Manifest {
+            toml::from_str(&format!(
+                "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\n\
+                 [target]\nenvironment = \"luau\"\nlanguage = \"{language}\"\n\n\
+                 [config]\nluau-packages-out = \"{}\"\n",
+                out.to_string_lossy().replace('\\', "/")
+            ))
+            .unwrap()
+        };
+        let job = Job {
+            name: "fixture/geometry".to_string(),
+            version: "0.1.0".to_string(),
+            environment: Some(Environment::Luau),
+            context: Environment::Luau,
+            source: index::DownloadSource::Zip {
+                url: "https://example.com/geometry/0.1.0".to_string(),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: Some("geometry".to_string()),
+            redirects: BTreeMap::new(),
+            patch: None,
+        };
+        let extracted = Extracted {
+            environment: Environment::Luau,
+            entry: Some("build".to_string()),
+            types: link_types(&storage, "build", &job.name, &mut |_| {}),
+        };
+        let bar = Progress::hidden();
+        let luau_link = "local module = require(\"./.ember/fixture_geometry/build\")\n\
+             export type Point = module.Point\n\
+             export type Shape<T> = module.Shape<T>\n\
+             export type Pair<A, B = string> = module.Pair<A, B>\n\
+             return module\n";
+
+        write_registry_link(&manifest("luau"), &job, &extracted, &bar).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("geometry.luau")).unwrap(),
+            luau_link
+        );
+        assert!(!out.join("geometry.aly").exists(), "Luau reads no barrel");
+
+        write_registry_link(&manifest("alloy"), &job, &extracted, &bar).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("geometry.luau")).unwrap(),
+            luau_link
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("geometry.aly")).unwrap(),
+            "export { Point, Shape, area, Pair } from \"./.ember/fixture_geometry/src\"\n"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
