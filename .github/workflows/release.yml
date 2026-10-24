@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A dry run builds and stages every asset and stops there. It makes no
+  # release, publishes nothing to crates.io and pushes nothing to the AUR,
+  # so the matrix is provable before a tag starts the one-way half.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,6 +26,11 @@ jobs:
       - name: Check version
         run: |
           crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          # a dry run has no tag to compare
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "dry run at Cargo.toml version $crate_version"
+            exit 0
+          fi
           tag_version="${GITHUB_REF_NAME#v}"
           if [ "$crate_version" != "$tag_version" ]; then
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version" >&2
@@ -37,6 +46,7 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,12 +88,19 @@ jobs:
         # Asset names must stay in the form embr-{os}-{arch}[.exe] that
         # `embr self update` derives from std::env::consts. The zip staged
         # below is named from the same base -- see the Stage assets step.
+        #
+        # The Linux target builds with cargo-zigbuild against glibc 2.17
+        # (`zig`). A plain build on the runner links its own glibc, 2.39 on
+        # ubuntu-24.04, and the binary then fails to start on Debian 12
+        # (2.36), Ubuntu 22.04 (2.35), and older. Zig also compiles the C
+        # and assembly of `ring`, the crypto under rustls.
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: embr-windows-x86_64.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            zig: x86_64-unknown-linux-gnu.2.17
             asset: embr-linux-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -98,8 +115,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install zig and cargo-zigbuild
+        if: matrix.zig
+        run: |
+          # A venv, since the runner's Python refuses a global pip install.
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install --quiet cargo-zigbuild==0.24.0 ziglang==0.17.0
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
       - name: Build
+        if: ${{ !matrix.zig }}
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build (zig, old glibc)
+        if: matrix.zig
+        # The output still goes to target/<target>/release: zigbuild drops
+        # the glibc version from the folder name.
+        run: cargo zigbuild --release --locked --target ${{ matrix.zig }}
+      - name: Check the glibc the binary needs
+        if: matrix.zig
+        run: |
+          path="target/${{ matrix.target }}/release/embr"
+          need=$(objdump -T "$path" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "embr needs $need"
+          # Above 2.17 means the build linked the runner's glibc.
+          if [ "$(printf '%s\nGLIBC_2.17\n' "$need" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+            echo "::error::embr needs $need, newer than GLIBC_2.17"
+            exit 1
+          fi
+          "$path" --version
       # Two assets per platform, on purpose:
       #
       #   embr-{os}-{arch}.zip   holding a bare embr[.exe]. What `embr self
@@ -134,6 +176,7 @@ jobs:
           fi
           ls -l dist
       - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -151,6 +194,7 @@ jobs:
   aur:
     name: AUR
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     uses: ./.github/workflows/aur.yml
     with:
       version: ${{ github.ref_name }}
