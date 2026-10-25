@@ -379,6 +379,9 @@ pub enum Error {
     #[error("Invalid ember.toml: {0}")]
     ManifestInvalid(String),
 
+    #[error("Could not migrate {file}: {reason}")]
+    Migrate { file: String, reason: String },
+
     #[error("No script named '{0}' under [scripts] in ember.toml")]
     ScriptMissing(String),
 

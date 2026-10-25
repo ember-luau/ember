@@ -82,6 +82,9 @@ pub enum Commands {
     #[command(subcommand)]
     Index(commands::index::IndexCommand),
 
+    /// Move a pesde, Wally, or Forest manifest into ember.toml
+    Migrate(commands::migrate::MigrateArgs),
+
     /// Edit a dependency's source and keep the edit across installs
     #[command(arg_required_else_help = true)]
     Patch(commands::patch::PatchArgs),
@@ -151,6 +154,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),
         Commands::Add(args) => done(commands::add::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
+        Commands::Migrate(args) => done(commands::migrate::run(args)),
         Commands::Install(args) => done(commands::install::run(args)),
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),

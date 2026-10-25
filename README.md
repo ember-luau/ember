@@ -103,6 +103,33 @@ its default: a Roblox project in Luau.
 use the default index, run `embr self index-prompt off`. Run
 `embr self index-prompt on` to get it back.
 
+## Move from pesde, Wally, or Forest
+
+`embr migrate` moves `pesde.toml`, `wally.toml`, and `forest.json` into
+`ember.toml`. It lists the files it finds, all checked, and moves the ones
+that stay checked. Without a terminal, or with `--yes`, it moves all of them.
+
+Each setting that ember has a place for moves, and leaves its old file. A
+setting that ember has no place for stays in the old file, so nothing is
+lost. A file with nothing left in it is deleted. Where `ember.toml` already
+sets a key, its own value stays. Lockfiles stay, and `embr install` writes
+`ember.lock`.
+
+- **pesde:** the package fields, the `[target]` environment and `lib`,
+  `includes`, `workspace_members`, `[indices]` and `[wally_indices]`, pesde,
+  Wally and workspace dependencies, `[overrides]`, and `[scripts]`. pesde
+  runs a script with Lune, so each one becomes `lune run <file>`, and
+  `embr run <name>` passes its arguments through. pesde's `default` indices
+  become `pesde` and `wally`, so ember's own default index stays. Git and
+  path dependencies, dev and peer dependencies, `[engines]`, `[patches]`,
+  `[place]`, and the `sourcemap_generator` hook stay.
+- **Wally:** the package fields, `realm`, `include`, `exclude`, `registry`,
+  `[dependencies]`, and `[server-dependencies]`, which install into the
+  Roblox server tree. `[dev-dependencies]` and `[place]` stay.
+- **Forest:** `author` and `name`, the version, description, and license,
+  `platform = "roblox"`, `root`, and the dependencies with their aliases.
+  `mounts`, `overrides`, `excludes`, `packagesDir`, and UEFN projects stay.
+
 ## `embx`: run without installing
 
 ```sh
