@@ -44,7 +44,7 @@ fn known_url(name: &str) -> Option<&'static str> {
 take `--index` on the command line read it through here. */
 pub(crate) fn index_url_for(manifest: Option<&Manifest>, name: &str) -> Result<String, Error> {
     let name = name.trim();
-    if name.eq_ignore_ascii_case("ember") {
+    if name.eq_ignore_ascii_case(crate::project::manifest::EMBER_INDEX_NAME) {
         return Ok(crate::project::manifest::DEFAULT_INDEX_URL.to_string());
     }
     if let Some(url) = manifest.and_then(|manifest| manifest.indices.get(name)) {
