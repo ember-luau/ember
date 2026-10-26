@@ -103,10 +103,10 @@ its default: a Roblox project in Luau.
 use the default index, run `embr self index-prompt off`. Run
 `embr self index-prompt on` to get it back.
 
-## Move from pesde, Wally, or Forest
+## Move from pesde, Wally, Forest, or Crater
 
-`embr migrate` moves `pesde.toml`, `wally.toml`, and `forest.json` into
-`ember.toml`. It lists the files it finds, all checked, and moves the ones
+`embr migrate` moves `pesde.toml`, `wally.toml`, `forest.json`, and
+`crater.json` into `ember.toml`. It lists the files it finds, all checked, and moves the ones
 that stay checked. Without a terminal, or with `--yes`, it moves all of them.
 
 Each setting that ember has a place for moves, and leaves its old file. A
@@ -129,6 +129,16 @@ sets a key, its own value stays. Lockfiles stay, and `embr install` writes
 - **Forest:** `author` and `name`, the version, description, and license,
   `platform = "roblox"`, `root`, and the dependencies with their aliases.
   `mounts`, `overrides`, `excludes`, `packagesDir`, and UEFN projects stay.
+- **Crater:** the package fields, `can_publish` (as `private`), a `.png`,
+  `.jpg`, or `.webp` `icon` (as `logo`), `import_to` (as the environment),
+  `path_to_main`, `exclude`, `workspace`, `scripts`, `tools`, and each
+  `import_client` and `import_server` dependency from Wally, pesde, or
+  Forest. A server dependency installs into the Roblox server tree. A
+  dependency with no registry name moves when `registry` is the Wally or
+  pesde index alone. Packages of a crater registry, `path:` and `git+`
+  dependencies, `import_develop`, `registry`, `registries`, `overrides`,
+  `keywords`, and `crater.settings.json` stay. Fields that `crater init`
+  wrote empty go.
 
 ## `embx`: run without installing
 

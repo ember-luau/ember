@@ -82,7 +82,7 @@ pub enum Commands {
     #[command(subcommand)]
     Index(commands::index::IndexCommand),
 
-    /// Move a pesde, Wally, or Forest manifest into ember.toml
+    /// Move a pesde, Wally, Forest, or Crater manifest into ember.toml
     Migrate(commands::migrate::MigrateArgs),
 
     /// Edit a dependency's source and keep the edit across installs
