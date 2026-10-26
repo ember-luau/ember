@@ -38,6 +38,11 @@ pub fn is_manifest(file: &Path) -> bool {
 /// [indices] key used for dependencies that name no index.
 pub const DEFAULT_INDEX_NAME: &str = "default";
 
+/** the name of ember's own index, for `--index` and a dependency's `index`
+key. it needs no [indices] entry, the same as `local`. it names ember even
+when a `default` key or `embr self default-index` points somewhere else. */
+pub const EMBER_INDEX_NAME: &str = "ember";
+
 /** ember's own package index, the fallback for dependencies naming no index when
 the project defines no `default` one. pesde-format entries whose `download` URLs
 point at the registry CDN. written only by the ember API at publish time, read by
@@ -948,8 +953,9 @@ impl Manifest {
                 .indices
                 .get(key)
                 .map(String::as_str)
-                // the local registry needs no [indices] entry
+                // the local registry and ember's own index need no [indices] entry
                 .or((key == local::NAME).then_some(local::NAME))
+                .or((key == EMBER_INDEX_NAME).then_some(DEFAULT_INDEX_URL))
                 .ok_or_else(|| Error::UnknownIndex(key.to_string())),
         }
     }
@@ -1190,6 +1196,31 @@ mod tests {
             manifest.index_url(Some("missing")),
             Err(Error::UnknownIndex(_))
         ));
+    }
+
+    /** `ember` names ember's own index with no [indices] entry, even where a
+    `default` key sends bare dependencies elsewhere. a project key of the
+    same name wins, as it does for `local`. */
+    #[test]
+    fn ember_names_its_own_index() {
+        let pesde_default: Manifest =
+            toml::from_str("[indices]\ndefault = \"https://github.com/pesde-pkg/index\"\n")
+                .unwrap();
+        assert_eq!(
+            pesde_default.index_url(Some(EMBER_INDEX_NAME)).unwrap(),
+            DEFAULT_INDEX_URL
+        );
+        assert_eq!(
+            pesde_default.index_url(None).unwrap(),
+            "https://github.com/pesde-pkg/index"
+        );
+
+        let keyed: Manifest =
+            toml::from_str("[indices]\nember = \"https://example.com/index\"\n").unwrap();
+        assert_eq!(
+            keyed.index_url(Some(EMBER_INDEX_NAME)).unwrap(),
+            "https://example.com/index"
+        );
     }
 
     #[test]

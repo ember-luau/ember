@@ -139,15 +139,16 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
 /** asks which index to search. empty input means the default index,
 the `default` key under [indices] if set, else embr's. anything else
-has to be a key under [indices], or `local`. */
+has to be a key under [indices], `ember`, or `local`. */
 fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
     inquire::set_global_render_config(crate::ui::render_config());
 
     let mut known_keys: Vec<String> = manifest.indices.keys().cloned().collect();
     known_keys.push(local::NAME.to_string());
+    known_keys.push(crate::project::manifest::EMBER_INDEX_NAME.to_string());
     let key = inquire::Text::new("index:")
         .with_help_message(
-            "Key from [indices] in ember.toml, or local; press enter to use EMBR's index",
+            "Key from [indices] in ember.toml, ember, or local; press enter to use the default index",
         )
         .with_validator(move |input: &str| {
             let input = input.trim();
