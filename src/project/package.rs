@@ -922,9 +922,12 @@ other readers here. ember.toml and lpm.toml read each entry's `name` key, pesde.
 [server-dependencies] count too. the resolver installs them, wally.rs
 chains both tables, and a server-realm package like lyra declares ALL its
 deps there. reading only [dependencies] starved those packages of nested
-links and left their escape requires unrewritten. dev/peer tables stay
-out. missing or unparseable manifests read as no dependencies, same stance
-as `toml_string`. */
+links and left their escape requires unrewritten. pesde's
+[peer_dependencies] count for the same reason: the resolver installs a
+peer, and the package requires it through its own packages folder, as
+metamethods/typed does with typed_core. dev tables stay out. missing or
+unparseable manifests read as no dependencies, same stance as
+`toml_string`. */
 pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
     /// how one manifest flavor names the package a dependency entry means
     type DependencyName = fn(&toml::Value) -> Option<String>;
@@ -935,11 +938,15 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
     let manifests: [(&str, &[&str], DependencyName); 4] = [
         (MANIFEST_FILE, &["dependencies"], own),
         (LEGACY_MANIFEST_FILE, &["dependencies"], own),
-        ("pesde.toml", &["dependencies"], |entry| {
-            let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
-            // pesde serializes wally package names with a "wally#" prefix
-            Some(name.strip_prefix("wally#").unwrap_or(name).to_string())
-        }),
+        (
+            "pesde.toml",
+            &["dependencies", "peer_dependencies"],
+            |entry| {
+                let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
+                // pesde serializes wally package names with a "wally#" prefix
+                Some(name.strip_prefix("wally#").unwrap_or(name).to_string())
+            },
+        ),
         (
             "wally.toml",
             &["dependencies", "server-dependencies"],
@@ -1028,6 +1035,16 @@ pub fn forest_dependency_dir(dir: &Path, entry: &str) -> Option<PathBuf> {
     }
     let module = entry_source(dir, entry)?;
     Some(module.parent()?.join(folder))
+}
+
+/** where a package published to pesde looks for a dependency installed for
+`environment`: `<target>_packages` at its root, the folder pesde links
+dependencies into. metamethods/typed requires `./luau_packages/typed_core`
+from its `lib/init.luau`. None for a package that ships no pesde.toml. */
+pub fn pesde_dependency_dir(dir: &Path, environment: Environment) -> Option<PathBuf> {
+    dir.join("pesde.toml")
+        .is_file()
+        .then(|| dir.join(format!("{}_packages", environment.as_str())))
 }
 
 /** the first line of each file the Forest wally mirror generates: a root
@@ -1245,6 +1262,23 @@ mod tests {
                 ("hello".to_string(), "pesde/hello".to_string()),
                 ("promise".to_string(), "evaera/promise".to_string()),
             ]
+        );
+
+        /* a pesde peer links like any other dependency: metamethods/typed
+        requires `./luau_packages/typed_core`, its peer. dev still doesn't */
+        let peer = base.join("pesde-peer");
+        write_package(
+            &peer,
+            "pesde.toml",
+            "[peer_dependencies.typed_core]\nname = \"metamethods/typed_core\"\nversion = \"^0.1.0\"\n\n\
+             [dev_dependencies]\nrojo = { name = \"pesde/rojo\", version = \"^7\" }\n",
+        );
+        assert_eq!(
+            declared_dependencies(&peer),
+            [(
+                "typed_core".to_string(),
+                "metamethods/typed_core".to_string()
+            )]
         );
 
         // wally.toml reads `alias = "scope/name@req"`, req stripped.
