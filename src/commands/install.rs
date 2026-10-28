@@ -426,6 +426,7 @@ fn install_project(
                 in_place,
                 redirects: package.redirects.clone(),
                 requires: manifest.require_style(package.context()),
+                lazy_collections: lazy_collections(manifest, package.context()),
             }
         })
         .collect();
@@ -1281,7 +1282,13 @@ fn install_one(
             if manifest.require_style(job.context) == RequireStyle::String {
                 requires::rewrite_instance_requires(&storage, &entry)?;
             }
-            let types = link_types(&storage, &entry, &job.name, &mut warner(progress));
+            let types = link_types(
+                &storage,
+                &entry,
+                &job.name,
+                lazy_collections(manifest, job.context),
+                &mut warner(progress),
+            );
             (Some(entry), types)
         }
         None => (None, package::Exports::default()),
@@ -1377,7 +1384,13 @@ fn link_workspace_member(
             if !root.starts_with("..") {
                 root = format!("./{root}");
             }
-            let exports = link_types(member_dir, &entry, &job.name, &mut warner(progress));
+            let exports = link_types(
+                member_dir,
+                &entry,
+                &job.name,
+                lazy_collections(manifest, job.context),
+                &mut warner(progress),
+            );
             fs::write(
                 &link_path,
                 package::link_contents_at(
@@ -1436,6 +1449,8 @@ struct StoredPackage {
     entry: Option<String>,
     /// how its nested links and rewritten requires are written, from its context
     requires: RequireStyle,
+    /// how its nested links to a collection load the members, see [`lazy_collections`]
+    lazy_collections: bool,
 }
 
 /** link files inside a stored package for its own declared dependencies,
@@ -1498,7 +1513,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             };
             let Some(entry) = dep.entry.clone() else {
                 warn(format!(
-                    "warning: could not find an entry point for {dependency}; no nested link generated in {}",
+                    "warning: could not find an entry point or any modules in {dependency}; no nested link generated in {}",
                     package.name
                 ));
                 continue;
@@ -1522,14 +1537,15 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 .entry((dependency.clone(), package.context))
                 .or_insert_with(|| {
                     /* install_packages already parsed and complained about
-                    every stored entry point, so no warn sink here, it would
-                    just say the same thing twice */
-                    package::entry_luau_source(&dep.storage, &entry)
-                        .and_then(|source| {
-                            let frame = package::RequireFrame::of(&dep.storage, &entry);
-                            package::exported_types(&source, &frame)
-                        })
-                        .unwrap_or_default()
+                    every stored entry point, so the warn sink is silent, it
+                    would just say the same thing twice */
+                    link_types(
+                        &dep.storage,
+                        &entry,
+                        &dependency,
+                        package.lazy_collections,
+                        &mut |_| {},
+                    )
                 })
                 .clone();
             let link_path = link_dir.join(format!("{alias}.luau"));
@@ -1640,15 +1656,22 @@ fn is_plain_file_name(alias: &str) -> bool {
 }
 
 /** exported types have to be restated in the link file to survive the
-wrapper. an unparseable entry point still links, just without its types. */
+wrapper. an unparseable entry point still links, just without its types.
+an entry with no module is a collection, and its members go in instead,
+`lazy` as [`lazy_collections`] decides. */
 fn link_types(
     package_dir: &Path,
     entry: &str,
     name: &str,
+    lazy: bool,
     warn: &mut impl FnMut(String),
 ) -> package::Exports {
     let Some(source) = package::entry_luau_source(package_dir, entry) else {
-        return package::Exports::default();
+        return package::Exports {
+            members: package::collection_members(package_dir, entry),
+            lazy,
+            ..package::Exports::default()
+        };
     };
     let frame = package::RequireFrame::of(package_dir, entry);
     package::exported_types(&source, &frame).unwrap_or_else(|| {
@@ -1659,12 +1682,28 @@ fn link_types(
     })
 }
 
+/** whether a collection link in `context` requires each member on its first
+read. only Roblox needs this: a client must not run a server module. other
+links require all members at once, because Lune's require yields and a
+metamethod cannot yield. the project's [target] decides too, because a Lune
+project installs the Roblox packages it uses in the roblox context. */
+fn lazy_collections(manifest: &Manifest, context: Environment) -> bool {
+    let roblox = |environment| matches!(environment, Environment::Roblox | Environment::Server);
+    roblox(context)
+        && manifest
+            .targets()
+            .iter()
+            .all(|target| roblox(target.environment))
+}
+
 /** which module inside `dir` a link to `name` should point at.
 
-three sources, in order. the `entry` its [dependencies] entry states, then
+four sources, in order. the `entry` its [dependencies] entry states, then
 what the package declares itself, then a guess from what it ships. the guess
 is announced, since a link file built on one is otherwise a mystery to
-whoever hits it, and the message names the way to correct it. */
+whoever hits it, and the message names the way to correct it. last, the
+folder of a collection. the guess comes first because it keeps the link files
+of packages that install today. */
 fn entry_for(
     manifest: &Manifest,
     name: &str,
@@ -1673,7 +1712,9 @@ fn entry_for(
 ) -> Option<String> {
     if let Some(stated) = manifest.entry_override(name) {
         let entry = package::normalize_entry(stated);
-        if package::entry_source(dir, &entry).is_some() {
+        if package::entry_source(dir, &entry).is_some()
+            || !package::collection_members(dir, &entry).is_empty()
+        {
             return Some(entry);
         }
         /* a typo would otherwise write a link file pointing at nothing, and
@@ -1686,11 +1727,13 @@ fn entry_for(
         return Some(declared);
     }
 
-    let guessed = package::guess_entry(dir)?;
-    warn(format!(
-        "warning: {name} names no entry point; guessed {guessed} (set `entry` on the dependency to choose another)"
-    ));
-    Some(guessed)
+    if let Some(guessed) = package::guess_entry(dir) {
+        warn(format!(
+            "warning: {name} names no entry point; guessed {guessed} (set `entry` on the dependency to choose another)"
+        ));
+        return Some(guessed);
+    }
+    package::collection_root(dir)
 }
 
 /// routes a warning line around the live display.
@@ -1700,7 +1743,7 @@ fn warner(progress: &Progress) -> impl FnMut(String) + '_ {
 
 fn warn_no_entry(name: &str, progress: &Progress) {
     progress.warn(&format!(
-        "warning: could not find an entry point for {name}; no link file generated"
+        "warning: could not find an entry point or any modules in {name}; no link file generated"
     ));
 }
 
@@ -2828,6 +2871,54 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /** a package with no entry point and nothing to guess links its modules
+    as a collection, silently. a stated `entry` can name a folder of modules
+    too. a package with nothing to require still gets no link. */
+    #[test]
+    fn a_package_with_no_entry_point_links_as_a_collection() {
+        let base = std::env::temp_dir().join("embr-test-entry-collection");
+        let _ = fs::remove_dir_all(&base);
+        let utils = base.join("utils");
+        write(&utils, "wally.toml", "[package]\nname = \"acme/utils\"\n");
+        for file in [
+            "src/Signal.luau",
+            "src/Promise.luau",
+            "extra/A.luau",
+            "extra/B.luau",
+        ] {
+            write(&utils, file, "return {}\n");
+        }
+
+        let bare: Manifest = toml::from_str("").unwrap();
+        let mut warnings = Vec::new();
+        assert_eq!(
+            entry_for(&bare, "acme/utils", &utils, &mut |message| warnings
+                .push(message))
+            .as_deref(),
+            Some("src")
+        );
+        let stated: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            Utils = { name = "acme/utils", version = "^", entry = "extra" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            entry_for(&stated, "acme/utils", &utils, &mut |message| warnings
+                .push(message))
+            .as_deref(),
+            Some("extra")
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let empty = base.join("empty");
+        write(&empty, "README.md", "");
+        assert_eq!(entry_for(&bare, "acme/empty", &empty, &mut |_| {}), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
     fn stored(name: &str, storage: PathBuf, environment: Environment) -> StoredPackage {
         stored_in(name, storage, environment, environment)
     }
@@ -2849,6 +2940,8 @@ mod tests {
             in_place: false,
             redirects: BTreeMap::new(),
             requires: RequireStyle::String,
+            // no manifest, so no [target], and the context decides
+            lazy_collections: matches!(context, Environment::Roblox | Environment::Server),
         }
     }
 
@@ -3144,6 +3237,85 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /** a dependency with no entry module gets a collection as its nested
+    link. the Roblox tree loads each member on its first read, the Lune tree
+    loads them at once. one declares nothing, one names a folder as `main`. */
+    #[test]
+    fn nested_links_to_a_collection_load_by_context() {
+        let base = std::env::temp_dir().join("embr-test-nested-collection");
+        let _ = fs::remove_dir_all(&base);
+        let bare: Manifest = toml::from_str("").unwrap();
+        let mut packages = Vec::new();
+        for environment in [Environment::Roblox, Environment::Lune] {
+            let out = base.join("packages").join(environment.dir_name());
+            let utils = out.join(".ember/acme_utils");
+            if environment == Environment::Lune {
+                write(&utils, "ember.toml", "[target]\nmain = \"src\"\n");
+            }
+            write(&utils, "src/Signal.luau", "return {}\n");
+            write(&utils, "src/Promise.luau", "return {}\n");
+            let app = out.join(".ember/acme_app");
+            write(
+                &app,
+                "ember.toml",
+                "[dependencies]\nutils = { name = \"acme/utils\", version = \"^\" }\n",
+            );
+            write(&app, "init.luau", "return {}\n");
+
+            let mut dependency = stored("acme/utils", utils.clone(), environment);
+            dependency.entry = entry_for(&bare, "acme/utils", &utils, &mut |_| {});
+            packages.push(dependency);
+            packages.push(stored("acme/app", app, environment));
+        }
+        let mut warnings = Vec::new();
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        let read = |environment: &str| {
+            fs::read_to_string(base.join(format!(
+                "packages/{environment}/.ember/acme_app/packages/{environment}/utils.luau"
+            )))
+            .unwrap()
+        };
+        let roblox = read("roblox");
+        assert!(roblox.contains("__index"), "{roblox}");
+        assert!(
+            roblox.contains("\tSignal: typeof(require(\"../../../acme_utils/src/Signal\")),\n"),
+            "{roblox}"
+        );
+        assert_eq!(
+            read("lune"),
+            "local modules = {\n\
+             \tPromise = require(\"../../../acme_utils/src/Promise\"),\n\
+             \tSignal = require(\"../../../acme_utils/src/Signal\"),\n\
+             }\n\
+             \n\
+             export type Modules = typeof(modules)\n\
+             \n\
+             return modules\n"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a Lune project runs the Roblox packages it installs under Lune, where a lazy link fails.
+    #[test]
+    fn only_a_roblox_project_loads_collections_lazily() {
+        let project = |environment: &str| -> Manifest {
+            toml::from_str(&format!("[target]\nenvironment = \"{environment}\"\n")).unwrap()
+        };
+        assert!(lazy_collections(&project("roblox"), Environment::Roblox));
+        assert!(lazy_collections(
+            &project("roblox_server"),
+            Environment::Roblox
+        ));
+        assert!(!lazy_collections(&project("lune"), Environment::Roblox));
+
+        let bare: Manifest = toml::from_str("").unwrap();
+        assert!(lazy_collections(&bare, Environment::Server));
+        assert!(!lazy_collections(&bare, Environment::Lune));
+    }
+
     #[test]
     fn contexts_keep_their_trees_apart() {
         let base = std::env::temp_dir().join("embr-test-nested-links-contexts");
@@ -3313,6 +3485,7 @@ mod tests {
                 in_place: true,
                 redirects: BTreeMap::new(),
                 requires: RequireStyle::String,
+                lazy_collections: true,
             },
             stored("acme/extras", consumer.clone(), Environment::Roblox),
         ];
@@ -3414,7 +3587,7 @@ mod tests {
         let extracted = Extracted {
             environment: Environment::Luau,
             entry: Some("build".to_string()),
-            types: link_types(&storage, "build", &job.name, &mut |_| {}),
+            types: link_types(&storage, "build", &job.name, false, &mut |_| {}),
         };
         let bar = Progress::hidden();
         let luau_link = "local module = require(\"./.ember/fixture_geometry/build\")\n\

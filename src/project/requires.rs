@@ -643,7 +643,7 @@ pub fn instance_chain(path: &str) -> String {
 }
 
 /// a Luau name that can follow a dot: an identifier and no reserved word.
-fn is_identifier(name: &str) -> bool {
+pub(super) fn is_identifier(name: &str) -> bool {
     const RESERVED: [&str; 21] = [
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
         "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
