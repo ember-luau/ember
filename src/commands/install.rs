@@ -1549,10 +1549,13 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 )),
             }
 
-            if let Some(forest_dir) = &forest_dir {
-                let link_path = forest_dir.join(format!("{alias}.luau"));
-                let root = relative_root(forest_dir, &dep.storage);
-                if let Err(error) = fs::create_dir_all(forest_dir).and_then(|()| {
+            /* and a package published to pesde requires each one from the
+            `<target>_packages` folder at its root */
+            let pesde_dir = package::pesde_dependency_dir(&package.storage, dep.environment);
+            for dir in forest_dir.iter().chain(pesde_dir.iter()) {
+                let link_path = dir.join(format!("{alias}.luau"));
+                let root = relative_root(dir, &dep.storage);
+                if let Err(error) = fs::create_dir_all(dir).and_then(|()| {
                     fs::write(
                         &link_path,
                         package::link_contents_at(&root, &entry, &exports, package.requires),
@@ -2847,6 +2850,69 @@ mod tests {
             redirects: BTreeMap::new(),
             requires: RequireStyle::String,
         }
+    }
+
+    /** a pesde package requires its dependencies from `<target>_packages`
+    at its root, and a peer is one of them. metamethods/typed 0.9.1 requires
+    its peer typed_core so, from `lib/init.luau` and from deeper files. */
+    #[test]
+    fn a_pesde_package_finds_its_peer_in_its_target_packages_folder() {
+        let base = std::env::temp_dir().join("embr-test-nested-links-pesde");
+        let _ = fs::remove_dir_all(&base);
+        let luau = base.join("packages/luau");
+
+        let core = luau.join(".ember/metamethods_typed_core");
+        write(
+            &core,
+            "pesde.toml",
+            "name = \"metamethods/typed_core\"\n\n[target]\nenvironment = \"luau\"\nlib = \"lib/init.luau\"\n",
+        );
+        write(&core, "lib/init.luau", "return { core = true }\n");
+
+        let typed = luau.join(".ember/metamethods_typed");
+        write(
+            &typed,
+            "pesde.toml",
+            "name = \"metamethods/typed\"\n\n[target]\nenvironment = \"luau\"\nlib = \"lib/init.luau\"\n\n\
+             [peer_dependencies.typed_core]\nname = \"metamethods/typed_core\"\nversion = \"^0.1.0\"\n",
+        );
+        write(
+            &typed,
+            "lib/init.luau",
+            "const core = require('./luau_packages/typed_core')\nreturn core\n",
+        );
+        write(
+            &typed,
+            "lib/builders/any.luau",
+            "const core = require('../../luau_packages/typed_core')\nreturn core\n",
+        );
+
+        let mut warnings = Vec::new();
+        let packages = [
+            stored("metamethods/typed_core", core.clone(), Environment::Luau),
+            stored("metamethods/typed", typed.clone(), Environment::Luau),
+        ];
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        // pesde's folder, where the package's own requires look
+        let link = fs::read_to_string(typed.join("luau_packages/typed_core.luau")).unwrap();
+        assert!(
+            link.starts_with("return require(\"../../metamethods_typed_core/lib\")"),
+            "{link}"
+        );
+        // embr's own layout too, as for every package
+        assert!(typed.join("packages/luau/typed_core.luau").exists());
+        // and the requires stay as pesde wrote them
+        assert!(
+            fs::read_to_string(typed.join("lib/init.luau"))
+                .unwrap()
+                .contains("./luau_packages/typed_core")
+        );
+        // the dependency has none of its own, so it gets no folder
+        assert!(!core.join("luau_packages").exists());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
