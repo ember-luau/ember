@@ -23,6 +23,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+mod editor;
+
 #[derive(Args, Debug)]
 #[command(after_long_help = "\
 When ember.toml, ember.lock, and the global tools file are unchanged since the \
@@ -433,6 +435,9 @@ fn install_project(
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
     build_alloy_packages(manifest, &stored, &mut |message| progress.warn(&message));
+    editor::sync(manifest, Path::new("."), &locked, &mut |message| {
+        progress.warn(&message)
+    });
 
     let package_count = locked.len();
     let changes = package_changes(
@@ -960,6 +965,13 @@ fn link_file(out: &Path, link: &str) -> std::io::Result<(PathBuf, &'static str)>
 few stats, install is also the repair path for wiped tool storage,
 download any that are missing, and say so. */
 fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<(), Error> {
+    /* the editor files can change while the packages do not: a deleted
+    .luaurc, or the first install with an embr that writes them */
+    if let Ok(lock) = Lockfile::load() {
+        editor::sync(manifest, Path::new("."), &lock.packages, &mut |message| {
+            eprintln!("{message}")
+        });
+    }
     let missing: Vec<ToolJob> = tool_jobs(manifest, include_global_tools)?
         .into_iter()
         .filter(|(alias, tool, _)| !tools::is_installed(alias, tool).unwrap_or(false))

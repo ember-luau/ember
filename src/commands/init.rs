@@ -422,6 +422,7 @@ fn package_manifest(
             excludes: Vec::new(),
             workspace: Vec::new(),
             language,
+            definitions: Vec::new(),
         }],
         config: Default::default(),
         indices: Default::default(),

@@ -66,13 +66,13 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
 /** One includes/excludes list, compiled. Entries with glob metacharacters
 match as globs, plain entries as path prefixes, so a bare directory name
 covers its subtree. */
-struct PathFilter {
+pub(crate) struct PathFilter {
     paths: Vec<PathBuf>,
     globs: globset::GlobSet,
 }
 
 impl PathFilter {
-    fn new(entries: &[String]) -> Result<Self, Error> {
+    pub(crate) fn new(entries: &[String]) -> Result<Self, Error> {
         let mut paths = Vec::new();
         let mut globs = globset::GlobSetBuilder::new();
         for entry in entries {
@@ -102,7 +102,7 @@ impl PathFilter {
         self.paths.is_empty() && self.globs.is_empty()
     }
 
-    fn matches(&self, file: &Path) -> bool {
+    pub(crate) fn matches(&self, file: &Path) -> bool {
         self.paths.iter().any(|path| file.starts_with(path)) || self.globs.is_match(file)
     }
 }
@@ -131,7 +131,7 @@ pub fn pack(root: &Path, manifest: &Manifest) -> Result<Vec<u8>, Error> {
     Ok(builder.into_inner()?.finish()?)
 }
 
-fn walk(
+pub(crate) fn walk(
     dir: &Path,
     root: &Path,
     out_dirs: &[PathBuf],
