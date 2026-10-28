@@ -249,6 +249,40 @@ model at publish and refuses:
 - an XML model (`.rbxmx`). `embr publish` stops on it before the upload;
 - a package with models but fewer than 10 lines of code.
 
+## Editor files on install
+
+`embr install` keeps two editor files in step with the installed packages.
+
+- **Require aliases.** Each packages folder that holds links gets an
+  alias. The folder of the project's own environment gets `packages`, so
+  `require("@packages/core")` works. Each other folder gets
+  `<folder>-packages`, such as `server-packages` for `packages/server`,
+  because Luau allows no `/` in an alias name. The aliases go into
+  `.config.luau` when the project has one, else into `.luaurc`. embr makes
+  a `.luaurc` only when an alias needs it. A folder with both files gets no
+  aliases, because Luau refuses that folder. A tree with
+  `requires = "instance"` gets no alias.
+- **Definition files.** The `.d.luau` files of the installed packages go
+  into `luau-lsp.types.definitionFiles` in `.vscode/settings.json`. A
+  package names its files in `[target] definitions`, as paths, folders, or
+  globs. Without that list, embr takes each `.d.luau` in the package, at
+  most ten. embr makes the settings file only when a package has a
+  definition file.
+
+embr changes only its own entries. Comments, other keys, your own aliases,
+and your own definition files stay. An alias is embr's when its name is one
+that embr gives a folder. A definition entry is embr's when its path goes
+into a package store. When embr cannot read a file, it warns and does not
+change it.
+
+To turn off one or both:
+
+```toml
+[config]
+aliases = false
+definition-files = false
+```
+
 ## Local packages
 
 A local package is a package that only this computer can install. Use it

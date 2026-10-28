@@ -160,6 +160,14 @@ pub struct Config {
     /// how the requires embr writes look, see [`RequireStyle`].
     #[serde(default, skip_serializing_if = "RequireStyle::is_string")]
     pub requires: RequireStyle,
+    /** whether install writes a require alias for each packages folder to
+    `.luaurc` or `.config.luau`. None means yes. */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<bool>,
+    /** whether install keeps `luau-lsp.types.definitionFiles` in
+    `.vscode/settings.json` in step with the packages. None means yes. */
+    #[serde(rename = "definition-files", skip_serializing_if = "Option::is_none")]
+    pub definition_files: Option<bool>,
 }
 
 /** how embr writes the requires it generates: link files, and package
@@ -192,6 +200,8 @@ impl Config {
             && self.seal_packages_out.is_none()
             && self.zune_packages_out.is_none()
             && self.requires.is_string()
+            && self.aliases.is_none()
+            && self.definition_files.is_none()
     }
 }
 
@@ -249,6 +259,10 @@ pub struct Target {
     an Alloy package for Lune is `lune` plus `alloy`. */
     #[serde(default, skip_serializing_if = "Language::is_luau")]
     pub language: Language,
+    /** the `.d.luau` files this package gives luau-lsp, as paths, folders,
+    or globs. empty means every `.d.luau` in the package, at most ten. */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub definitions: Vec<String>,
 }
 
 impl Target {
