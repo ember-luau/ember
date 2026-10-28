@@ -129,16 +129,19 @@ sets a key, its own value stays. Lockfiles stay, and `embr install` writes
 - **Forest:** `author` and `name`, the version, description, and license,
   `platform = "roblox"`, `root`, and the dependencies with their aliases.
   `mounts`, `overrides`, `excludes`, `packagesDir`, and UEFN projects stay.
-- **Crater:** the package fields, `can_publish` (as `private`), a `.png`,
-  `.jpg`, or `.webp` `icon` (as `logo`), `import_to` (as the environment),
-  `path_to_main`, `exclude`, `workspace`, `scripts`, `tools`, and each
-  `import_client` and `import_server` dependency from Wally, pesde, or
-  Forest. A server dependency installs into the Roblox server tree. A
-  dependency with no registry name moves when `registry` is the Wally or
-  pesde index alone. Packages of a crater registry, `path:` and `git+`
-  dependencies, `import_develop`, `registry`, `registries`, `overrides`,
-  `keywords`, and `crater.settings.json` stay. Fields that `crater init`
-  wrote empty go.
+- **Crater:** embr reads the `.crater-declare` file that Crater 0.5.5 and
+  later write beside `crater.json`. It gives each registry name's address,
+  the realm of each dependency list, and the default of each field, so
+  embr keeps no copy of Crater's rules. The package fields, `can_publish`
+  (as `private`), a `.png`, `.jpg`, or `.webp` `icon` (as `logo`),
+  `import_to` (as the environment), `path_to_main`, `exclude` or
+  `package_files.exclude`, `workspace`, `scripts`, `tools`, and each
+  client and server dependency from Ember, Wally, pesde, or Forest move. A
+  server dependency installs into the Roblox server tree. A dependency
+  with no registry name moves when `registry` is one such index alone.
+  Packages of a crater registry, `path:` and `git+` dependencies, develop
+  dependencies, `overrides`, `keywords`, and `crater.settings.json` stay. A
+  field equal to its default goes.
 
 ## `embx`: run without installing
 

@@ -12,8 +12,8 @@ lockfiles stay. ember.lock records what embr resolved itself, and the next
 
 use crate::error::Error;
 use crate::project::manifest::{
-    Environment, Manifest, Tool, is_github_username, manifest_in, override_paths,
-    parse_version_req, split_package_name,
+    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Environment, Manifest, Tool, is_github_username,
+    manifest_in, override_paths, parse_version_req, split_package_name,
 };
 use crate::registry::index::forest;
 use crate::ui;
@@ -140,7 +140,7 @@ fn migrate_in(dir: &Path, ask: bool) -> Result<(), Error> {
         .iter()
         .map(|&source| {
             let text = std::fs::read_to_string(dir.join(source.file()))?;
-            plan(source, &text).map_err(|reason| Error::Migrate {
+            plan(source, &text, dir).map_err(|reason| Error::Migrate {
                 file: source.file().to_string(),
                 reason,
             })
@@ -237,12 +237,17 @@ fn choose(found: &[Source]) -> Result<Vec<Source>, Error> {
         .collect())
 }
 
-fn plan(source: Source, text: &str) -> Result<Plan, String> {
+fn plan(source: Source, text: &str, dir: &Path) -> Result<Plan, String> {
     match source {
         Source::Pesde => plan_pesde(text),
         Source::Wally => plan_wally(text),
         Source::Forest => plan_forest(text),
-        Source::Crater => plan_crater(text),
+        Source::Crater => plan_crater(
+            text,
+            std::fs::read_to_string(dir.join(CRATER_DECLARE))
+                .ok()
+                .as_deref(),
+        ),
     }
 }
 
@@ -828,61 +833,49 @@ fn plan_forest(text: &str) -> Result<Plan, String> {
 
 // --- Crater -----------------------------------------------------------------
 
-/** the registries a crater dependency names before `#` that ember reads, with
-the index each one is. `crater#` and a project's own `registries` name crater
-registries, and ember cannot read one. */
-const CRATER_INDICES: [(&str, &str); 3] = [
+/// the file crater writes beside crater.json for other tools to read.
+const CRATER_DECLARE: &str = ".crater-declare";
+
+/** what `.crater-declare` tells another tool about a crater project: the
+address each registry name means, the realm each dependency list installs
+into, and the value of each field that sets nothing. crater 0.5.5 and later
+write it and keep it current on every command, so embr takes crater's rules
+from it and keeps no list of crater's fields. */
+#[derive(serde::Deserialize)]
+struct CraterDeclare {
+    #[serde(default)]
+    registries: BTreeMap<String, String>,
+    #[serde(default)]
+    realms: BTreeMap<String, String>,
+    #[serde(default)]
+    defaults: serde_json::Map<String, serde_json::Value>,
+}
+
+/// the indices embr installs from, by the key ember.toml names each one.
+const EMBER_INDICES: [(&str, &str); 4] = [
+    (EMBER_INDEX_NAME, DEFAULT_INDEX_URL),
     ("wally", WALLY_INDEX),
     ("pesde", PESDE_INDEX),
     ("forest", forest::API_URL),
 ];
 
-/** the crater.json keys that `crater init` writes empty when they hold
-nothing. `block_package_scripts` holds nothing when it is false, crater's own
-default. */
-const CRATER_FIELDS: [&str; 24] = [
-    "name",
-    "authors",
-    "description",
-    "license",
-    "version",
-    "keywords",
-    "registry",
-    "repository",
-    "registries",
-    "import_to",
-    "path_to_main",
-    "icon",
-    "path_to_definition_files",
-    "import_client",
-    "import_server",
-    "import_develop",
-    "overrides",
-    "workspace",
-    "scripts",
-    "tools",
-    "block_package_scripts",
-    "allow_scripts_from",
-    "exclude",
-    "allow_files",
-];
+/// the ember.toml index key of an address, when embr installs from it.
+fn ember_index(url: &str) -> Option<&'static str> {
+    let url = url.trim_end_matches('/');
+    EMBER_INDICES
+        .iter()
+        .find(|(_, known)| url.eq_ignore_ascii_case(known))
+        .map(|(key, _)| *key)
+}
 
-fn plan_crater(text: &str) -> Result<Plan, String> {
+fn plan_crater(text: &str, declare: Option<&str>) -> Result<Plan, String> {
     let mut manifest: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let declare: CraterDeclare = serde_json::from_str(declare.ok_or_else(|| {
+        format!("{CRATER_DECLARE} is missing beside it; a crater command from 0.5.5 on writes it")
+    })?)
+    .map_err(|error| format!("{CRATER_DECLARE}: {error}"))?;
     let mut writes = Vec::new();
-
-    // an empty value holds nothing, and `crater init` writes every field
-    manifest.retain(|key, value| {
-        !CRATER_FIELDS.contains(&key.as_str())
-            || match value {
-                serde_json::Value::String(text) => !text.is_empty(),
-                serde_json::Value::Array(list) => !list.is_empty(),
-                serde_json::Value::Object(map) => !map.is_empty(),
-                serde_json::Value::Bool(set) => *set || key != "block_package_scripts",
-                _ => true,
-            }
-    });
 
     let string = |manifest: &serde_json::Map<String, serde_json::Value>, key: &str| {
         manifest
@@ -890,6 +883,23 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
     };
+
+    /* a field that is missing has its default, so these two are read before
+    the defaults go: a game that sets no `can_publish` is still private */
+    let setting = |key: &str| manifest.get(key).or(declare.defaults.get(key)).cloned();
+    let can_publish = setting("can_publish").and_then(|value| value.as_bool());
+    let import_to = setting("import_to").and_then(|value| value.as_str().map(str::to_string));
+
+    /* a field equal to its default sets nothing, and `crater init` writes
+    every field. an empty `registry` means the default one too */
+    manifest.retain(|key, value| {
+        let empty = match value {
+            serde_json::Value::String(text) => text.is_empty(),
+            serde_json::Value::Array(list) => list.is_empty(),
+            _ => false,
+        };
+        declare.defaults.get(key) != Some(value) && !(key == "registry" && empty)
+    });
 
     let name = string(&manifest, "name").filter(|name| valid_name(name));
     let version = string(&manifest, "version").filter(|version| valid_version(version));
@@ -919,10 +929,7 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
             manifest.remove("authors");
             writes.push(Write::new("package", "authors", authors));
         }
-        if let Some(can_publish) = manifest
-            .get("can_publish")
-            .and_then(serde_json::Value::as_bool)
-        {
+        if let Some(can_publish) = can_publish {
             manifest.remove("can_publish");
             writes.push(Write::new("package", "private", !can_publish));
         }
@@ -939,7 +946,7 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
     }
 
     // where the package runs: a client or shared package is ember's roblox
-    let environment = match string(&manifest, "import_to").as_deref() {
+    let environment = match import_to.as_deref() {
         Some("client" | "shared") => Some(Environment::Roblox),
         Some("server") => Some(Environment::Server),
         _ => None,
@@ -951,53 +958,100 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
             manifest.remove("path_to_main");
             writes.push(Write::new("target", "main", main));
         }
-        for (from, to) in [("exclude", "excludes"), ("workspace", "workspace")] {
-            let Some(list) = manifest.get(from).and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            let Some(list) = list
+        let strings = |list: &serde_json::Value| {
+            list.as_array()?
                 .iter()
                 .map(serde_json::Value::as_str)
                 .collect::<Option<Array>>()
-            else {
-                continue;
-            };
-            manifest.remove(from);
-            writes.push(Write::new("target", to, list));
+        };
+        if let Some(list) = manifest.get("workspace").and_then(strings) {
+            manifest.remove("workspace");
+            writes.push(Write::new("target", "workspace", list));
+        }
+        // `package_files.exclude` since crater's API 3, `exclude` before it
+        let files = manifest
+            .get_mut("package_files")
+            .and_then(serde_json::Value::as_object_mut);
+        let excludes = match files {
+            Some(files) => files.get("exclude").and_then(strings).inspect(|_| {
+                files.remove("exclude");
+            }),
+            None => manifest.get("exclude").and_then(strings).inspect(|_| {
+                manifest.remove("exclude");
+            }),
+        };
+        if let Some(list) = excludes {
+            writes.push(Write::new("target", "excludes", list));
+        }
+        // what stays of package_files may be only its defaults
+        let file_defaults = declare
+            .defaults
+            .get("package_files")
+            .and_then(|d| d.as_object());
+        if let Some(files) = manifest
+            .get_mut("package_files")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            files.retain(|key, value| file_defaults.and_then(|d| d.get(key)) != Some(value));
+            if files.is_empty() {
+                manifest.remove("package_files");
+            }
         }
     }
 
-    /* a dependency with no registry name comes from `registry`. ember reads
-    that only when it is the Wally or the pesde index alone */
-    let registry = match manifest.get("registry") {
-        Some(serde_json::Value::String(url)) => Some(url.as_str()),
+    // each registry name crater knows, and the project's own on top
+    let mut names: BTreeMap<String, String> = declare
+        .registries
+        .iter()
+        .map(|(name, url)| (name.to_lowercase(), url.clone()))
+        .collect();
+    if let Some(serde_json::Value::Object(own)) = manifest.get("registries") {
+        for (name, url) in own {
+            if let Some(url) = url.as_str() {
+                names.insert(name.to_lowercase(), url.to_string());
+            }
+        }
+    }
+    // a registry is a name or an address, since crater's API 3
+    let index_of = |registry: &str| {
+        ember_index(
+            names
+                .get(&registry.to_lowercase())
+                .map_or(registry, String::as_str),
+        )
+    };
+
+    /* a dependency with no registry name comes from `registry`, the default
+    one when it names none. ember reads that only when it is one index alone */
+    let registry = match manifest
+        .get("registry")
+        .or(declare.defaults.get("registry"))
+    {
+        Some(serde_json::Value::String(registry)) => Some(registry.as_str()),
         Some(serde_json::Value::Array(list)) if list.len() == 1 => list[0].as_str(),
         _ => None,
     };
-    let default = registry.and_then(|url| {
-        CRATER_INDICES
-            .iter()
-            .find(|(_, index)| url.trim_end_matches('/').eq_ignore_ascii_case(index))
-            .map(|(key, _)| *key)
-    });
+    let default = registry.and_then(index_of);
     let mut used = BTreeSet::new();
     if let Some(key) = default {
         manifest.remove("registry");
         used.insert(key);
     }
 
-    // a server dependency installs into the Roblox server tree
-    for (list, target) in [
-        ("import_client", None),
-        ("import_server", Some(Environment::Server.as_str())),
-    ] {
+    // each list installs into its realm; a server one into the Roblox server tree
+    for (list, realm) in &declare.realms {
+        let target = match realm.as_str() {
+            "client" => None,
+            "server" => Some(Environment::Server.as_str()),
+            _ => continue,
+        };
         let Some(serde_json::Value::Array(specs)) = manifest.get_mut(list) else {
             continue;
         };
         specs.retain(|spec| {
             let Some((alias, name, req, index)) = spec
                 .as_str()
-                .and_then(|spec| crater_dependency(spec, default))
+                .and_then(|spec| crater_dependency(spec, &index_of, default))
             else {
                 return true;
             };
@@ -1014,13 +1068,11 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
         }
     }
 
-    for key in used {
-        let url = CRATER_INDICES
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, url)| *url)
-            .expect("every key came from CRATER_INDICES");
-        writes.push(Write::new("indices", key, url));
+    // ember's own index needs no [indices] entry
+    for (key, url) in EMBER_INDICES {
+        if key != EMBER_INDEX_NAME && used.contains(key) {
+            writes.push(Write::new("indices", key, url));
+        }
     }
 
     /* a script moves as it is, since `crater run` runs a command as `embr run`
@@ -1064,9 +1116,11 @@ fn plan_crater(text: &str) -> Result<Plan, String> {
 /** one crater dependency, `[Alias:][registry#]scope/name<op><version>`, as
 its ember alias, name, version requirement, and index key. None when ember
 cannot install it: a package of a crater registry, or a `path:` or `git+`
-source. `default` is the index of a dependency that names no registry. */
+source. `index_of` gives the index a registry name means, and `default` the
+index of a dependency that names none. */
 fn crater_dependency(
     spec: &str,
+    index_of: &dyn Fn(&str) -> Option<&'static str>,
     default: Option<&'static str>,
 ) -> Option<(String, String, String, &'static str)> {
     let word = |text: &str| {
@@ -1087,10 +1141,7 @@ fn crater_dependency(
     let index = match rest.split_once('#') {
         Some((registry, after)) if word(registry) => {
             rest = after;
-            CRATER_INDICES
-                .iter()
-                .find(|(key, _)| registry.eq_ignore_ascii_case(key))
-                .map(|(key, _)| *key)?
+            index_of(registry)?
         }
         _ => default?,
     };
@@ -1413,6 +1464,32 @@ TestEZ = "roblox/testez@0.4.1"
         assert!(!dir.join("wally.toml").exists());
     }
 
+    /// the `.crater-declare` that crater 0.5.7 writes, trimmed to what embr reads.
+    const DECLARE: &str = r#"{
+  "path_to_crater_settings": "crater.settings.json",
+  "path_to_package_info": "crater.json",
+  "api_version": 3,
+  "registries": {
+    "crater": "https://github.com/TheExeDEV/crater-registry",
+    "wally": "https://github.com/UpliftGames/wally-index",
+    "pesde": "https://github.com/pesde-pkg/index",
+    "forest": "https://api.forest.dev",
+    "ember": "https://github.com/ember-luau/index"
+  },
+  "realms": { "import_client": "client", "import_server": "server", "import_develop": "develop" },
+  "defaults": {
+    "authors": [], "description": "", "license": "", "keywords": [], "repository": "",
+    "registry": "crater", "registries": {}, "can_publish": false, "import_to": "shared",
+    "path_to_main": "", "icon": "", "path_to_definition_files": [],
+    "package_files": { "exclude": [], "allow": [] },
+    "import_client": [], "import_server": [], "import_develop": [], "overrides": [],
+    "workspace": [], "scripts": {}, "tools": {},
+    "package_scripts": { "block": false, "allow": [] },
+    "monorepository-elements": {}, "interface": false, "realized_interfaces": [],
+    "block_package_scripts": false, "allow_scripts_from": [], "exclude": [], "allow_files": []
+  }
+}"#;
+
     const CRATER: &str = r#"{
   "name": "theexedev/my-game",
   "authors": ["TheExeDEV"],
@@ -1432,6 +1509,7 @@ TestEZ = "roblox/testez@0.4.1"
     "wally#sleitnick/knit^1",
     "Jecs:pesde#marked/jecs^0.11",
     "forest#stratiz/signal@1.1.1",
+    "ember#alloy/forge^0.1",
     "me/lib@path:../lib"
   ],
   "import_server": ["wally#madstudioroblox/profileservice=1.4.2"],
@@ -1445,7 +1523,7 @@ TestEZ = "roblox/testez@0.4.1"
 
     #[test]
     fn crater_moves_what_ember_has_a_place_for() {
-        let plan = plan_crater(CRATER).unwrap();
+        let plan = plan_crater(CRATER, Some(DECLARE)).unwrap();
 
         assert_eq!(
             written(&plan, "package", "name").unwrap(),
@@ -1490,6 +1568,10 @@ TestEZ = "roblox/testez@0.4.1"
         for index in ["wally", "pesde", "forest"] {
             assert!(written(&plan, "indices", index).is_some(), "{index}");
         }
+        // ember's own index is built in, so it needs no [indices] entry
+        let forge = written(&plan, "dependencies", "forge").unwrap();
+        assert!(forge.contains("index = \"ember\""), "{forge}");
+        assert!(written(&plan, "indices", "ember").is_none());
 
         /* a crater registry package, a path source, and a dev dependency stay,
         and so does each field ember has no place for. empty ones go */
@@ -1512,8 +1594,13 @@ TestEZ = "roblox/testez@0.4.1"
 
     #[test]
     fn crater_dependency_specs() {
+        let index_of = |name: &str| match name {
+            "wally" => Some("wally"),
+            "pesde" => Some("pesde"),
+            _ => None,
+        };
         let spec = |text: &str| {
-            crater_dependency(text, Some("wally"))
+            crater_dependency(text, &index_of, Some("wally"))
                 .map(|(alias, name, req, index)| format!("{alias} {name} {req} {index}"))
         };
 
@@ -1534,7 +1621,55 @@ TestEZ = "roblox/testez@0.4.1"
         assert!(spec("team#a/b^1").is_none());
         assert!(spec("a/b=").is_none());
         // no registry name and no index to fall back on
-        assert!(crater_dependency("a/b^1", None).is_none());
+        assert!(crater_dependency("a/b^1", &index_of, None).is_none());
+    }
+
+    /** crater's API 3: `registry` names a registry, files and script rules
+    come in groups, and a field crater leaves unset has its default. */
+    #[test]
+    fn a_crater_api_3_file_moves_by_its_declare() {
+        let plan = plan_crater(
+            r#"{
+  "name": "acme/game",
+  "version": "0.1.0",
+  "registry": "wally",
+  "registries": { "team": "https://github.com/UpliftGames/wally-index" },
+  "package_files": { "exclude": ["tests/"], "allow": [] },
+  "package_scripts": { "block": false, "allow": [] },
+  "import_client": ["evaera/promise^4", "team#acme/kit^1"]
+}"#,
+            Some(DECLARE),
+        )
+        .unwrap();
+
+        // an unset `import_to` is `shared`, and an unset `can_publish` false
+        assert_eq!(
+            written(&plan, "target", "environment").unwrap(),
+            "\"roblox\""
+        );
+        assert_eq!(written(&plan, "package", "private").unwrap(), "true");
+        assert_eq!(
+            written(&plan, "target", "excludes").unwrap(),
+            "[\"tests/\"]"
+        );
+        assert!(
+            written(&plan, "dependencies", "promise")
+                .unwrap()
+                .contains("index = \"wally\"")
+        );
+        // a registry the project names itself, at an address ember reads
+        assert!(
+            written(&plan, "dependencies", "kit")
+                .unwrap()
+                .contains("index = \"wally\"")
+        );
+        assert_eq!(plan.kept, ["registries"], "{:?}", plan.rest);
+    }
+
+    #[test]
+    fn crater_without_its_declare_is_refused() {
+        let reason = plan_crater(CRATER, None).err().unwrap();
+        assert!(reason.contains(".crater-declare"), "{reason}");
     }
 
     /// a project on the Wally index alone moves whole, and crater.json goes.
@@ -1554,6 +1689,7 @@ TestEZ = "roblox/testez@0.4.1"
   "import_client": ["Promise:evaera/promise^4"]
 }"#,
                 ),
+                (".crater-declare", DECLARE),
                 ("crater.lock", ""),
             ],
         );
