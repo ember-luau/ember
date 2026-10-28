@@ -5,6 +5,7 @@ use crate::project::manifest::{
     DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Manifest, Target, is_github_username,
     split_package_name, workspace_version_req,
 };
+use crate::project::package;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::Index;
 use crate::registry::{local, pack};
@@ -286,6 +287,13 @@ fn publish_target(
         });
     }
 
+    let entry = entry_line(root, target.main.as_deref());
+    if entry.is_none() {
+        eprintln!(
+            "warning: {package} has no entry point and no modules to collect, so a link to it requires nothing"
+        );
+    }
+
     let destination = if args.local {
         "the local registry"
     } else {
@@ -298,6 +306,9 @@ fn publish_target(
         );
         for file in &files {
             println!("  {}", file.display());
+        }
+        if let Some(entry) = entry {
+            println!("Entry: {entry}");
         }
         return Ok(());
     }
@@ -488,6 +499,28 @@ fn check_built_main(root: &Path, main: Option<&str>, program: &'static str) -> R
     }
 }
 
+/** what a link to this target requires, found the way install finds it:
+`main`, then what the package ships, then a guess, then a collection. a
+module shows as its file, a collection as its members. None = nothing a
+link can require. */
+fn entry_line(root: &Path, main: Option<&str>) -> Option<String> {
+    let entry = main
+        .map(package::normalize_entry)
+        .or_else(|| package::entry_point(root))
+        .or_else(|| package::guess_entry(root))
+        .or_else(|| package::collection_root(root))?;
+    let members = package::collection_members(root, &entry);
+    if !members.is_empty() {
+        return Some(format!(
+            "collection of {} modules ({})",
+            members.len(),
+            members.join(", ")
+        ));
+    }
+    let source = package::entry_source(root, &entry)?;
+    Some(pack::tar_path(source.strip_prefix(root).unwrap_or(&source)))
+}
+
 /** checked here so a bad logo fails before the upload. the registry checks
 the file's bytes again, this only catches the plain mistakes. */
 fn validate_logo(root: &Path, logo: Option<&str>) -> Result<(), Error> {
@@ -637,6 +670,38 @@ mod tests {
         }
         fs::write(base.join("out/init.luau"), "return {}").unwrap();
         assert!(check(Some("out/init.luau")).is_ok());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a dry run names the module a link requires, or the members of a collection.
+    #[test]
+    fn the_entry_line_names_a_module_or_a_collection() {
+        let base = std::env::temp_dir().join("embr-test-publish-entry");
+        let _ = fs::remove_dir_all(&base);
+        for file in ["src/Signal.luau", "src/Promise.luau", "lib/init.luau"] {
+            let path = base.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "return {}\n").unwrap();
+        }
+
+        assert_eq!(
+            entry_line(&base, Some("lib/init.luau")).as_deref(),
+            Some("lib/init.luau")
+        );
+        assert_eq!(
+            entry_line(&base, Some("src")).as_deref(),
+            Some("collection of 2 modules (Promise, Signal)")
+        );
+        // nothing stated, and the conventional `lib/init.luau` wins
+        assert_eq!(entry_line(&base, None).as_deref(), Some("lib/init.luau"));
+        fs::remove_dir_all(base.join("lib")).unwrap();
+        assert_eq!(
+            entry_line(&base, None).as_deref(),
+            Some("collection of 2 modules (Promise, Signal)")
+        );
+        fs::remove_dir_all(base.join("src")).unwrap();
+        assert_eq!(entry_line(&base, None), None);
 
         let _ = fs::remove_dir_all(&base);
     }

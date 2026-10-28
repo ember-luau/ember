@@ -32,7 +32,7 @@ fn own_manifest_string(dir: &Path, keys: &[&str]) -> Option<String> {
 
 /** what a link file has to restate about one module: its exported types, the
 modules those types reach through, and the aliases that make the reaching
-legal. */
+legal. for a collection, the modules it gathers instead. */
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Exports {
     /// `export type X<T> = module.X<T>` lines, in source order.
@@ -41,6 +41,10 @@ pub struct Exports {
     pub imports: Vec<(String, String)>,
     /// `type __ember_X_T = Types.Default` lines, one per generic default that had to be hoisted.
     pub aliases: Vec<String>,
+    /// the members of a collection, see [`collection_members`]. empty for a package with an entry module.
+    pub members: Vec<String>,
+    /// true = a collection requires each member on its first read, false = all at once. see [`collection_contents`].
+    pub lazy: bool,
 }
 
 /** body of a generated link file. requires the stored package and restates its
@@ -82,6 +86,9 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: Requi
     } else {
         format!("{root}/{entry}")
     };
+    if !exports.members.is_empty() {
+        return collection_contents(&module_path, exports, require);
+    }
     if exports.types.is_empty() {
         return format!("return {}\n", require(&module_path));
     }
@@ -105,6 +112,84 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: Requi
         contents.push('\n');
     }
     contents.push_str("return module\n");
+    contents
+}
+
+/** body of a link file for a collection, a package with no entry module. it
+returns one field per member and exports a `Modules` type, so the checker
+knows each field. a lazy collection requires a member on its first read, e.g.
+
+```luau
+local loaders: { [string]: () -> any } = {
+    Signal = function()
+        return require("./.ember/scope_utils/src/Signal")
+    end,
+}
+
+export type Modules = {
+    Signal: typeof(require("./.ember/scope_utils/src/Signal")),
+}
+
+return (setmetatable({}, { __index = ... }) :: any) :: Modules
+```
+
+each require keeps a literal path, so bundlers and the checker can follow
+it. a member that yields while it loads fails here, because a metamethod
+cannot yield. an eager collection is a plain table of requires, and its
+`Modules` is `typeof` that table. */
+fn collection_contents(
+    folder: &str,
+    exports: &Exports,
+    require: impl Fn(&str) -> String,
+) -> String {
+    let members: Vec<(String, String)> = exports
+        .members
+        .iter()
+        .map(|name| {
+            let key = if requires::is_identifier(name) {
+                name.clone()
+            } else {
+                format!("[\"{name}\"]")
+            };
+            (key, require(&format!("{folder}/{name}")))
+        })
+        .collect();
+
+    if !exports.lazy {
+        let mut contents = String::from("local modules = {\n");
+        for (key, require) in &members {
+            contents.push_str(&format!("\t{key} = {require},\n"));
+        }
+        contents.push_str("}\n\nexport type Modules = typeof(modules)\n\nreturn modules\n");
+        return contents;
+    }
+
+    let mut contents = String::from("local loaders: { [string]: () -> any } = {\n");
+    for (key, require) in &members {
+        contents.push_str(&format!(
+            "\t{key} = function()\n\t\treturn {require}\n\tend,\n"
+        ));
+    }
+    contents.push_str("}\n\nexport type Modules = {\n");
+    for (key, require) in &members {
+        contents.push_str(&format!("\t{key}: typeof({require}),\n"));
+    }
+    contents.push_str(
+        "}
+
+return (setmetatable({}, {
+\t__index = function(modules: any, name: string)
+\t\tlocal load = loaders[name]
+\t\tif load == nil then
+\t\t\terror(\"no module \" .. tostring(name) .. \" in this collection\", 2)
+\t\tend
+\t\tlocal value = load()
+\t\trawset(modules, name, value)
+\t\treturn value
+\tend,
+}) :: any) :: Modules
+",
+    );
     contents
 }
 
@@ -885,6 +970,57 @@ fn collect_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(
     Ok(())
 }
 
+/** the folder of a collection in a package with no entry point. `src` and
+`lib` come before the root. a package with a source folder keeps its modules
+there, and its root holds manifests and tooling. None = nothing to gather. */
+pub fn collection_root(dir: &Path) -> Option<String> {
+    ["src", "lib", ""]
+        .into_iter()
+        .find(|folder| !collection_members(dir, folder).is_empty())
+        .map(str::to_string)
+}
+
+/** the members of a collection at `entry`, a folder with no init file. a
+member is a `.luau` or `.lua` file, or a folder with an init file, one level
+deep. scripts, tests, [`GUESS_SKIPS`] and names a quoted require cannot hold
+stay out. empty when `entry` is a module. */
+pub fn collection_members(dir: &Path, entry: &str) -> Vec<String> {
+    if entry_source(dir, entry).is_some() {
+        return Vec::new();
+    }
+    let Ok(children) = fs::read_dir(dir.join(entry)) else {
+        return Vec::new();
+    };
+    let mut members: Vec<String> = children
+        .filter_map(|child| {
+            let path = child.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            let member = if path.is_dir() {
+                let skipped = GUESS_SKIPS
+                    .iter()
+                    .any(|skip| name.eq_ignore_ascii_case(skip));
+                let has_init = ["init.luau", "init.lua"]
+                    .iter()
+                    .any(|init| path.join(init).is_file());
+                (!skipped && has_init).then_some(name)?
+            } else {
+                name.strip_suffix(".luau")
+                    .or_else(|| name.strip_suffix(".lua"))?
+            };
+            let script_or_test = [".server", ".client", ".spec", ".test"]
+                .iter()
+                .any(|suffix| member.ends_with(suffix));
+            let quotable = !member.is_empty()
+                && !member.contains(['"', '\\'])
+                && !member.contains(char::is_control);
+            (!script_or_test && quotable).then(|| member.to_string())
+        })
+        .collect();
+    members.sort();
+    members.dedup();
+    members
+}
+
 /// what a package calls itself, from whichever manifest it shipped.
 fn package_name(dir: &Path) -> Option<String> {
     [
@@ -1133,8 +1269,9 @@ mod tests {
     use super::*;
 
     fn write_package(dir: &Path, file: &str, contents: &str) {
-        fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join(file), contents).unwrap();
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
     }
 
     /// exports that need no imports of their own, which most sources are.
@@ -1735,6 +1872,124 @@ mod tests {
         assert_eq!(normalize_entry("./src\\init.luau"), "src".to_string());
         assert_eq!(normalize_entry("lib.lua"), "lib".to_string());
         assert_eq!(normalize_entry("src"), "src".to_string());
+    }
+
+    /** a collection gathers the modules one level deep. scripts, tests,
+    folders with no init and the folders a guess skips stay out. */
+    #[test]
+    fn collections_gather_the_modules_one_level_deep() {
+        let base = std::env::temp_dir().join("embr-test-collection-members");
+        let _ = fs::remove_dir_all(&base);
+        for file in [
+            "src/Signal.luau",
+            "src/Promise.lua",
+            "src/Spring/init.luau",
+            "src/Spring/solver.luau",
+            "src/my-module.luau",
+            "src/end.luau",
+            "src/Loose/inner.luau",
+            "src/tests/init.luau",
+            "src/Run.server.luau",
+            "src/Ui.client.luau",
+            "src/Signal.spec.luau",
+            "src/Promise.test.luau",
+            "src/notes.md",
+            "build.luau",
+        ] {
+            write_package(&base, file, "return {}\n");
+        }
+        assert_eq!(
+            collection_members(&base, "src"),
+            ["Promise", "Signal", "Spring", "end", "my-module"]
+        );
+        // a folder with an init file is a module, not a collection
+        assert!(collection_members(&base, "src/Spring").is_empty());
+        // `src` wins over the root, which holds tooling
+        assert_eq!(collection_root(&base).as_deref(), Some("src"));
+
+        let flat = base.join("flat");
+        write_package(&flat, "A.luau", "return {}\n");
+        write_package(&flat, "wally.toml", "[package]\nname = \"acme/flat\"\n");
+        assert_eq!(collection_root(&flat).as_deref(), Some(""));
+
+        let empty = base.join("empty");
+        write_package(&empty, "README.md", "");
+        assert_eq!(collection_root(&empty), None);
+
+        // a name that would break out of the quoted require stays out
+        #[cfg(unix)]
+        {
+            let odd = base.join("odd");
+            write_package(&odd, "fine.luau", "return {}\n");
+            write_package(&odd, "a\"b.luau", "return {}\n");
+            write_package(&odd, "a\\b.luau", "return {}\n");
+            assert_eq!(collection_members(&odd, ""), ["fine"]);
+        }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a Roblox collection requires a member on its first read, so a client
+    never runs a server module. elsewhere the members load at once. */
+    #[test]
+    fn collection_links_load_each_member_on_its_first_read() {
+        let collection = |lazy: bool| Exports {
+            members: ["Signal", "end", "my-module"].map(str::to_string).to_vec(),
+            lazy,
+            ..Exports::default()
+        };
+
+        let lazy = link_contents("scope_utils", "src", &collection(true));
+        assert!(
+            lazy.starts_with(
+                "local loaders: { [string]: () -> any } = {\n\
+                 \tSignal = function()\n\
+                 \t\treturn require(\"./.ember/scope_utils/src/Signal\")\n\
+                 \tend,\n\
+                 \t[\"end\"] = function()\n\
+                 \t\treturn require(\"./.ember/scope_utils/src/end\")\n\
+                 \tend,\n\
+                 \t[\"my-module\"] = function()\n\
+                 \t\treturn require(\"./.ember/scope_utils/src/my-module\")\n\
+                 \tend,\n\
+                 }\n\
+                 \n\
+                 export type Modules = {\n\
+                 \tSignal: typeof(require(\"./.ember/scope_utils/src/Signal\")),\n\
+                 \t[\"end\"]: typeof(require(\"./.ember/scope_utils/src/end\")),\n\
+                 \t[\"my-module\"]: typeof(require(\"./.ember/scope_utils/src/my-module\")),\n\
+                 }\n"
+            ),
+            "{lazy}"
+        );
+        assert!(lazy.contains("__index = function(modules: any, name: string)"));
+        assert!(lazy.ends_with("}) :: any) :: Modules\n"), "{lazy}");
+
+        let instance = link_contents_at(
+            "../.ember/scope_utils",
+            "",
+            &collection(true),
+            RequireStyle::Instance,
+        );
+        assert!(
+            instance.contains(
+                "\t[\"my-module\"]: typeof(require(script.Parent.Parent[\".ember\"].scope_utils[\"my-module\"])),\n"
+            ),
+            "{instance}"
+        );
+
+        assert_eq!(
+            link_contents("scope_utils", "src", &collection(false)),
+            "local modules = {\n\
+             \tSignal = require(\"./.ember/scope_utils/src/Signal\"),\n\
+             \t[\"end\"] = require(\"./.ember/scope_utils/src/end\"),\n\
+             \t[\"my-module\"] = require(\"./.ember/scope_utils/src/my-module\"),\n\
+             }\n\
+             \n\
+             export type Modules = typeof(modules)\n\
+             \n\
+             return modules\n"
+        );
     }
 
     #[test]

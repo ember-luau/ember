@@ -200,6 +200,42 @@ The first target is the project's own. `embr add` and `embr install` use
 it to pick a target of each dependency. They prefer the same environment
 and language, then the same environment in plain Luau.
 
+## Entry points and collections
+
+The link file of a package requires its entry point. embr looks for it in
+this order: `[target] main`, pesde's `lib`, Forest's `root`, a Rojo
+`$path`, an `init` file in the root, `src`, or `lib`. Then it guesses: the
+only module, or the module named after the package.
+
+A library of separate modules needs no entry point. When embr finds none,
+or `main` names a folder with no init file, the link file returns a
+collection: a table with one field for each module.
+
+```luau
+local Utils = require("@packages/utils")
+
+local changed = Utils.Signal.new()
+local spring = Utils.Spring.new(0)
+```
+
+- **Members:** each `.luau` and `.lua` file, and each folder with an
+  `init.luau` or `init.lua`, one level deep. Scripts (`*.server.luau`,
+  `*.client.luau`), tests (`*.spec.luau`, `*.test.luau`), and folders with
+  no init file stay out.
+- **Folder:** with no `main`, the collection is the first of `src`, `lib`,
+  and the package root that has a member. A package with a source folder
+  keeps its modules there.
+- **Lazy on Roblox:** a Roblox project requires a module when code first
+  reads its field, so a client does not run a server module. A module that
+  yields while it loads cannot load this way. Other projects require all
+  modules at once, because Lune's `require` yields.
+- **Typed:** the link file exports a `Modules` type, so luau-lsp completes
+  `Utils.Signal` and reports `Utils.Nope`. A name that is no identifier, or
+  is a keyword, takes brackets: `Utils["my-module"]`, `Utils["end"]`.
+- `embr publish --dry-run` shows the entry it found, for example
+  `Entry: collection of 3 modules (Promise, Signal, Spring)`. A package with
+  nothing to require gets a warning at publish and at install.
+
 ## Models in packages
 
 A Roblox package can ship `.rbxm` models next to its code: UI templates,
