@@ -1,6 +1,6 @@
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
-use crate::project::manifest::{Environment, split_package_name};
+use crate::project::manifest::{Environment, split_package_name, takes};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -56,13 +56,15 @@ pub fn resolve(
 
     /* One JSON object per line, one line per published version. Unparsable
     lines are skipped so one odd entry can't sink the whole resolve. */
-    let best = std::fs::read_to_string(&path)?
+    let entries: Vec<(semver::Version, Entry)> = std::fs::read_to_string(&path)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .filter_map(|entry| {
-            let version = semver::Version::parse(&entry.package.version).ok()?;
-            req.matches(&version).then_some((version, entry))
-        })
+        .filter_map(|entry| Some((semver::Version::parse(&entry.package.version).ok()?, entry)))
+        .collect();
+    let no_stable = !entries.iter().any(|(version, _)| version.pre.is_empty());
+    let best = entries
+        .into_iter()
+        .filter(|(version, _)| takes(req, version, no_stable))
         .max_by(|(a, _), (b, _)| a.cmp(b));
 
     let Some((version, entry)) = best else {

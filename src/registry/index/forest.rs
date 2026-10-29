@@ -8,7 +8,7 @@ wally.toml, so embr reads the realm from the archive for those. */
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
 use crate::net::http::{self, error::HttpError};
-use crate::project::manifest::{Environment, split_package_name};
+use crate::project::manifest::{Environment, split_package_name, takes};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -102,11 +102,15 @@ pub fn resolve(api: &str, name: &str, req: &semver::VersionReq) -> Result<Resolv
 
 /// the highest listed version `req` matches. unparsable versions are skipped.
 fn pick(listing: &Listing, req: &semver::VersionReq) -> Option<semver::Version> {
-    listing
+    let versions: Vec<semver::Version> = listing
         .versions
         .iter()
         .filter_map(|listed| semver::Version::parse(&listed.version).ok())
-        .filter(|version| req.matches(version))
+        .collect();
+    let no_stable = !versions.iter().any(|version| version.pre.is_empty());
+    versions
+        .into_iter()
+        .filter(|version| takes(req, version, no_stable))
         .max()
 }
 

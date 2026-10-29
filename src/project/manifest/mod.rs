@@ -1033,6 +1033,15 @@ pub fn split_package_name(name: &str) -> Result<(&str, &str), Error> {
     }
 }
 
+/** whether `req` takes `version`. a bare `^` or `*`, the latest, is semver's
+STAR, and STAR takes no prerelease. so a package that has published only
+prereleases, such as teamfireworks/ink at `0.1.0-rc.2`, matched nothing.
+`no_stable` says that the package has no stable version on offer, and then
+the latest takes a prerelease too. */
+pub fn takes(req: &semver::VersionReq, version: &semver::Version, no_stable: bool) -> bool {
+    req.matches(version) || (no_stable && *req == semver::VersionReq::STAR)
+}
+
 /// parses a manifest version requirement. bare "^" (or "*") means "latest".
 pub fn parse_version_req(req: &str) -> Result<semver::VersionReq, Error> {
     let trimmed = req.trim();
@@ -1046,6 +1055,19 @@ pub fn parse_version_req(req: &str) -> Result<semver::VersionReq, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_latest_takes_a_prerelease_only_where_no_stable_version_is() {
+        let rc = semver::Version::parse("0.1.0-rc.2").unwrap();
+        let latest = parse_version_req("^").unwrap();
+        assert!(takes(&latest, &rc, true));
+        assert!(!takes(&latest, &rc, false));
+        // a stated requirement keeps semver's own rule either way
+        let caret = parse_version_req("^0.1.0").unwrap();
+        assert!(!takes(&caret, &rc, true));
+        let exact = parse_version_req("=0.1.0-rc.2").unwrap();
+        assert!(takes(&exact, &rc, false));
+    }
 
     /// an empty dir holding the given manifest names.
     fn scratch(name: &str, files: &[&str]) -> std::path::PathBuf {

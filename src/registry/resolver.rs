@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::project::manifest::{
     Dependency, Environment, Language, Manifest, Override, dependency_target, override_paths,
-    parse_version_req,
+    parse_version_req, takes,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
@@ -323,7 +323,9 @@ fn resolve_once(
         if let Some(context) = context
             && let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context))
         {
-            if req.matches(&existing.version) {
+            /* a prerelease here was the latest of a package with no stable
+            version, so another `^` takes it too */
+            if takes(&req, &existing.version, true) {
                 continue;
             }
             return Err(Error::DependencyConflict {
@@ -498,7 +500,7 @@ fn resolve_once(
             override diagnostics can still find this root's tree */
             seed_contexts.insert(alias_path[0].clone(), context);
             if let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context)) {
-                if req.matches(&existing.version) {
+                if takes(&req, &existing.version, true) {
                     continue; // this tree already walked the package, children drop
                 }
                 return Err(Error::DependencyConflict {
