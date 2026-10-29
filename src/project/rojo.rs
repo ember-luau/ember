@@ -22,6 +22,13 @@ keys and the require in lockstep. both come from `normalize_entry`.
 packages that ship no project file, every embr-native one, already sync
 that way and are left alone.
 
+a project file whose tree is a place, a DataModel of services, is the
+author's own game, not the package. teamfireworks/ink ships one. Rojo builds
+its services inside the packages folder, a second ReplicatedStorage under
+`.ember`, and the package's own folders are not where the link requires
+them. so that file steps aside, to `PLACE_FILE`, and the package syncs from
+disk like one that ships no project file.
+
 that pass only covers what the project file already mounts. the `packages/`
 folder install writes a package's own nested links into doesn't exist yet,
 every package has to be extracted before any of them can be linked, so
@@ -33,6 +40,10 @@ use std::fs;
 use std::path::Path;
 
 pub const PROJECT_FILE: &str = "default.project.json";
+
+/** where a place-style project file goes. Rojo reads neither this name nor
+its extension, so the package mounts from disk. */
+pub const PLACE_FILE: &str = "default.project.json.place";
 
 /// the folder a package's own nested links live in, the published default.
 pub const PACKAGES_DIR: &str = "packages";
@@ -48,14 +59,20 @@ than failing an install that has already downloaded everything. */
 pub fn mirror_disk_layout(package_dir: &Path, warn: &mut impl FnMut(String)) {
     let project = package_dir.join(PROJECT_FILE);
     // an unreadable or non-utf8 project file isn't ours to touch
-    if let Ok(text) = fs::read_to_string(&project)
-        && let Some(rewritten) = mirrored(&text, package_dir)
-        && let Err(error) = fs::write(&project, rewritten)
-    {
-        warn(format!(
-            "warning: could not update {} ({error}); Rojo will mount this package under its own name",
-            project.display()
-        ));
+    if let Ok(text) = fs::read_to_string(&project) {
+        let moved = match is_place(&text) {
+            true => fs::rename(&project, package_dir.join(PLACE_FILE)),
+            false => match mirrored(&text, package_dir) {
+                Some(rewritten) => fs::write(&project, rewritten),
+                None => Ok(()),
+            },
+        };
+        if let Err(error) = moved {
+            warn(format!(
+                "warning: could not update {} ({error}); Rojo will mount this package under its own name",
+                project.display()
+            ));
+        }
     }
 
     let Ok(entries) = fs::read_dir(package_dir) else {
@@ -186,6 +203,16 @@ fn root_path(tree: &Map<String, Value>) -> Option<&str> {
     let path = tree.get("$path")?;
     path.as_str()
         .or_else(|| path.get("optional").and_then(Value::as_str))
+}
+
+/// true when the project's tree is a place, a DataModel of services.
+fn is_place(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).is_ok_and(|project| {
+        project
+            .pointer("/tree/$className")
+            .and_then(Value::as_str)
+            .is_some_and(|class| class == "DataModel")
+    })
 }
 
 /** the rewritten project text, or None when the file already mirrors the
@@ -444,6 +471,39 @@ mod tests {
     }
 
     /// a package dir holding `files`, plus a linked dependency when `linked`.
+    /** a place is the author's own game. teamfireworks/ink ships one, and
+    Rojo built a second ReplicatedStorage under `.ember` from it. the file
+    steps aside, nested ones too, and the package mounts from disk. */
+    #[test]
+    fn a_place_project_file_steps_aside() {
+        const PLACE: &str = r#"{"name": "ink", "tree": {"$className": "DataModel", "ReplicatedStorage": {"ink": {"$className": "Folder", "src": {"$path": "./src"}}}}}"#;
+        let package = package_with(
+            "place",
+            &[
+                (PROJECT_FILE, PLACE),
+                ("src/init.luau", "return {}\n"),
+                ("examples/default.project.json", PLACE),
+            ],
+            false,
+        );
+
+        let mut warnings = Vec::new();
+        mirror_disk_layout(&package, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+
+        for dir in [package.clone(), package.join("examples")] {
+            assert!(!dir.join(PROJECT_FILE).exists(), "{}", dir.display());
+            assert_eq!(fs::read_to_string(dir.join(PLACE_FILE)).unwrap(), PLACE);
+        }
+
+        // a second install finds nothing more to move
+        mirror_disk_layout(&package, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(package.join(PLACE_FILE).exists());
+
+        let _ = fs::remove_dir_all(&package);
+    }
+
     fn package_with(name: &str, files: &[(&str, &str)], linked: bool) -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!("embr-test-rojo-{name}"));
         let _ = fs::remove_dir_all(&base);

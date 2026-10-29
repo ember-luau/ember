@@ -1,6 +1,6 @@
 use super::{DownloadSource, ResolvedPackage, TransitiveDependency};
 use crate::error::Error;
-use crate::project::manifest::{Environment, Language, split_package_name};
+use crate::project::manifest::{Environment, Language, split_package_name, takes};
 use serde::Deserialize;
 use std::path::Path;
 use toml::Value;
@@ -59,9 +59,13 @@ pub fn resolve(
     /* cargo's rule: a yanked version stays out of fresh picks, but a
     lockfile that already pins it keeps installing it. pesde writes the
     same `yanked = true`, so its own yanks count too. */
+    let open = |c: &Candidate| !c.yanked || pinned.contains(&c.version);
+    let no_stable = !candidates
+        .iter()
+        .any(|c| open(c) && c.version.pre.is_empty());
     let candidates: Vec<Candidate> = candidates
         .into_iter()
-        .filter(|c| req.matches(&c.version) && (!c.yanked || pinned.contains(&c.version)))
+        .filter(|c| takes(req, &c.version, no_stable) && open(c))
         .collect();
 
     let Some(best_version) = candidates.iter().map(|c| &c.version).max().cloned() else {
@@ -548,6 +552,45 @@ mod tests {
             ),
             Err(Error::IndexFetch { .. })
         ));
+    }
+
+    /** the latest of a package with only prereleases is its newest
+    prerelease, as teamfireworks/ink publishes `0.1.0-rc.2`. once a stable
+    version is out, the latest is the newest stable one again. */
+    #[test]
+    fn the_latest_of_a_prerelease_only_package_is_its_newest_prerelease() {
+        let resolve_latest = |name: &str, entries: &str| {
+            let index = TempIndex::new(name, r#"github_oauth_id = "Ov23abc""#);
+            index.write_package("acme/ink", entries);
+            let config = load_config(&index.root).unwrap();
+            resolve(
+                &index.root,
+                "https://github.com/ember-luau/index",
+                &config,
+                "acme/ink",
+                &semver::VersionReq::STAR,
+                None,
+                &[],
+            )
+            .map(|resolved| resolved.version.to_string())
+        };
+        let entry = |version: &str| {
+            format!(
+                "[\"{version} roblox\"]\ndownload = \"https://cdn.example.com/{version}.tar.gz\"\n\n[\"{version} roblox\".target]\nenvironment = \"roblox\"\n\n"
+            )
+        };
+
+        let rc_only = entry("0.1.0-rc.1") + &entry("0.1.0-rc.2");
+        assert_eq!(
+            resolve_latest("prerelease-only", &rc_only).unwrap(),
+            "0.1.0-rc.2"
+        );
+
+        let with_stable = entry("0.1.0") + &entry("0.2.0-rc.1");
+        assert_eq!(
+            resolve_latest("prerelease-and-stable", &with_stable).unwrap(),
+            "0.1.0"
+        );
     }
 
     #[test]
