@@ -71,7 +71,7 @@ pub fn global_tools_file() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("tools.toml"))
 }
 
-/// ~/.ember/credentials.toml, the GitHub token kept between commands. auth writes it owner-only on unix.
+/// ~/.ember/credentials.toml, the Ember token kept between commands. auth writes it owner-only on unix.
 pub fn credentials_file() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("credentials.toml"))
 }

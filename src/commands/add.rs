@@ -1,7 +1,10 @@
 use crate::error::Error;
+use crate::net::registry;
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
-use crate::project::manifest::{Manifest, parse_version_req, split_package_name};
+use crate::project::manifest::{
+    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Manifest, parse_version_req, split_package_name,
+};
 use crate::registry::index::{Index, Refresh};
 use crate::registry::local;
 use crate::ui;
@@ -11,7 +14,8 @@ use std::io::IsTerminal;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Package to add, as scope/name, or a bare name for a package published with --local
+    /** Package to add, as scope/name, a bare name for a package published
+    with --local, or an unlisted package's link */
     pub package: String,
     /// Version requirement, defaults to "^" meaning latest
     #[arg(long)]
@@ -39,15 +43,19 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let lifecycle = Lifecycle::of(&manifest, hooks::ADD);
     lifecycle.before()?;
 
+    let (package, key) = parse_link(&args.package)?;
     /* ember names always carry a scope, so a bare name can only mean a
     package that `embr publish --local` wrote */
     let is_local =
-        !args.package.contains('/') && args.index.as_deref().is_none_or(|key| key == local::NAME);
+        !package.contains('/') && args.index.as_deref().is_none_or(|key| key == local::NAME);
     let name = if is_local {
-        local::find(&args.package)?
+        local::find(package)?
     } else {
-        args.package.to_lowercase()
+        package.to_lowercase()
     };
+    if let Some(key) = &key {
+        registry::remember_key(&name, key);
+    }
     let (_, short_name) = split_package_name(&name)?;
     let alias = match args.alias {
         Some(alias) => alias,
@@ -59,6 +67,10 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     let index_key = match args.index {
         Some(key) => Some(key),
         None if is_local => Some(local::NAME.to_string()),
+        // a link key is for the ember index only, so a link skips the prompt
+        None if key.is_some() => {
+            (manifest.index_url(None)? != DEFAULT_INDEX_URL).then(|| EMBER_INDEX_NAME.to_string())
+        }
         /* no terminal (CI, a script) can't answer, so it gets the default
         index, as an empty answer would */
         None if crate::project::settings::index_prompt() && std::io::stdin().is_terminal() => {
@@ -114,27 +126,56 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if let Some(key) = &index_key {
         entry.insert("index", key.clone().into());
     }
+    if let Some(key) = &key {
+        entry.insert("key", key.clone().into());
+    }
     let dependencies = document.table_or_create("dependencies")?;
     /* re-adding an alias rewrites its whole entry, which is how a version
-    bump works. `target` is the one key nothing here can re-ask for, and
-    dropping it would quietly move that dependency's whole subtree back
-    into another environment root on the next install, so it is carried
-    over instead. see `Dependency::target` */
-    if let Some(target) = dependencies
-        .get(&alias)
-        .and_then(|existing| existing.get("target"))
-        .and_then(|target| target.as_str())
-    {
-        entry.insert("target", target.to_string().into());
+    bump works. `target` and `key` are the keys nothing here can re-ask
+    for. dropping `target` would quietly move that dependency's whole
+    subtree back into another environment root on the next install, and
+    dropping `key` would lose the link. so they are carried over instead.
+    see `Dependency::target` */
+    if let Some(existing) = dependencies.get(&alias) {
+        for carried in ["target", "key"] {
+            if !entry.contains_key(carried)
+                && let Some(value) = existing.get(carried).and_then(|value| value.as_str())
+            {
+                entry.insert(carried, value.to_string().into());
+            }
+        }
     }
     dependencies.insert(&alias, toml_edit::value(entry));
     document.save()?;
 
     ui::print_success(&format!("Added {name}@{} as '{alias}'", package.version));
+    if key.is_some() {
+        println!(
+            "The link key is now in ember.toml, so a clone installs {name} with no setup. \
+             Anyone who can read this project can use the link. In a public repo, that is everyone."
+        );
+    }
     println!("Run `embr install` to install it");
 
     // `postadd` sees the written manifest, so it can go straight to installing
     lifecycle.after()
+}
+
+/** splits an unlisted package's link into its name and its key. the link
+is `https://emberpm.dev/package/acme/foo#k=<key>` or `acme/foo#k=<key>`. a
+spec with no `#` is a plain name, with no key. */
+fn parse_link(spec: &str) -> Result<(&str, Option<String>), Error> {
+    let Some((name, fragment)) = spec.trim().split_once('#') else {
+        return Ok((spec.trim(), None));
+    };
+    let name = name
+        .strip_prefix("https://emberpm.dev/package/")
+        .unwrap_or(name)
+        .trim_end_matches('/');
+    match fragment.strip_prefix("k=") {
+        Some(key) if registry::is_link_key(key) => Ok((name, Some(key.to_ascii_lowercase()))),
+        _ => Err(Error::LinkInvalid),
+    }
 }
 
 /** asks which index to search. empty input means the default index,
@@ -164,4 +205,46 @@ fn prompt_index_key(manifest: &Manifest) -> Result<Option<String>, Error> {
 
     let key = key.trim();
     Ok((!key.is_empty()).then(|| key.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn links_split_into_a_name_and_a_key() {
+        let link = format!("https://emberpm.dev/package/acme/foo#k={KEY}");
+        assert_eq!(
+            parse_link(&link).unwrap(),
+            ("acme/foo", Some(KEY.to_string()))
+        );
+        let short = format!("acme/foo#k={}", KEY.to_uppercase());
+        assert_eq!(
+            parse_link(&short).unwrap(),
+            ("acme/foo", Some(KEY.to_string()))
+        );
+        let slash = format!("https://emberpm.dev/package/acme/foo/#k={KEY}");
+        assert_eq!(parse_link(&slash).unwrap().0, "acme/foo");
+
+        // a plain name has no key
+        assert_eq!(parse_link("acme/foo").unwrap(), ("acme/foo", None));
+        assert_eq!(parse_link("my-lib").unwrap(), ("my-lib", None));
+
+        // a fragment that is not a whole key is refused, not dropped
+        for bad in [
+            "acme/foo#k=",
+            "acme/foo#k=0123",
+            "acme/foo#key=0123456789abcdef0123456789abcdef",
+            "acme/foo#k=0123456789abcdef0123456789abcdeg",
+            "acme/foo#k=0123456789abcdef0123456789abcdef0",
+        ] {
+            assert!(matches!(parse_link(bad), Err(Error::LinkInvalid)), "{bad}");
+        }
+
+        // another site's link keeps its host, which no package name has
+        let other = format!("https://example.com/package/acme/foo#k={KEY}");
+        assert!(split_package_name(parse_link(&other).unwrap().0).is_err());
+    }
 }

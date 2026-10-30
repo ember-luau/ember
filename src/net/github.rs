@@ -1,7 +1,7 @@
 /*!
 GitHub's REST API. The release endpoints for tool installs and `embr self
-update`, and the user lookup the OAuth device flow ends with. Publishing no
-longer touches GitHub, that goes through embr's own registry API.
+update`. Publishing no longer touches GitHub, that goes through embr's own
+registry API.
 */
 
 const BASE_URL: &str = "https://api.github.com";
@@ -25,13 +25,6 @@ impl GithubAPI {
             .map(|token| format!("Bearer {token}"));
 
         Self { auth_header }
-    }
-
-    /// Like `new`, but authenticated with this token. GITHUB_TOKEN is ignored.
-    pub fn with_token(token: &str) -> Self {
-        Self {
-            auth_header: Some(format!("Bearer {token}")),
-        }
     }
 
     fn headers(&self) -> Vec<(&str, &str)> {
@@ -71,11 +64,6 @@ impl GithubAPI {
             HttpError::NotFound => Error::NoReleases(repo.to_string()),
             other => other.into(),
         })
-    }
-
-    pub fn get_user(&self) -> Result<responses::User, Error> {
-        let url = format!("{BASE_URL}/user");
-        Ok(http::get_json(&url, &self.headers())?)
     }
 }
 

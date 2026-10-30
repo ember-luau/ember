@@ -63,18 +63,22 @@ pub(crate) fn target_id(
     }
 }
 
-/** runs `send` with the stored GitHub token, logging in first when none is
-stored. a 401 means the token was revoked, not that the call is doomed, so
-it earns one fresh login and one retry, as publish does. */
+/** runs `send` with EMBER_TOKEN or the stored login, logging in first when
+there is neither. a 401 means the token was revoked, not that the call is
+doomed, so it earns one fresh login and one retry, as publish does. */
 pub(crate) fn as_owner(send: impl Fn(&str) -> Result<(), Error>) -> Result<(), Error> {
-    let credentials = match auth::load()? {
-        Some(credentials) => credentials,
-        None => auth::login(&crate::commands::publish::oauth_client_id()?)?,
+    let token = match auth::token()? {
+        Some(token) => token,
+        None => auth::login(&crate::commands::publish::oauth_client_id()?)?.token,
     };
-    match send(&credentials.token) {
+    match send(&token) {
+        // CI has no one to answer the device flow
+        Err(Error::OwnerActionFailed { status: 401, .. }) if auth::env_token().is_some() => {
+            Err(Error::TokenRejected)
+        }
         Err(Error::OwnerActionFailed { status: 401, .. }) => {
             auth::clear()?;
-            eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
+            eprintln!("warning: the registry rejected the stored token; logging in again");
             let credentials = auth::login(&crate::commands::publish::oauth_client_id()?)?;
             send(&credentials.token)
         }

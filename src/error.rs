@@ -47,6 +47,26 @@ pub enum Error {
         message: String,
     },
 
+    /// the registry API answered 401 to the Ember token.
+    #[error(
+        "The Ember token is invalid, expired or revoked; run `embr auth login` or set EMBER_TOKEN"
+    )]
+    TokenRejected,
+
+    /** the registry API answered 404 for a package that the git index does
+    not hold. the hint shows when embr sent no token. */
+    #[error("Package {name} was not found{}", if *.signed_in { "" } else {
+        ". If it is private, sign in with `embr auth login`. If it is unlisted, add its link with `embr add '<link>'`"
+    })]
+    HiddenNotFound { name: String, signed_in: bool },
+
+    /// any other refusal from the registry API, a 403 included.
+    #[error("The registry refused the request: {message}")]
+    RegistryRefused { status: u16, message: String },
+
+    #[error("The link has no valid key; a package link ends in #k= and 32 hex characters")]
+    LinkInvalid,
+
     #[error("'{0}' is not a version to yank; write it as scope/name@version")]
     YankSpec(String),
 
@@ -284,7 +304,7 @@ pub enum Error {
     )]
     IndexName(String),
 
-    #[error("No GitHub login is stored; run `embr auth login`")]
+    #[error("No login is stored; run `embr auth login`")]
     NotLoggedIn,
 
     #[error("Unsupported environment '{0}'")]

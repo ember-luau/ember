@@ -295,9 +295,9 @@ fn publish_target(
     }
 
     let destination = if args.local {
-        "the local registry"
+        "the local registry".to_string()
     } else {
-        registry::API_URL
+        registry::api_url()
     };
     if args.dry_run {
         println!(
@@ -319,21 +319,25 @@ fn publish_target(
         return Ok(());
     }
 
-    /* stored credentials first. the device flow, and the index clone that
-    provides its client id, only when nothing is stored yet */
+    /* EMBER_TOKEN or the stored login first. the device flow, and the
+    index clone that provides its client id, only when there is neither */
     let stored = match token.take() {
         Some(stored) => stored,
-        None => match auth::load()? {
-            Some(credentials) => credentials.token,
+        None => match auth::token()? {
+            Some(stored) => stored,
             None => auth::login(&oauth_client_id()?)?.token,
         },
     };
     let stored = match upload(&stored, oidc_token, &archive) {
+        // CI has no one to answer the device flow
+        Err(Error::PublishFailed { status: 401, .. }) if auth::env_token().is_some() => {
+            return Err(Error::TokenRejected);
+        }
         /* 401 means the stored token was revoked or expired, not that this
         publish is doomed. forget it, log in fresh, retry once */
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
-            eprintln!("warning: the registry rejected the stored GitHub token; logging in again");
+            eprintln!("warning: the registry rejected the stored token; logging in again");
             let fresh = auth::login(&oauth_client_id()?)?.token;
             upload(&fresh, oidc_token, &archive)?;
             fresh
@@ -411,6 +415,7 @@ fn convert_workspace_dependencies(
             /* and so is `entry`: it says which module of the member to link,
             which is the same module once it publishes */
             entry: entry.clone(),
+            key: None,
         };
     }
     Ok(())
@@ -420,10 +425,17 @@ fn convert_workspace_dependencies(
 [overrides] is only ever consulted on the installing project, and its
 alias-form values refer to aliases only this manifest has. [patches] points
 at files in this repo, which the archive doesn't carry. shipping either
-would just mislead readers of the packed manifest. */
+would just mislead readers of the packed manifest. a dependency's link
+key stays home too: in the archive, every reader of the package gets the
+link. */
 fn strip_local_tables(manifest: &mut Manifest) {
     manifest.overrides.clear();
     manifest.patches.clear();
+    for dependency in manifest.dependencies.values_mut() {
+        if let Dependency::Registry { key, .. } = dependency {
+            *key = None;
+        }
+    }
 }
 
 /// registry caps descriptions at 200 chars, counted as chars, not bytes.
@@ -618,10 +630,11 @@ mod tests {
     }
 
     #[test]
-    fn publish_strips_overrides_and_patches() {
+    fn publish_strips_overrides_patches_and_link_keys() {
         let mut manifest: Manifest = toml::from_str(
             "[package]\nname = \"acme/x\"\nversion = \"1.0.0\"\n\n\
              [target]\nenvironment = \"roblox\"\n\n\
+             [dependencies]\nfoo = { name = \"acme/foo\", version = \"^1\", key = \"0123456789abcdef0123456789abcdef\" }\n\n\
              [overrides]\n\"a.b\" = \"acme/fork\"\n\n\
              [patches]\n\"acme/dep@1.0.0\" = \"patches/acme_dep@1.0.0.patch\"\n",
         )
@@ -633,6 +646,8 @@ mod tests {
         let serialized = toml::to_string(&manifest).unwrap();
         assert!(!serialized.contains("overrides"), "{serialized}");
         assert!(!serialized.contains("patches"), "{serialized}");
+        assert!(!serialized.contains("0123456789abcdef"), "{serialized}");
+        assert!(serialized.contains("acme/foo"), "{serialized}");
     }
 
     #[test]
