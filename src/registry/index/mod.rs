@@ -914,13 +914,16 @@ mod tests {
             let dest = root.join("package");
             let _ = fs::remove_dir_all(&dest);
             fs::create_dir_all(&dest).unwrap();
-            extract(&source_kind, &bytes, &dest).unwrap();
+            match extract(&source_kind, &bytes, &dest) {
+                Ok(()) => assert!(dest.join("Foo.luau").is_file(), "{source_kind:?}"),
+                // the zip crate refuses a link out of the destination
+                Err(_) => assert!(matches!(source_kind, DownloadSource::Zip { .. })),
+            }
 
             assert!(
                 fs::symlink_metadata(dest.join("init.luau")).is_err(),
                 "{source_kind:?} kept the link"
             );
-            assert!(dest.join("Foo.luau").is_file(), "{source_kind:?}");
             let _ = crate::project::requires::rewrite_instance_requires(&dest, "init");
             assert_eq!(fs::read_to_string(&victim).unwrap(), source);
         }

@@ -807,8 +807,8 @@ mod update_tests {
     /// a zip holding `names`, each one a stand-in binary.
     fn zip_of(names: &[&str]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for name in names {
             writer.start_file(*name, options).unwrap();
             writer.write_all(b"\x7fELF not really").unwrap();
