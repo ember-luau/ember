@@ -111,11 +111,17 @@ pub fn bold_styles() -> styling::Styles {
 /** `text` with each control character written as an escape, `\u{1b}` in
 place of ESC. registry, package and API text reaches the terminal in errors
 and warnings. a raw ESC there can rewrite lines, set the clipboard (OSC 52)
-or hide a link (OSC 8). newlines and tabs stay, multi-line errors use them. */
+or hide a link (OSC 8). the bidi controls get the same escape, since they
+reorder the text after them. newlines and tabs stay, multi-line errors use
+them. */
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() && !matches!(character, '\n' | '\t') {
+        let bidi = matches!(
+            character,
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        );
+        if bidi || (character.is_control() && !matches!(character, '\n' | '\t')) {
             out.extend(character.escape_unicode());
         } else {
             out.push(character);
@@ -367,5 +373,23 @@ mod tests {
             printable("\x1b]8;;https://evil\x1b\\x\r\u{7f}\u{85}"),
             r"\u{1b}]8;;https://evil\u{1b}\x\u{d}\u{7f}\u{85}"
         );
+    }
+
+    /** a bidi control reorders the text after it, so `evil/pkg` with an
+    override can read as another name or hide part of a warning. */
+    #[test]
+    fn printable_escapes_bidi_controls() {
+        assert_eq!(
+            printable("a\u{202e}gkp/live\u{202c} b\u{2066}c\u{2069} d\u{200e}e\u{200f}"),
+            r"a\u{202e}gkp/live\u{202c} b\u{2066}c\u{2069} d\u{200e}e\u{200f}"
+        );
+        for character in ('\u{202a}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
+            assert_eq!(
+                printable(&character.to_string()),
+                character.escape_unicode().to_string()
+            );
+        }
+        // the joiners and other format characters are text, emoji use them
+        assert_eq!(printable("👩\u{200d}💻"), "👩\u{200d}💻");
     }
 }
