@@ -9,8 +9,8 @@
 **A package manager built for Luau.** The command is `embr`.
 
 <a href="https://emberpm.dev"><img src="https://img.shields.io/badge/emberpm.dev-F23C1B?style=flat-square&logoColor=white" alt="Website" /></a>
-<a href="https://emberpm.dev/search"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.packages&label=packages&color=F23C1B&style=flat-square" alt="Packages" /></a>
-<a href="https://emberpm.dev"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.luaupm.com%2Fstats.json&query=%24.downloads_total&label=downloads&color=F23C1B&style=flat-square" alt="Downloads" /></a>
+<a href="https://emberpm.dev/search"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.emberpm.dev%2Fstats.json&query=%24.packages&label=packages&color=F23C1B&style=flat-square" alt="Packages" /></a>
+<a href="https://emberpm.dev"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.emberpm.dev%2Fstats.json&query=%24.downloads_total&label=downloads&color=F23C1B&style=flat-square" alt="Downloads" /></a>
 <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="MIT license" />
 
 [Browse packages](https://emberpm.dev/search) · [Docs](https://emberpm.dev/docs) · [Policies](https://emberpm.dev/policies)
@@ -353,7 +353,8 @@ embr add 'https://emberpm.dev/package/acme/tools#k=<key>'
 - `ember.lock` holds the package name. It never holds the key.
 
 embr sends the token and the key only to the registry API host,
-`api.luaupm.com`. When the API redirects a download to another host, embr
+`api.emberpm.dev`, or to its old name `api.luaupm.com`, which old lock files
+use. When the API redirects a download to another host, embr
 sends neither. To use a local backend, set `EMBER_API_URL`, for example
 `EMBER_API_URL=http://127.0.0.1:8787`.
 
