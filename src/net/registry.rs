@@ -1,19 +1,180 @@
 /*!
-embr's own registry API at api.luaupm.com, the write side of publishing.
+embr's own registry API at api.luaupm.com.
 
-Resolution and installs never read here. They go through the git index
-clone and the CDN URLs baked into its entries, so they work even when the
-API is down. Only `embr mcp` reads here, for its package search. The one thing the CLI needs the API for is `POST /v1/publish`,
-which validates the tarball, stores it in the CDN bucket, and writes the
-index entry. The API is the index repo's only writer.
+Public packages resolve and install through the git index clone and the
+CDN URLs in its entries, so they work even when the API is down. The API is
+the index repo's only writer: `POST /v1/publish` checks the tarball, stores
+it, and writes the index entry. Yank and deprecate also go here.
+
+Private and unlisted packages are not in the git index. They resolve and
+download here, with the Ember token and the package's link key. Only the API
+host gets those, see [`on_api_host`]. `embr mcp` also reads here, for its
+package search.
 */
 
 use crate::error::Error;
+use crate::net::auth;
 use crate::net::http;
 use crate::net::http::error::HttpError;
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
 
 pub const API_URL: &str = "https://api.luaupm.com";
+
+/// points embr at another API, such as a local backend. unset means [`API_URL`].
+pub const API_VAR: &str = "EMBER_API_URL";
+
+/// the header that carries an unlisted package's link key.
+const LINK_KEY_HEADER: &str = "Ember-Link-Key";
+
+/// the API base, from EMBER_API_URL when it is set, with no trailing slash.
+pub fn api_url() -> String {
+    std::env::var(API_VAR)
+        .ok()
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| API_URL.to_string())
+}
+
+/// scheme, host and port of `url`, in lowercase.
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    Some(format!("{scheme}://{host}").to_ascii_lowercase())
+}
+
+/** whether `url` is on the API host `api`. the scheme, host and port must
+be equal. only this host gets the Ember token and link keys, so an index
+entry's URL cannot collect them. */
+pub fn on_api_host(url: &str, api: &str) -> bool {
+    origin(url).is_some_and(|host| origin(api) == Some(host))
+}
+
+/// link keys from the manifests that embr read in this run, by package name.
+static KEYS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// whether `key` has the shape of a link key: 32 hex characters.
+pub fn is_link_key(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// keeps `key` for the API calls about `name` in this run.
+pub fn remember_key(name: &str, key: &str) {
+    KEYS.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(name.to_lowercase(), key.to_lowercase());
+}
+
+/// what embr sends the API about one package. each part is there when embr has it.
+#[derive(Default)]
+pub struct Access {
+    pub token: Option<String>,
+    pub key: Option<String>,
+}
+
+impl Access {
+    /// the token from EMBER_TOKEN or the stored login, and the link key for `name`.
+    pub fn of(name: &str) -> Result<Access, Error> {
+        let key = KEYS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&name.to_lowercase())
+            .cloned();
+        Ok(Access {
+            token: auth::token()?,
+            key,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.token.is_none() && self.key.is_none()
+    }
+
+    /** GETs `url`, a URL about the package `name`, with the token and the
+    key. the agent follows no redirect, so neither header can go on to
+    another host. */
+    fn get(&self, url: &str, name: &str) -> Result<ureq::Response, Error> {
+        let mut request = http::manual_redirect_agent()
+            .get(url)
+            .set("User-Agent", http::USER_AGENT);
+        if let Some(token) = &self.token {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+        if let Some(key) = &self.key {
+            request = request.set(LINK_KEY_HEADER, key);
+        }
+        request.call().map_err(|error| refused(error, name, self))
+    }
+}
+
+/** `GET {api}/v1/packages/{name}` as `access`, the JSON body. it holds the
+git index entries under `versions`. */
+pub fn package(api: &str, name: &str, access: &Access) -> Result<String, Error> {
+    let response = access.get(&format!("{api}/v1/packages/{name}"), name)?;
+    Ok(response.into_string()?)
+}
+
+/** downloads `url`, a file on the API host, with what embr holds for its
+package. */
+pub fn download(url: &str, on_bytes: &mut dyn FnMut(u64, Option<u64>)) -> Result<Vec<u8>, Error> {
+    // a files URL is {api}/v1/packages/{scope}/{name}/files/...
+    let name = url
+        .split_once("/v1/packages/")
+        .map(|(_, path)| path.split('/').take(2).collect::<Vec<_>>().join("/"))
+        .unwrap_or_default();
+    download_as(url, &name, &Access::of(&name)?, on_bytes)
+}
+
+/** [`download`] as `access`. a public package's files answer with a
+redirect to the CDN. embr follows it without the token and the key. */
+fn download_as(
+    url: &str,
+    name: &str,
+    access: &Access,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, Error> {
+    let response = access.get(url, name)?;
+    if !(300..400).contains(&response.status()) {
+        return Ok(http::read_body(response, on_bytes)?);
+    }
+    let Some(location) = response.header("location") else {
+        return Err(HttpError::RedirectMissingLocation {
+            url: url.to_string(),
+        }
+        .into());
+    };
+    let next = match location.strip_prefix('/') {
+        Some(path) => format!("{}/{path}", origin(url).unwrap_or_default()),
+        None => location.to_string(),
+    };
+    Ok(http::get_bytes_with(&next, &[], on_bytes)?)
+}
+
+/** the error for an API answer that is not a success. a 401 asks for a new
+sign-in. a 404 looks the same for a missing package and for one that the
+caller may not see. */
+fn refused(error: ureq::Error, name: &str, access: &Access) -> Error {
+    match error {
+        ureq::Error::Status(404, _) => Error::HiddenNotFound {
+            name: name.to_string(),
+            signed_in: access.token.is_some(),
+        },
+        other => api_error(other),
+    }
+}
+
+/// the error for any failed API call. a 403 is a refusal, not a rate limit.
+pub fn api_error(error: ureq::Error) -> Error {
+    match error {
+        ureq::Error::Status(401, _) => Error::TokenRejected,
+        ureq::Error::Status(status, response) => Error::RegistryRefused {
+            status,
+            message: error_message(status, response.into_string().ok().as_deref()),
+        },
+        other => HttpError::from(other).into(),
+    }
+}
 
 /** The API's hard cap on publish bodies, 413 above it. Checked client-side
 so an oversized archive fails before uploading. */
@@ -36,9 +197,9 @@ The API answers 401 bad token, 400 malformed tarball or ember.toml, 403
 scope owned by someone else since first publish claims a scope, 409
 version already exists, 413 over the size cap. `oidc_token` is the
 Actions provenance token when there is one. It rides along in its own
-header, auth stays the GitHub token. */
+header, auth stays the Ember token. */
 pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
-    let url = format!("{API_URL}/v1/publish");
+    let url = format!("{}/v1/publish", api_url());
     // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
     let mut request = http::bulk_agent()
         .post(&url)
@@ -104,7 +265,7 @@ fn owner_call(
     target: Option<&str>,
     body: Option<Option<serde_json::Value>>,
 ) -> Result<(), Error> {
-    let mut url = format!("{API_URL}{path}");
+    let mut url = format!("{}{path}", api_url());
     if let Some(target) = target {
         url.push_str(&format!("?target={target}"));
     }
@@ -138,6 +299,80 @@ fn error_message(status: u16, body: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::http::mock;
+
+    #[test]
+    fn only_the_api_host_gets_credentials() {
+        let api = "https://api.luaupm.com";
+        assert!(on_api_host(
+            "https://api.luaupm.com/v1/packages/a/b/files/x",
+            api
+        ));
+        assert!(on_api_host("https://API.luaupm.com/v1/x", api));
+        assert!(on_api_host("https://api.luaupm.com", api));
+        assert!(on_api_host("https://api.luaupm.com?x", api));
+        // the CDN, plain HTTP, another port, and look-alike hosts get nothing
+        for other in [
+            "https://cdn.luaupm.com/acme/foo/1.0.0.tar.gz",
+            "http://api.luaupm.com/v1/x",
+            "https://api.luaupm.com:8443/v1/x",
+            "https://api.luaupm.com.example.com/v1/x",
+            "https://api.luaupm.com@example.com/v1/x",
+            "https://example.com/https://api.luaupm.com/v1/x",
+            "api.luaupm.com/v1/x",
+        ] {
+            assert!(!on_api_host(other, api), "{other}");
+        }
+        // an API base override is the host then, for local tests
+        assert!(on_api_host(
+            "http://127.0.0.1:8787/v1/x",
+            "http://127.0.0.1:8787"
+        ));
+        assert!(!on_api_host(
+            "https://api.luaupm.com/v1/x",
+            "http://127.0.0.1:8787"
+        ));
+    }
+
+    /** the files route answers a public package with a redirect to the CDN.
+    the CDN gets neither the token nor the key. */
+    #[test]
+    fn a_redirect_leaves_the_credentials_behind() {
+        let (cdn, cdn_log) = mock::serve(|_| mock::reply("200 OK", "tarball"));
+        let to_cdn = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: {cdn}/acme/foo/1.0.0.tar.gz\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (api, api_log) = mock::serve(move |_| to_cdn.clone());
+        let access = Access {
+            token: Some("ember_abc".to_string()),
+            key: Some("0123456789abcdef0123456789abcdef".to_string()),
+        };
+
+        let url = format!("{api}/v1/packages/acme/foo/files/1.0.0.tar.gz");
+        let bytes = download_as(&url, "acme/foo", &access, &mut |_, _| {}).unwrap();
+        assert_eq!(bytes, b"tarball");
+
+        let sent = api_log.lock().unwrap()[0].clone();
+        assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
+        assert!(sent.contains("ember-link-key: 0123456789abcdef"), "{sent}");
+        let followed = cdn_log.lock().unwrap()[0].clone();
+        assert!(
+            followed.starts_with("get /acme/foo/1.0.0.tar.gz "),
+            "{followed}"
+        );
+        assert!(!followed.contains("authorization"), "{followed}");
+        assert!(!followed.contains("ember-link-key"), "{followed}");
+        assert!(!followed.contains("ember_abc"), "{followed}");
+    }
+
+    #[test]
+    fn link_keys_have_one_shape() {
+        assert!(is_link_key("0123456789abcdef0123456789abcdef"));
+        assert!(!is_link_key("0123456789abcdef"));
+        assert!(!is_link_key("0123456789abcdef0123456789abcdeg"));
+        assert!(!is_link_key("0123456789abcdef0123456789abcde\n"));
+    }
 
     #[test]
     fn error_messages_come_from_the_body_when_parsable() {

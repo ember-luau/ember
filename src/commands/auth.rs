@@ -1,7 +1,7 @@
 use crate::commands::index::index_url_for;
 use crate::error::Error;
-use crate::net::auth::{self, Credentials};
-use crate::net::github::GithubAPI;
+use crate::net::auth;
+use crate::net::registry;
 use crate::project::manifest::Manifest;
 use crate::registry::index::{Index, Refresh};
 use crate::ui;
@@ -22,7 +22,7 @@ pub struct AuthArgs {
 pub enum AuthCommand {
     /// Log in with GitHub, or store a token you already have
     Login {
-        /// The token to store, instead of the GitHub device flow
+        /// An Ember token (ember_...) or a GitHub token to store, instead of the GitHub device flow
         #[arg(short, long)]
         token: Option<String>,
     },
@@ -44,14 +44,18 @@ pub fn run(args: AuthArgs) -> Result<(), Error> {
             let client_id = login_index(args.index.as_deref())?;
             match token {
                 Some(token) => {
-                    let token = token.trim().to_string();
-                    // the login comes from GitHub, so a bad token fails here and not at publish
-                    let user = GithubAPI::with_token(&token).get_user()?;
-                    auth::save(&Credentials {
-                        token,
-                        login: user.login.clone(),
-                    })?;
-                    ui::print_success(&format!("Logged in as {}", user.login));
+                    let token = token.trim();
+                    /* the API checks the token now, so a bad one fails here
+                    and not at publish. a GitHub token is traded for an
+                    Ember token, as after the device flow */
+                    let api = registry::api_url();
+                    let credentials = if token.starts_with(auth::TOKEN_PREFIX) {
+                        auth::check(&api, token)?
+                    } else {
+                        auth::exchange(&api, token)?
+                    };
+                    auth::save(&credentials)?;
+                    ui::print_success(&format!("Logged in as {}", credentials.login));
                 }
                 None => {
                     auth::login(&client_id)?;

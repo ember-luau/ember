@@ -1,19 +1,27 @@
 /*!
-GitHub's OAuth device flow and the token store it writes. Publishing sends
-the token as a Bearer header, the registry API maps it to a GitHub login for
-scope ownership.
+GitHub's OAuth device flow and the token store it writes. The device flow
+gives a GitHub token, and `POST /v1/auth/token` trades it for an Ember
+token. embr stores and sends only the Ember token.
 */
 
 use crate::error::Error;
-use crate::net::github::GithubAPI;
 use crate::net::http;
 use crate::net::http::responses;
+use crate::net::registry;
 use crate::sys::paths;
 use crate::ui;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
+
+/// every Ember token starts with this. embr 0.9 stored a GitHub token instead.
+pub const TOKEN_PREFIX: &str = "ember_";
+
+/// an Ember token here wins over the stored login. CI sets it.
+pub const TOKEN_VAR: &str = "EMBER_TOKEN";
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -64,16 +72,102 @@ pub fn clear() -> Result<(), Error> {
     }
 }
 
-/** Runs the device flow regardless of stored state and saves the result.
-`client_id` comes from the index's config, not the binary. */
+/** Runs the device flow regardless of stored state, trades its GitHub
+token for an Ember token, and saves that. `client_id` comes from the
+index's config, not the binary. */
 pub fn login(client_id: &str) -> Result<Credentials, Error> {
-    let credentials = device_flow(client_id)?;
+    let credentials = exchange(&registry::api_url(), &device_flow(client_id)?)?;
     save(&credentials)?;
     ui::print_success(&format!("Logged in as {}", credentials.login));
     Ok(credentials)
 }
 
-fn device_flow(client_id: &str) -> Result<Credentials, Error> {
+/// EMBER_TOKEN, when it is set and not empty.
+pub fn env_token() -> Option<String> {
+    std::env::var(TOKEN_VAR)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/** the Ember token to send: EMBER_TOKEN, else the stored login. a GitHub
+token that embr 0.9 stored is traded for an Ember token on first use. a
+GitHub token that the API refuses is deleted, as a dead login. */
+pub fn token() -> Result<Option<String>, Error> {
+    if let Some(token) = env_token() {
+        return Ok(Some(token));
+    }
+    /* one trade at a time. without the lock, each download worker of an
+    install trades the same GitHub token for a new Ember token */
+    static TRADE: Mutex<()> = Mutex::new(());
+    let _trade = TRADE.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(stored) = load()? else {
+        return Ok(None);
+    };
+    if stored.token.starts_with(TOKEN_PREFIX) {
+        return Ok(Some(stored.token));
+    }
+    match upgrade(&registry::api_url(), &stored.token)? {
+        Some(credentials) => {
+            save(&credentials)?;
+            Ok(Some(credentials.token))
+        }
+        None => {
+            clear()?;
+            Ok(None)
+        }
+    }
+}
+
+/// the Ember token for a GitHub token from embr 0.9. None when the API refuses it.
+fn upgrade(api: &str, github_token: &str) -> Result<Option<Credentials>, Error> {
+    match exchange(api, github_token) {
+        Err(Error::TokenRejected) => Ok(None),
+        other => other.map(Some),
+    }
+}
+
+/// trades a GitHub token for an Ember token at `POST {api}/v1/auth/token`.
+pub fn exchange(api: &str, github_token: &str) -> Result<Credentials, Error> {
+    #[derive(Deserialize)]
+    struct Exchanged {
+        token: String,
+        login: String,
+    }
+    let url = format!("{api}/v1/auth/token");
+    let answer: Exchanged = call(http::agent().post(&url), github_token)?;
+    Ok(Credentials {
+        token: answer.token,
+        login: answer.login,
+    })
+}
+
+/// checks an Ember token at `GET {api}/api/me`, which also gives its login.
+pub fn check(api: &str, token: &str) -> Result<Credentials, Error> {
+    #[derive(Deserialize)]
+    struct Me {
+        login: String,
+    }
+    let me: Me = call(http::agent().get(&format!("{api}/api/me")), token)?;
+    Ok(Credentials {
+        token: token.to_string(),
+        login: me.login,
+    })
+}
+
+/// sends `request` with `token` and reads the JSON answer.
+fn call<T: DeserializeOwned>(request: ureq::Request, token: &str) -> Result<T, Error> {
+    request
+        .set("User-Agent", http::USER_AGENT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(registry::api_error)?
+        .into_json()
+        .map_err(|error| http::error::HttpError::from(error).into())
+}
+
+/// the GitHub token that the device flow ends with.
+fn device_flow(client_id: &str) -> Result<String, Error> {
     /* No OAuth scopes requested. The registry only maps the token to a
     GitHub login, and an unscoped token can already read the public
     profile. */
@@ -84,14 +178,7 @@ fn device_flow(client_id: &str) -> Result<Credentials, Error> {
     )?;
 
     print_instructions(&device);
-
-    let token = poll_for_token(client_id, &device)?;
-    let user = GithubAPI::with_token(&token).get_user()?;
-
-    Ok(Credentials {
-        token,
-        login: user.login,
-    })
+    poll_for_token(client_id, &device)
 }
 
 fn print_instructions(device: &responses::DeviceCode) {
@@ -202,6 +289,54 @@ mod tests {
         let parsed = from_toml(&text).expect("round-trips");
         assert_eq!(parsed.token, "gho_abc123");
         assert_eq!(parsed.login, "octocat");
+    }
+
+    /// embr 0.9 stored a GitHub token. it goes to the API once, and an Ember token comes back.
+    #[test]
+    fn a_github_token_from_0_9_is_traded_for_an_ember_token() {
+        use crate::net::http::mock;
+        let (api, log) = mock::serve(|request| {
+            if request.contains("authorization: bearer gho_dead") {
+                mock::reply(
+                    "401 Unauthorized",
+                    r#"{"error":"GitHub rejected the token"}"#,
+                )
+            } else {
+                let body = r#"{"token":"ember_abc","login":"octocat","expires_at":1}"#;
+                mock::reply("201 Created", body)
+            }
+        });
+
+        let traded = upgrade(&api, "gho_live")
+            .unwrap()
+            .expect("the API takes it");
+        assert_eq!(traded.token, "ember_abc");
+        assert_eq!(traded.login, "octocat");
+        let first = log.lock().unwrap()[0].clone();
+        assert!(first.starts_with("post /v1/auth/token "), "{first}");
+        assert!(first.contains("authorization: bearer gho_live"), "{first}");
+
+        // a GitHub token that the API refuses is a dead login, not an error
+        assert!(upgrade(&api, "gho_dead").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_ember_token_is_checked_at_api_me() {
+        use crate::net::http::mock;
+        let (api, log) = mock::serve(|request| {
+            if request.contains("bearer ember_good") {
+                mock::reply("200 OK", r#"{"id":1,"login":"octocat"}"#)
+            } else {
+                mock::reply("401 Unauthorized", r#"{"error":"sign in first"}"#)
+            }
+        });
+
+        assert_eq!(check(&api, "ember_good").unwrap().login, "octocat");
+        assert!(log.lock().unwrap()[0].starts_with("get /api/me "));
+        assert!(matches!(
+            check(&api, "ember_bad"),
+            Err(Error::TokenRejected)
+        ));
     }
 
     #[test]

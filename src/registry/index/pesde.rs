@@ -55,7 +55,21 @@ pub fn resolve(
     prefer: Option<(Environment, Language)>,
     pinned: &[semver::Version],
 ) -> Result<ResolvedPackage, Error> {
-    let (candidates, package_deprecated) = read(root, index_url, name)?;
+    let found = read(root, index_url, name)?;
+    pick(found, index_url, config, name, req, prefer, pinned)
+}
+
+/** of `found`, what [`read`] gives, the version that [`resolve`] picks. the
+API's answer for a hidden package takes the same rules. */
+pub(crate) fn pick(
+    (candidates, package_deprecated): (Vec<Candidate>, Option<String>),
+    index_url: &str,
+    config: &Config,
+    name: &str,
+    req: &semver::VersionReq,
+    prefer: Option<(Environment, Language)>,
+    pinned: &[semver::Version],
+) -> Result<ResolvedPackage, Error> {
     /* cargo's rule: a yanked version stays out of fresh picks, but a
     lockfile that already pins it keeps installing it. pesde writes the
     same `yanked = true`, so its own yanks count too. */
@@ -143,6 +157,15 @@ pub fn read(
     }
 
     let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
+    entries(&file, index_url, name)
+}
+
+/// [`read`] of a package file that is already parsed.
+pub(crate) fn entries(
+    file: &Value,
+    index_url: &str,
+    name: &str,
+) -> Result<(Vec<Candidate>, Option<String>), Error> {
     /* Newer pesde files nest entries under an "entries" table with sibling
     metadata like `meta`, older ones put them at the top level. Keys are
     "<version> <target>", the target part optional in embr indices. A target

@@ -1,10 +1,11 @@
 pub mod forest;
+pub mod hidden;
 pub mod pesde;
 pub mod wally;
 
 use crate::error::Error;
-use crate::net::http;
-use crate::project::manifest::{Environment, Language};
+use crate::net::{http, registry};
+use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language};
 use crate::registry::local;
 use crate::sys::git;
 use crate::sys::hash::{fnv1a, fnv1a_parts};
@@ -204,7 +205,15 @@ impl Index {
         match &self.kind {
             Kind::Wally(config) => wally::resolve(&self.root, &self.url, config, name, req),
             Kind::Pesde(config) => {
-                pesde::resolve(&self.root, &self.url, config, name, req, prefer, pinned)
+                match pesde::resolve(&self.root, &self.url, config, name, req, prefer, pinned) {
+                    // a private or unlisted package is not in the git index
+                    Err(missing @ Error::PackageNotFound { .. })
+                        if self.url == DEFAULT_INDEX_URL =>
+                    {
+                        hidden::resolve(name, req, prefer, pinned)?.ok_or(missing)
+                    }
+                    found => found,
+                }
             }
             Kind::Forest => forest::resolve(&self.url, name, req),
         }
@@ -224,11 +233,10 @@ impl Index {
     }
 }
 
-/** Downloads and extracts a resolved package into `dest`. All downloads are
-anonymous, ember's registry serves tarballs from a public CDN and wally,
-pesde and Forest registries are public too. If credentialed downloads ever
-come back, restore the old restraint of tokens only to GitHub-owned hosts, so
-an arbitrary registry url in an index entry can't harvest them. */
+/** Downloads and extracts a resolved package into `dest`. Downloads are
+anonymous, except from ember's API host, which serves private and unlisted
+packages. That host alone gets the Ember token and the link key, so an
+arbitrary registry url in an index entry can't harvest them. */
 pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
     download_with(source, dest, cache, &mut |_, _| {})
 }
@@ -331,7 +339,11 @@ fn fetch_archive(
     }
 
     let started = std::time::Instant::now();
-    let bytes = http::get_bytes_with(url, headers, on_bytes)?;
+    let bytes = if registry::on_api_host(url, &registry::api_url()) {
+        registry::download(url, on_bytes)?
+    } else {
+        http::get_bytes_with(url, headers, on_bytes)?
+    };
     crate::ui::timing(&format!("download {url}"), started);
 
     /* caching is best-effort, a full disk or permission problem must not

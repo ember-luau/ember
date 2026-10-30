@@ -401,6 +401,7 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
         repository: non_empty(repository),
         license: Some(license.to_string()),
         logo: None,
+        visibility: None,
     };
     let manifest = package_manifest(package, environment, language, non_empty(main));
     write_manifest(manifest_path, &toml::to_string(&manifest)?)
@@ -584,6 +585,7 @@ mod tests {
             repository: None,
             license: Some("MIT".to_string()),
             logo: None,
+            visibility: None,
         };
         for language in LANGUAGES {
             let environment = environment_choices(language)[0];

@@ -309,6 +309,43 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// the registry reads `visibility` from the archive, so a dropped key would publish in public.
+    #[test]
+    fn the_archive_keeps_visibility() {
+        let base = std::env::temp_dir().join("embr-test-pack-visibility");
+        let _ = fs::remove_dir_all(&base);
+        write(&base, "ember.toml", "");
+        write(&base, "src/init.luau", "return 1\n");
+
+        let manifest = parse_manifest(
+            "[package]\nname = \"acme/secret\"\nversion = \"1.0.0\"\nvisibility = \"unlisted\"",
+        );
+        let bytes = pack(&base, &manifest).unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+        let mut packed = String::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path_bytes().as_ref() == b"ember.toml" {
+                entry.read_to_string(&mut packed).unwrap();
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+
+        let packed: Manifest = toml::from_str(&packed).unwrap();
+        let visibility = packed.package.unwrap().visibility;
+        assert_eq!(
+            visibility,
+            Some(crate::project::manifest::Visibility::Unlisted)
+        );
+        // a typo is an error, not a public package
+        assert!(
+            toml::from_str::<Manifest>(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\nvisibility = \"privat\""
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn tar_round_trips_with_forward_slash_paths() {
         let base = std::env::temp_dir().join("embr-test-pack-roundtrip");

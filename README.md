@@ -310,6 +310,53 @@ embr install
 `embr yank` and `embr deprecate` change the registry only. They do not
 change a local package.
 
+## Private and unlisted packages
+
+A private package is visible only to people with access to it. An unlisted
+package is also visible to each person who has its link. Search does not
+show either kind. The git index does not hold them, so embr gets them from
+the registry API.
+
+To publish one, set `visibility` in `[package]`:
+
+```toml
+[package]
+name = "acme/tools"
+version = "1.0.0"
+visibility = "private"    # or "unlisted". No value means public.
+```
+
+- Publish the first version with embr 0.10.0 or later. An older embr drops
+  `visibility`, and the package becomes public. A public package stays
+  public.
+- `private = true` is a different key. It means "never publish".
+
+To install a private package, sign in:
+
+- `embr auth login` stores an Ember token in `~/.ember/credentials.toml`.
+  A login from embr 0.9 changes to an Ember token on first use.
+- `embr auth login --token ember_...` stores a token from emberpm.dev.
+- In CI, set `EMBER_TOKEN`. It wins over the stored login.
+
+To install an unlisted package, add its link:
+
+```sh
+embr add 'https://emberpm.dev/package/acme/tools#k=<key>'
+```
+
+- embr writes the key on the dependency:
+  `tools = { name = "acme/tools", version = "^", key = "<key>" }`. A clone
+  of the project then installs the package with no setup.
+- Each person who can read `ember.toml` can use the key. In a public
+  repository, that is everyone. When the owner makes a new link, the old key
+  stops working, and each project must add the new link.
+- `ember.lock` holds the package name. It never holds the key.
+
+embr sends the token and the key only to the registry API host,
+`api.luaupm.com`. When the API redirects a download to another host, embr
+sends neither. To use a local backend, set `EMBER_API_URL`, for example
+`EMBER_API_URL=http://127.0.0.1:8787`.
+
 ## `embr mcp`: package search for coding agents
 
 `embr mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)

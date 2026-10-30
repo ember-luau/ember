@@ -1,6 +1,7 @@
 pub mod edit;
 
 use crate::error::Error;
+use crate::net::registry;
 use crate::registry::local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -225,6 +226,23 @@ pub struct Package {
     registry shows it in place of the box icon. it always ships. */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
+    /** who sees the package on the registry. absent means public. the name
+    is not `private`, which already means "never publish". */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
+}
+
+/** `[package] visibility`. the registry reads it from the archive's
+ember.toml at publish. an enum, so a typo fails here and does not publish
+the package as public, which cannot be undone. */
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Public,
+    /// anyone with the link sees it.
+    Unlisted,
+    /// only people with access see it.
+    Private,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -591,6 +609,10 @@ pub enum Dependency {
         /// see [`Dependency::entry`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<String>,
+        /** an unlisted package's link key, 32 hex characters. embr sends it
+        only to the registry API. anyone who reads ember.toml can use it. */
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -908,11 +930,31 @@ impl Manifest {
             .unwrap_or(&[])
     }
 
+    /** reads a manifest from disk. its link keys go to the registry API
+    calls of this run, so a key on a direct dependency also serves the
+    package where it is a transitive dependency. */
     pub fn load_from(path: &Path) -> Result<Self, Error> {
         if !path.exists() {
             return Err(Error::ManifestMissing);
         }
-        Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+        let manifest: Manifest = toml::from_str(&std::fs::read_to_string(path)?)?;
+        for (alias, dependency) in &manifest.dependencies {
+            if let Dependency::Registry {
+                name,
+                key: Some(key),
+                ..
+            } = dependency
+            {
+                // the key goes into a header, so it must have the right shape first
+                if !registry::is_link_key(key) {
+                    return Err(Error::ManifestInvalid(format!(
+                        "the key of dependency '{alias}' is not 32 hex characters"
+                    )));
+                }
+                registry::remember_key(name, key);
+            }
+        }
+        Ok(manifest)
     }
 
     /// folder an environment's packages (and their link files) install to.

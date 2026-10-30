@@ -33,11 +33,6 @@ pub struct AccessToken {
     pub error: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct User {
-    pub login: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,21 +124,5 @@ mod tests {
             Some("gho_16C7e42F292c6912E7710c838347Ae178B4a")
         );
         assert!(token.error.is_none());
-    }
-
-    #[test]
-    fn deserializes_user() {
-        let json = r#"{
-            "login": "octocat",
-            "id": 583231,
-            "node_id": "MDQ6VXNlcjU4MzIzMQ==",
-            "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4",
-            "html_url": "https://github.com/octocat",
-            "type": "User",
-            "site_admin": false
-        }"#;
-
-        let user: User = serde_json::from_str(json).unwrap();
-        assert_eq!(user.login, "octocat");
     }
 }
