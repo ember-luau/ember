@@ -306,6 +306,26 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
         }
         DownloadSource::Workspace { .. } => unreachable!("rejected by download"),
     }
+    remove_links(dest)
+}
+
+/** removes every symbolic link under `dir`. the tar and zip crates refuse
+to write through a link, but they keep the link itself. a link to a file
+out of the package folder then reaches the steps after the extract: the
+require rewrite reads that file and writes it back, and Rojo syncs it into
+the place. a package needs no links, so none stay. */
+fn remove_links(dir: &Path) -> Result<(), Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            // a link to a folder is a folder entry on Windows
+            let path = entry.path();
+            fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))?;
+        } else if kind.is_dir() {
+            remove_links(&entry.path())?;
+        }
+    }
     Ok(())
 }
 
@@ -842,6 +862,121 @@ mod tests {
         assert!(matches!(error, Error::IndexUnavailable { .. }), "{error}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert!(started.elapsed() < Duration::from_secs(60));
+    }
+
+    /** a package that ships `init.luau` as a link to a file outside its
+    folder. without the link removal, the require rewrite reads the victim
+    through the link and writes the rewritten text back to it. */
+    #[cfg(unix)]
+    #[test]
+    fn extract_drops_links_that_point_out_of_the_package() {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join("embr-test-extract-links");
+        let _ = fs::remove_dir_all(&root);
+        let victim = root.join("victim.luau");
+        fs::create_dir_all(&root).unwrap();
+        let source = "local Foo = require(script.Foo)\nreturn Foo\n";
+        fs::write(&victim, source).unwrap();
+
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        tar.append_link(&mut header, "init.luau", &victim).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "Foo.luau", &b"ok\n\n"[..])
+            .unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar.into_inner().unwrap()).unwrap();
+        let tar_gz = gz.finish().unwrap();
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.add_symlink("init.luau", victim.to_string_lossy(), options)
+            .unwrap();
+        zip.start_file("Foo.luau", options).unwrap();
+        zip.write_all(b"ok\n\n").unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+
+        let url = String::new();
+        for (source_kind, bytes) in [
+            (DownloadSource::TarGz { url: url.clone() }, tar_gz),
+            (DownloadSource::Zip { url: url.clone() }, zip),
+        ] {
+            let dest = root.join("package");
+            let _ = fs::remove_dir_all(&dest);
+            fs::create_dir_all(&dest).unwrap();
+            extract(&source_kind, &bytes, &dest).unwrap();
+
+            assert!(
+                fs::symlink_metadata(dest.join("init.luau")).is_err(),
+                "{source_kind:?} kept the link"
+            );
+            assert!(dest.join("Foo.luau").is_file(), "{source_kind:?}");
+            let _ = crate::project::requires::rewrite_instance_requires(&dest, "init");
+            assert_eq!(fs::read_to_string(&victim).unwrap(), source);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /** a `..` entry, and a file written through a link to a folder out of
+    the package. neither may land outside `dest`. */
+    #[cfg(unix)]
+    #[test]
+    fn extract_never_writes_outside_the_package() {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join("embr-test-extract-escape");
+        let _ = fs::remove_dir_all(&root);
+        let dest = root.join("package");
+
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.as_mut_bytes()[..13].copy_from_slice(b"../escape.txt");
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &b"x\n"[..]).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        tar.append_link(&mut header, "out", &root).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "out/through.txt", &b"x\n"[..])
+            .unwrap();
+        let tar = tar.into_inner().unwrap();
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.add_symlink("out", root.to_string_lossy(), options)
+            .unwrap();
+        zip.start_file("out/through.txt", options).unwrap();
+        zip.write_all(b"x\n").unwrap();
+        zip.start_file("../escape.txt", options).unwrap();
+        zip.write_all(b"x\n").unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+
+        let url = String::new();
+        for (source_kind, bytes) in [
+            (DownloadSource::TarGz { url: url.clone() }, tar),
+            (DownloadSource::Zip { url: url.clone() }, zip),
+        ] {
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&dest).unwrap();
+            let _ = extract(&source_kind, &bytes, &dest);
+            assert!(!root.join("escape.txt").exists(), "{source_kind:?}");
+            assert!(!root.join("through.txt").exists(), "{source_kind:?}");
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

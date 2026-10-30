@@ -108,9 +108,25 @@ pub fn bold_styles() -> styling::Styles {
         .invalid(styling::Style::new())
 }
 
+/** `text` with each control character written as an escape, `\u{1b}` in
+place of ESC. registry, package and API text reaches the terminal in errors
+and warnings. a raw ESC there can rewrite lines, set the clipboard (OSC 52)
+or hide a link (OSC 8). newlines and tabs stay, multi-line errors use them. */
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() && !matches!(character, '\n' | '\t') {
+            out.extend(character.escape_unicode());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 /// accent "✗ message" line to stderr.
 pub fn print_error(message: &str) {
-    eprintln!("{}", format!("✗ {message}").with(accent()));
+    eprintln!("{}", format!("✗ {}", printable(message)).with(accent()));
 }
 
 /** the "✓ message" line print_success emits, as a string so progress bars
@@ -305,7 +321,7 @@ pub fn render_config() -> RenderConfig<'static> {
 mod tests {
     use std::time::Duration;
 
-    use super::{ACCENT, RESET, fg, format_duration, visible_width};
+    use super::{ACCENT, RESET, fg, format_duration, printable, visible_width};
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {
@@ -341,5 +357,15 @@ mod tests {
         // a painted line measures as what the terminal shows, not what it stores
         assert_eq!(visible_width("\x1b[38;2;230;16;72mab\x1b[0mc"), 3);
         assert_eq!(visible_width(&format!("{}x{RESET}", fg(ACCENT))), 1);
+    }
+
+    #[test]
+    fn printable_escapes_control_characters_but_keeps_lines() {
+        assert_eq!(printable("a\nb\tc"), "a\nb\tc");
+        assert_eq!(printable("é ✓"), "é ✓");
+        assert_eq!(
+            printable("\x1b]8;;https://evil\x1b\\x\r\u{7f}\u{85}"),
+            r"\u{1b}]8;;https://evil\u{1b}\x\u{d}\u{7f}\u{85}"
+        );
     }
 }
