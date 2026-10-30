@@ -358,13 +358,16 @@ fn fetch_archive(
         return Ok((bytes, true));
     }
 
+    /* the cache keeps the URL as written, so an archive cached from an old
+    host stays a hit */
+    let from = registry::moved(url);
     let started = std::time::Instant::now();
-    let bytes = if registry::on_api_host(url, &registry::api_url()) {
-        registry::download(url, on_bytes)?
+    let bytes = if registry::on_api_host(&from, &registry::api_url()) {
+        registry::download(&from, on_bytes)?
     } else {
-        http::get_bytes_with(url, headers, on_bytes)?
+        http::get_bytes_with(&from, headers, on_bytes)?
     };
-    crate::ui::timing(&format!("download {url}"), started);
+    crate::ui::timing(&format!("download {from}"), started);
 
     /* caching is best-effort, a full disk or permission problem must not
     fail an install that already has the bytes in hand. no size budget or
