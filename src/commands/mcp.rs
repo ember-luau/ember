@@ -10,6 +10,7 @@ messages go to stdout, so any log goes to stderr.
 
 use crate::error::Error;
 use crate::net::http::{self, error::HttpError};
+use crate::net::registry::API_URL;
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language, split_package_name};
 use crate::registry::index::forest;
 use crate::registry::index::pesde::{self, Candidate};
@@ -20,9 +21,6 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-
-/// the registry's search file, one entry for each package.
-const SEARCH_INDEX_URL: &str = "https://cdn.luaupm.com/search-index.json";
 
 /// the APIs behind the Wally and pesde search pages.
 const WALLY_API: &str = "https://api.wally.run";
@@ -49,6 +47,8 @@ The tools only read. Each answer gives the `embr add` command that installs a pa
 
 /// the search answer holds this many packages when the call sets no limit.
 const DEFAULT_LIMIT: usize = 20;
+/** also the largest page of the registry's `GET /v1/search`, so one page
+answers every call. */
 const MAX_LIMIT: usize = 50;
 /// search_all lists this many packages from each registry when the call sets no limit.
 const DEFAULT_ALL_LIMIT: usize = 10;
@@ -155,6 +155,7 @@ fn tools() -> Value {
             "name": "search_packages",
             "description": "Searches the ember registry of Luau and Roblox packages. \
                 The query matches package names and descriptions, and case does not matter. \
+                Each word of the query matches the start of a word, and a package must match every word. \
                 An empty query matches every package. \
                 The answer lists the most downloaded packages first, one on each line. \
                 Each line gives the name, the latest version, the environments, and the download count. \
@@ -286,9 +287,10 @@ struct SearchArgs {
     limit: Option<usize>,
 }
 
-/** one package in the registry's search file. the registry adds `targets`,
-`language`, `yanked`, and `deprecated` to each entry, so older entries lack
-them. serde ignores keys this struct does not name, like `logo`. */
+/** one package in a `GET /v1/search` answer. older rows can lack
+`targets`, `language`, and `deprecated`. serde ignores keys this struct
+does not name, like `logo`. the search never lists a package whose every
+version is yanked. */
 #[derive(Deserialize)]
 struct SearchEntry {
     name: String,
@@ -303,9 +305,6 @@ struct SearchEntry {
     language: Option<String>,
     downloads: Option<u64>,
     deprecated: Option<String>,
-    /// set only when every version is yanked
-    #[serde(default)]
-    yanked: bool,
 }
 
 impl SearchEntry {
@@ -355,9 +354,6 @@ impl SearchEntry {
         if let Some(reason) = non_empty(&self.deprecated) {
             parts.push(format!("deprecated: {reason}"));
         }
-        if self.yanked {
-            parts.push("yanked: every version".to_string());
-        }
         parts.push(format!("install: embr add {}", self.name));
         format!("- {}", parts.join(" | "))
     }
@@ -371,60 +367,64 @@ fn non_empty(text: &Option<String>) -> Option<&str> {
 }
 
 fn search_packages(arguments: Value) -> Result<String, Error> {
-    let args: SearchArgs = serde_json::from_value(arguments)?;
-    // ponytail: fetches the whole file on each call. it is 4 KB today; cache it if it grows
-    let entries: Vec<SearchEntry> = http::get_json(SEARCH_INDEX_URL, &[])?;
-    Ok(search(&entries, &args))
+    search_packages_at(API_URL, arguments)
 }
 
-/// the matches for `args` in `entries`, most downloaded first, as text.
-fn search(entries: &[SearchEntry], args: &SearchArgs) -> String {
-    let matches = matches(entries, args);
-    if matches.is_empty() {
+/// search_packages against the registry API at `api`.
+fn search_packages_at(api: &str, arguments: Value) -> Result<String, Error> {
+    let args: SearchArgs = serde_json::from_value(arguments)?;
+    let page = ember_search(api, &args.query, args.environment, args.language)?;
+    Ok(search(&page, &args))
+}
+
+/// one page of the registry's `GET /v1/search`.
+#[derive(Deserialize)]
+struct SearchPage {
+    /// every match, not only this page
+    total: usize,
+    results: Vec<SearchEntry>,
+}
+
+/** the first [`MAX_LIMIT`] matches of `query` in the registry at `api`,
+most downloaded first. the registry matches each word of the query as a
+prefix, and it filters and ranks the packages. one page of the largest
+limit answers every call, so the page size does not change with it. */
+fn ember_search(
+    api: &str,
+    query: &str,
+    environment: Option<Environment>,
+    language: Option<Language>,
+) -> Result<SearchPage, HttpError> {
+    let mut url = format!(
+        "{api}/v1/search?q={}&sort=downloads&page=1&per_page={MAX_LIMIT}",
+        encode(&query.trim().to_lowercase())
+    );
+    if let Some(environment) = environment {
+        url.push_str(&format!("&environment={}", environment.as_str()));
+    }
+    if let Some(language) = language {
+        url.push_str(&format!("&language={}", language.as_str()));
+    }
+    http::get_json(&url, &[])
+}
+
+/// the search_packages answer for one page of matches, as text.
+fn search(page: &SearchPage, args: &SearchArgs) -> String {
+    if page.results.is_empty() {
         return format!("No package matches \"{}\".", args.query);
     }
 
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let mut text = format!(
         "{} of {} matching packages, most downloaded first:\n",
-        matches.len().min(limit),
-        matches.len()
+        page.results.len().min(limit),
+        page.total
     );
-    for entry in matches.iter().take(limit) {
+    for entry in page.results.iter().take(limit) {
         text.push_str(&entry.line());
         text.push('\n');
     }
     text
-}
-
-/// the entries that match `args`, most downloaded first. `limit` is ignored.
-fn matches<'a>(entries: &'a [SearchEntry], args: &SearchArgs) -> Vec<&'a SearchEntry> {
-    let query = args.query.trim().to_lowercase();
-    let mut matches: Vec<&SearchEntry> = entries
-        .iter()
-        .filter(|entry| {
-            entry.name.to_lowercase().contains(&query)
-                || entry
-                    .description
-                    .as_deref()
-                    .is_some_and(|description| description.to_lowercase().contains(&query))
-        })
-        .filter(|entry| {
-            args.environment
-                .is_none_or(|env| entry.environments().contains(&env.to_string()))
-        })
-        .filter(|entry| {
-            args.language
-                .is_none_or(|language| entry.language() == language.as_str())
-        })
-        .collect();
-    matches.sort_by(|a, b| {
-        b.downloads
-            .unwrap_or(0)
-            .cmp(&a.downloads.unwrap_or(0))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    matches
 }
 
 /// a registry that search_all reads. embr installs from each one.
@@ -464,8 +464,9 @@ struct SearchAllArgs {
     limit: Option<usize>,
 }
 
-/// asks one registry for a query, and gives the search_all lines of its matches.
-type Fetch = fn(Registry, &str) -> Result<Vec<String>, String>;
+/** asks one registry for a query. it gives the search_all lines of the
+matches, and the number of matches, which can be more than the lines. */
+type Fetch = fn(Registry, &str) -> Result<(Vec<String>, usize), String>;
 
 fn search_all(arguments: Value) -> Result<String, Error> {
     let args: SearchAllArgs = serde_json::from_value(arguments)?;
@@ -517,10 +518,10 @@ fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> S
             .remove(&registry)
             .unwrap_or_else(|| Err(format!("no answer in {timeout:?}")));
         match result {
-            Ok(found) => {
+            Ok((found, total)) => {
                 let shown = found.len().min(limit);
                 needs_index |= registry != Registry::Ember && shown > 0;
-                counts.push(format!("{} {shown} of {}", registry.name(), found.len()));
+                counts.push(format!("{} {shown} of {total}", registry.name()));
                 for line in &found[..shown] {
                     lines.push_str(line);
                     lines.push('\n');
@@ -550,19 +551,30 @@ fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> S
 }
 
 /// the live [`Fetch`]: one search request, plus the mirror checks for Forest.
-fn fetch(registry: Registry, query: &str) -> Result<Vec<String>, String> {
+fn fetch(registry: Registry, query: &str) -> Result<(Vec<String>, usize), String> {
+    fetch_at(API_URL, registry, query)
+}
+
+/// [`fetch`], with ember's registry API at `api`.
+fn fetch_at(api: &str, registry: Registry, query: &str) -> Result<(Vec<String>, usize), String> {
     let encoded = encode(query);
-    let lines = match registry {
-        Registry::Ember => http::get_json(SEARCH_INDEX_URL, &[])
-            .map(|entries: Vec<SearchEntry>| ember_lines(&entries, query)),
+    // the other registries give no total that search_all reads
+    let counted = |lines: Vec<String>| {
+        let total = lines.len();
+        (lines, total)
+    };
+    let found = match registry {
+        Registry::Ember => ember_search(api, query, None, None)
+            .map(|page| (ember_lines(&page.results), page.total)),
         Registry::Wally => http::get_json(
             &format!("{WALLY_API}/v1/package-search?query={encoded}"),
             &[],
         )
-        .map(wally_lines),
-        Registry::Pesde => {
-            http::get_json(&format!("{PESDE_API}/v1/search?query={encoded}"), &[]).map(pesde_lines)
-        }
+        .map(wally_lines)
+        .map(counted),
+        Registry::Pesde => http::get_json(&format!("{PESDE_API}/v1/search?query={encoded}"), &[])
+            .map(pesde_lines)
+            .map(counted),
         // 50 is the most rows that Forest gives in one page
         Registry::Forest => http::get_json(
             &format!(
@@ -571,9 +583,10 @@ fn fetch(registry: Registry, query: &str) -> Result<Vec<String>, String> {
             ),
             &[],
         )
-        .and_then(|page: ForestPage| forest_lines(page.packages, forest_copy)),
+        .and_then(|page: ForestPage| forest_lines(page.packages, forest_copy))
+        .map(counted),
     };
-    lines.map_err(|error| error.to_string())
+    found.map_err(|error| error.to_string())
 }
 
 /// percent-encodes `text` for a URL, as JavaScript's encodeURIComponent does.
@@ -610,15 +623,9 @@ fn registry_line(
     format!("- {}", parts.join(" | "))
 }
 
-/// the search_packages lines with the registry name, most downloaded first.
-fn ember_lines(entries: &[SearchEntry], query: &str) -> Vec<String> {
-    let args = SearchArgs {
-        query: query.to_string(),
-        environment: None,
-        language: None,
-        limit: None,
-    };
-    matches(entries, &args)
+/// the search_packages lines with the registry name.
+fn ember_lines(entries: &[SearchEntry]) -> Vec<String> {
+    entries
         .iter()
         .map(|entry| entry.line().replacen("- ", "- ember ", 1))
         .collect()
@@ -998,18 +1005,16 @@ mod tests {
         assert_eq!(answers[4]["error"]["code"], INVALID_PARAMS);
     }
 
-    /// the live file's shape, plus an entry with every field the registry adds.
-    fn sample() -> Vec<SearchEntry> {
-        serde_json::from_str(
-            r#"[
-                {"name":"chief/core","version":"0.2.0","target":"shared","type":"roblox","description":"The core of Chief, a Luau module framework.","publishers":["ryancundiff"],"downloads":145},
-                {"name":"chief/bin","version":"0.2.0","target":"shared","type":"roblox","description":"A cleanup container.","downloads":117},
-                {"name":"mayari/core","version":"0.3.0","target":"luau","type":"luau","description":"Mayari core."},
-                {"name":"acme/signal","version":"1.0.0","target":"roblox","type":"roblox","targets":["roblox","lune"],"language":"alloy","logo":"https://cdn.luaupm.com/acme/signal/logo.png","description":"Typed signals for Chief users.","downloads":3,"deprecated":"use acme/signal2"},
-                {"name":"acme/gone","version":"2.0.0","target":"luau","description":"","downloads":1,"deprecated":"","yanked":true}
-            ]"#,
-        )
-        .unwrap()
+    /** a `/v1/search` answer in the live shape, most downloaded first: a
+    row from before target IDs, and a row with every field the registry adds. */
+    const SEARCH_PAGE: &str = r#"{"total":6,"page":1,"per_page":50,"results":[
+        {"name":"chief/core","version":"0.2.0","target":"shared","type":"roblox","description":"The core of Chief, a Luau module framework.","publishers":["ryancundiff"],"downloads":145},
+        {"name":"chief/bin","version":"0.2.0","target":"shared","type":"roblox","description":"A cleanup container.","downloads":117},
+        {"name":"acme/signal","version":"1.0.0","target":"roblox","type":"roblox","targets":["roblox","lune"],"language":"alloy","languages":["alloy"],"logo":"https://cdn.luaupm.com/acme/signal/logo.png","description":"Typed signals for Chief users.","downloads":3,"deprecated":"use acme/signal2"},
+        {"name":"mayari/core","version":"0.3.0","target":"luau","type":"luau","targets":["luau"],"description":"Mayari core.","deprecated":""}]}"#;
+
+    fn sample() -> SearchPage {
+        serde_json::from_str(SEARCH_PAGE).unwrap()
     }
 
     fn names(text: &str) -> Vec<&str> {
@@ -1023,65 +1028,90 @@ mod tests {
         search(&sample(), &serde_json::from_value(args).unwrap())
     }
 
-    #[test]
-    fn search_matches_names_and_descriptions_most_downloaded_first() {
-        let text = search_for(json!({ "query": "CHIEF" }));
-        assert_eq!(names(&text), ["chief/core", "chief/bin", "acme/signal"]);
-        assert!(text.starts_with("3 of 3 matching packages"));
+    /** a local registry API. it answers every request with `body` as JSON,
+    and keeps the path and query of each request. */
+    fn api(body: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::Read;
 
-        // an empty query matches every package
-        assert_eq!(names(&search_for(json!({ "query": "" }))).len(), 5);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = paths.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                // the request line is "GET /v1/search?q=... HTTP/1.1"
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                if let Some(path) = request.split(' ').nth(1) {
+                    seen.lock().unwrap().push(path.to_string());
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, paths)
+    }
+
+    #[test]
+    fn search_asks_the_api_for_one_page_and_reads_its_total() {
+        let (url, paths) = api(SEARCH_PAGE);
+        let text = search_packages_at(
+            &url,
+            json!({ "query": " Chief/ ", "environment": "roblox_server", "language": "alloy", "limit": 2 }),
+        )
+        .unwrap();
+        assert!(
+            text.starts_with("2 of 6 matching packages, most downloaded first:\n"),
+            "{text}"
+        );
+        assert_eq!(names(&text), ["chief/core", "chief/bin"]);
+
+        // search_all asks for the same page, with no filters
+        let (lines, total) = fetch_at(&url, Registry::Ember, "chief/").unwrap();
+        assert_eq!(total, 6);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("- ember chief/core 0.2.0 | roblox |"));
         assert_eq!(
-            search_for(json!({ "query": "nothing" })),
-            "No package matches \"nothing\"."
+            *paths.lock().unwrap(),
+            [
+                "/v1/search?q=chief%2F&sort=downloads&page=1&per_page=50\
+                 &environment=roblox_server&language=alloy",
+                "/v1/search?q=chief%2F&sort=downloads&page=1&per_page=50",
+            ]
         );
     }
 
     #[test]
-    fn search_filters_by_environment_and_language() {
-        let filter = |args: Value| names(&search_for(args)).join(" ");
-        // shared reads as roblox, and a targets list wins over the one target
-        assert_eq!(
-            filter(json!({ "query": "", "environment": "roblox" })),
-            "chief/core chief/bin acme/signal"
-        );
-        assert_eq!(
-            filter(json!({ "query": "", "environment": "lune" })),
-            "acme/signal"
-        );
-        assert_eq!(
-            filter(json!({ "query": "", "environment": "luau" })),
-            "acme/gone mayari/core"
-        );
-        assert_eq!(
-            filter(json!({ "query": "", "language": "alloy" })),
-            "acme/signal"
-        );
-        // an entry with no language is luau
-        assert_eq!(
-            filter(json!({ "query": "chief", "language": "luau" })),
-            "chief/core chief/bin"
-        );
+    fn search_answers_no_match_in_words() {
+        let empty: SearchPage = serde_json::from_str(r#"{"total":0,"results":[]}"#).unwrap();
+        let args = serde_json::from_value(json!({ "query": "nothing" })).unwrap();
+        assert_eq!(search(&empty, &args), "No package matches \"nothing\".");
     }
 
     #[test]
     fn search_lines_give_what_an_agent_needs() {
-        let text = search_for(json!({ "query": "signal" }));
+        let text = search_for(json!({ "query": "" }));
+        let line = |n: usize| text.lines().nth(n).unwrap();
+        // shared reads as roblox
         assert_eq!(
-            text.lines().nth(1).unwrap(),
+            line(1),
+            "- chief/core 0.2.0 | roblox | 145 downloads | \
+             The core of Chief, a Luau module framework. | install: embr add chief/core"
+        );
+        assert_eq!(
+            line(3),
             "- acme/signal 1.0.0 | roblox, lune | language: alloy | 3 downloads | \
              Typed signals for Chief users. | deprecated: use acme/signal2 | install: embr add acme/signal"
         );
         // no downloads count reads as 0, and an empty reason is no deprecation
-        let text = search_for(json!({ "query": "mayari" }));
         assert_eq!(
-            text.lines().nth(1).unwrap(),
+            line(4),
             "- mayari/core 0.3.0 | luau | 0 downloads | Mayari core. | install: embr add mayari/core"
-        );
-        let text = search_for(json!({ "query": "gone" }));
-        assert_eq!(
-            text.lines().nth(1).unwrap(),
-            "- acme/gone 2.0.0 | luau | 1 download | yanked: every version | install: embr add acme/gone"
         );
     }
 
@@ -1089,16 +1119,15 @@ mod tests {
     fn search_limit_stays_in_range() {
         let text = search_for(json!({ "query": "chief", "limit": 1 }));
         assert_eq!(names(&text), ["chief/core"]);
-        assert!(text.starts_with("1 of 3 matching packages"));
+        assert!(text.starts_with("1 of 6 matching packages"));
         // 0 asks for nothing useful, so the answer holds one package
         assert_eq!(
             names(&search_for(json!({ "query": "", "limit": 0 }))).len(),
             1
         );
-        assert_eq!(
-            names(&search_for(json!({ "query": "", "limit": 500 }))).len(),
-            5
-        );
+        let text = search_for(json!({ "query": "", "limit": 500 }));
+        assert_eq!(names(&text).len(), 4);
+        assert!(text.starts_with("4 of 6 matching packages"));
     }
 
     // trimmed from api.wally.run/v1/package-search?query=signal
@@ -1135,7 +1164,7 @@ mod tests {
     #[test]
     fn registry_results_become_lines() {
         assert_eq!(
-            ember_lines(&sample(), "SIGNAL"),
+            ember_lines(&sample().results[2..3]),
             [
                 "- ember acme/signal 1.0.0 | roblox, lune | language: alloy | 3 downloads | \
               Typed signals for Chief users. | deprecated: use acme/signal2 | install: embr add acme/signal"
@@ -1210,16 +1239,20 @@ mod tests {
     }
 
     /// pesde fails, and Forest answers after the deadline of the tests.
-    fn fake(registry: Registry, query: &str) -> Result<Vec<String>, String> {
+    /// ember finds 3 packages and gives the line of 1.
+    fn fake(registry: Registry, query: &str) -> Result<(Vec<String>, usize), String> {
         match registry {
-            Registry::Ember => Ok(vec![format!("- ember acme/{query}")]),
-            Registry::Wally => Ok((1..=30)
-                .map(|n| format!("- wally acme/{query}{n}"))
-                .collect()),
+            Registry::Ember => Ok((vec![format!("- ember acme/{query}")], 3)),
+            Registry::Wally => Ok((
+                (1..=30)
+                    .map(|n| format!("- wally acme/{query}{n}"))
+                    .collect(),
+                30,
+            )),
             Registry::Pesde => Err("request failed: status code 503".to_string()),
             Registry::Forest => {
                 std::thread::sleep(Duration::from_secs(2));
-                Ok(vec!["- forest late/package".to_string()])
+                Ok((vec!["- forest late/package".to_string()], 1))
             }
         }
     }
@@ -1246,7 +1279,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "Matches in each registry's own order: ember 1 of 1, wally 10 of 30.\n\
+                "Matches in each registry's own order: ember 1 of 3, wally 10 of 30.\n\
                  - ember acme/signal\n\
                  {wally}\
                  {INDEX_NOTE}\
@@ -1278,7 +1311,7 @@ mod tests {
         // a short query reaches ember only
         assert_eq!(
             search_fake(json!({ "query": "a", "registries": ["wally", "ember"] })),
-            "Matches in each registry's own order: ember 1 of 1.\n\
+            "Matches in each registry's own order: ember 1 of 3.\n\
              - ember acme/a\n\
              Failed registries:\n\
              - wally: the query needs 2 or more characters\n"
