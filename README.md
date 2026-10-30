@@ -372,9 +372,10 @@ embr add 'https://emberpm.dev/package/acme/tools#k=<key>'
 - `ember.lock` holds the package name. It never holds the key.
 
 embr sends the token and the key only to the registry API host,
-`api.emberpm.dev`, or to its old name `api.luaupm.com`, which old lock files
-use. When the API redirects a download to another host, embr
-sends neither. To use a local backend, set `EMBER_API_URL`, for example
+`api.emberpm.dev`. When the API redirects a download to another host, embr
+sends neither. Old index entries and lock files name the hosts from before
+emberpm.dev, `api.luaupm.com` and `cdn.luaupm.com`. embr gets those files
+from `api.emberpm.dev` and `cdn.emberpm.dev`. To use a local backend, set `EMBER_API_URL`, for example
 `EMBER_API_URL=http://127.0.0.1:8787`.
 
 ## `embr mcp`: package search for coding agents

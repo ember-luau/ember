@@ -22,9 +22,12 @@ use std::sync::{Mutex, PoisonError};
 
 pub const API_URL: &str = "https://api.emberpm.dev";
 
-/// the API host before emberpm.dev. old lock files name it, and it serves the
-/// same API, so it also gets the credentials while embr uses [`API_URL`].
-const OLD_API_URL: &str = "https://api.luaupm.com";
+/** the hosts before emberpm.dev, each with the host that replaced it. old
+index entries and lock files name the old hosts, which serve the same files. */
+const MOVED: [(&str, &str); 2] = [
+    ("https://api.luaupm.com", API_URL),
+    ("https://cdn.luaupm.com", "https://cdn.emberpm.dev"),
+];
 
 /// points embr at another API, such as a local backend. unset means [`API_URL`].
 pub const API_VAR: &str = "EMBER_API_URL";
@@ -48,15 +51,23 @@ fn origin(url: &str) -> Option<String> {
     Some(format!("{scheme}://{host}").to_ascii_lowercase())
 }
 
-/** whether `url` is on the API host `api`. the scheme, host and port must
-be equal. when `api` is [`API_URL`], the old host also counts. only these
-hosts get the Ember token and link keys, so an index entry's URL cannot
-collect them. */
-pub fn on_api_host(url: &str, api: &str) -> bool {
-    let (Some(host), api) = (origin(url), origin(api)) else {
-        return false;
+/// `url` on the host that replaced its old host. other URLs stay as they are.
+pub fn moved(url: &str) -> String {
+    let Some(host) = origin(url) else {
+        return url.to_string();
     };
-    api.as_deref() == Some(host.as_str()) || (api == origin(API_URL) && host == OLD_API_URL)
+    match MOVED.iter().find(|(old, _)| *old == host) {
+        // the origin is `url`'s first bytes, in lowercase, so the length holds
+        Some((_, new)) => format!("{new}{}", &url[host.len()..]),
+        None => url.to_string(),
+    }
+}
+
+/** whether `url` is on the API host `api`. the scheme, host and port must
+be equal. only this host gets the Ember token and link keys, so an index
+entry's URL cannot collect them. */
+pub fn on_api_host(url: &str, api: &str) -> bool {
+    origin(url).is_some_and(|host| origin(api) == Some(host))
 }
 
 /// link keys from the manifests that embr read in this run, by package name.
@@ -319,13 +330,8 @@ mod tests {
         assert!(on_api_host("https://API.emberpm.dev/v1/x", api));
         assert!(on_api_host("https://api.emberpm.dev", api));
         assert!(on_api_host("https://api.emberpm.dev?x", api));
-        // the old host serves the same API, for old lock files
-        assert!(on_api_host(
-            "https://api.luaupm.com/v1/packages/a/b/files/x",
-            api
-        ));
-        assert!(on_api_host("https://API.luaupm.com/v1/x", api));
-        // the CDN, plain HTTP, another port, and look-alike hosts get nothing
+        /* the CDN, the old host, plain HTTP, another port, and look-alike
+        hosts get nothing. [`moved`] sends an old host's URL here first */
         for host in ["api.emberpm.dev", "api.luaupm.com"] {
             for other in [
                 "https://cdn.emberpm.dev/acme/foo/1.0.0.tar.gz".to_string(),
@@ -336,6 +342,7 @@ mod tests {
                 format!("https://{host}@example.com/v1/x"),
                 format!("https://example.com/https://{host}/v1/x"),
                 format!("{host}/v1/x"),
+                "https://api.luaupm.com/v1/packages/a/b/files/x".to_string(),
             ] {
                 assert!(!on_api_host(&other, api), "{other}");
             }
@@ -350,6 +357,38 @@ mod tests {
                 &format!("{host}/v1/x"),
                 "http://127.0.0.1:8787"
             ));
+        }
+    }
+
+    #[test]
+    fn old_hosts_move_to_emberpm_dev() {
+        for (old, new) in [
+            (
+                "https://cdn.luaupm.com/acme/foo/1.0.0.tar.gz",
+                "https://cdn.emberpm.dev/acme/foo/1.0.0.tar.gz",
+            ),
+            (
+                "https://CDN.luaupm.com/acme/Foo/1.0.0.tar.gz",
+                "https://cdn.emberpm.dev/acme/Foo/1.0.0.tar.gz",
+            ),
+            (
+                "https://api.luaupm.com/v1/packages/a/b/files/x?k=1",
+                "https://api.emberpm.dev/v1/packages/a/b/files/x?k=1",
+            ),
+            ("https://cdn.luaupm.com", "https://cdn.emberpm.dev"),
+        ] {
+            assert_eq!(moved(old), new);
+        }
+        // other hosts and look-alikes stay as they are
+        for url in [
+            "https://cdn.emberpm.dev/acme/foo/1.0.0.tar.gz",
+            "https://cdn.luaupm.com.example.com/acme/foo/1.0.0.tar.gz",
+            "https://cdn.luaupm.com:8443/acme/foo/1.0.0.tar.gz",
+            "http://cdn.luaupm.com/acme/foo/1.0.0.tar.gz",
+            "https://example.com/https://cdn.luaupm.com/x",
+            "cdn.luaupm.com/x",
+        ] {
+            assert_eq!(moved(url), url);
         }
     }
 
