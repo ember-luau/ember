@@ -81,7 +81,8 @@ impl Progress {
 
     /// a line on stderr the live display steps around.
     pub fn warn(&self, line: &str) {
-        self.multi.suspend(|| eprintln!("{line}"));
+        // warnings name package files and carry registry text
+        self.multi.suspend(|| eprintln!("{}", ui::printable(line)));
     }
 
     /// runs `work` with the display out of the way, for code that prints itself.

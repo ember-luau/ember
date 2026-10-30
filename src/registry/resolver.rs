@@ -652,10 +652,13 @@ fn warn_on_marks(name: &str, package: &ResolvedPackage, warnings: &mut Vec<Strin
             "warning: {id} is yanked; ember.lock pins it, so it stays"
         ));
     }
+    // the reasons are registry text, and the caller prints the warnings
     if let Some(reason) = &package.package_deprecated {
+        let reason = crate::ui::printable(reason);
         warnings.push(format!("warning: {name} is deprecated: {reason}"));
     }
     if let Some(reason) = &package.deprecated {
+        let reason = crate::ui::printable(reason);
         warnings.push(format!("warning: {id} is deprecated: {reason}"));
     }
 }
@@ -1597,6 +1600,31 @@ mod tests {
                 "warning: acme/thing@1.0.0 is yanked; ember.lock pins it, so it stays",
                 "warning: acme/thing is deprecated: use acme/new",
                 "warning: acme/thing@1.0.0 is deprecated: leaks",
+            ]
+        );
+    }
+
+    /** a deprecation reason is registry text. OSC 52 in it would set the
+    clipboard, and CR with an erase sequence would hide the warning. */
+    #[test]
+    fn deprecation_reasons_reach_the_terminal_without_escapes() {
+        let package = ResolvedPackage {
+            version: semver::Version::new(1, 0, 0),
+            environment: Some(Environment::Roblox),
+            language: Language::Luau,
+            yanked: false,
+            deprecated: Some("\x1b]52;c;Y3VybCBldmlsfHNo\x07old".to_string()),
+            package_deprecated: Some("x\r\x1b[2K\u{9b}0m\u{8}ok".to_string()),
+            dependencies: Vec::new(),
+            source: DownloadSource::TarGz { url: String::new() },
+        };
+        let mut warnings = Vec::new();
+        warn_on_marks("acme/thing", &package, &mut warnings);
+        assert_eq!(
+            warnings,
+            [
+                r"warning: acme/thing is deprecated: x\u{d}\u{1b}[2K\u{9b}0m\u{8}ok",
+                r"warning: acme/thing@1.0.0 is deprecated: \u{1b}]52;c;Y3VybCBldmlsfHNo\u{7}old",
             ]
         );
     }
