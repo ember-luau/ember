@@ -7,7 +7,6 @@ use crate::project::manifest::{
 };
 use crate::project::package;
 use crate::project::workspace::{self, Workspace};
-use crate::registry::index::Index;
 use crate::registry::{local, pack};
 use crate::ui;
 use clap::Args;
@@ -319,17 +318,16 @@ fn publish_target(
         return Ok(());
     }
 
-    /* EMBER_TOKEN or the stored login first. the device flow, and the
-    index clone that provides its client id, only when there is neither */
+    // EMBER_TOKEN or the stored login first. the browser login only when there is neither
     let stored = match token.take() {
         Some(stored) => stored,
         None => match auth::token()? {
             Some(stored) => stored,
-            None => auth::login(&oauth_client_id()?)?.token,
+            None => auth::login()?.token,
         },
     };
     let stored = match upload(&stored, oidc_token, &archive) {
-        // CI has no one to answer the device flow
+        // CI has no one to approve a login
         Err(Error::PublishFailed { status: 401, .. }) if auth::env_token().is_some() => {
             return Err(Error::TokenRejected);
         }
@@ -338,7 +336,7 @@ fn publish_target(
         Err(Error::PublishFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored token; logging in again");
-            let fresh = auth::login(&oauth_client_id()?)?.token;
+            let fresh = auth::login()?.token;
             upload(&fresh, oidc_token, &archive)?;
             fresh
         }
@@ -457,18 +455,6 @@ fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), E
     ui::with_spinner("Uploading package", || {
         registry::publish(token, oidc_token, archive)
     })
-}
-
-/** OAuth app client id for the device flow. lives in the embr index's
-config.toml, not in the binary, so it can rotate without a CLI release. */
-pub(crate) fn oauth_client_id() -> Result<String, Error> {
-    /* a stale oauth id is harmless, it rotates roughly never, so any
-    cached copy will do. a first-ever run still clones */
-    let index = Index::open(DEFAULT_INDEX_URL, crate::registry::index::Refresh::Never)?;
-    index
-        .github_oauth_id()
-        .map(str::to_string)
-        .ok_or_else(|| Error::PublishNotSupported(DEFAULT_INDEX_URL.to_string()))
 }
 
 /** runs `{program} build` in `root`, the build of an Alloy or Loom

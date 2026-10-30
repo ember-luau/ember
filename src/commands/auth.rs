@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 #[derive(Args, Debug)]
 pub struct AuthArgs {
     /** The index whose login to use: ember, a key under [indices], or a
-    URL. Without it, the login is ember's own GitHub login */
+    URL. Without it, the login is ember's own */
     #[arg(short, long, global = true)]
     pub index: Option<String>,
 
@@ -20,9 +20,9 @@ pub struct AuthArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Log in with GitHub, or store a token you already have
+    /// Log in through emberpm.dev in the browser, or store a token you already have
     Login {
-        /// An Ember token (ember_...) or a GitHub token to store, instead of the GitHub device flow
+        /// An Ember token (ember_...) or a GitHub token to store, instead of the browser login
         #[arg(short, long)]
         token: Option<String>,
     },
@@ -34,20 +34,20 @@ pub enum AuthCommand {
     Token,
 }
 
-/** pesde's auth commands. ember keeps one GitHub login, the one its
-registry maps to scope owners. without `--index` they work on that login
-whatever the default index is, so a wally default never blocks a login.
-`--index` only checks that the named index takes logins at all. */
+/** pesde's auth commands. ember keeps one login, an Ember token of the
+account its registry maps to scope owners. without `--index` they work on
+that login whatever the default index is, so a wally default never blocks
+a login. `--index` only checks that the named index takes logins at all. */
 pub fn run(args: AuthArgs) -> Result<(), Error> {
     match args.command {
         AuthCommand::Login { token } => {
-            let client_id = login_index(args.index.as_deref())?;
+            login_index(args.index.as_deref())?;
             match token {
                 Some(token) => {
                     let token = token.trim();
                     /* the API checks the token now, so a bad one fails here
                     and not at publish. a GitHub token is traded for an
-                    Ember token, as after the device flow */
+                    Ember token */
                     let api = registry::api_url();
                     let credentials = if token.starts_with(auth::TOKEN_PREFIX) {
                         auth::check(&api, token)?
@@ -58,7 +58,7 @@ pub fn run(args: AuthArgs) -> Result<(), Error> {
                     ui::print_success(&format!("Logged in as {}", credentials.login));
                 }
                 None => {
-                    auth::login(&client_id)?;
+                    auth::login()?;
                 }
             }
         }
@@ -86,17 +86,17 @@ pub fn run(args: AuthArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/** the index's OAuth client id, which is also the proof that it takes a
-login. ember's own index unless `--index` names another; wally and pesde
-indices answer that they take none. */
-fn login_index(index: Option<&str>) -> Result<String, Error> {
-    let url = match index {
-        Some(name) => index_url_for(Manifest::load().ok().as_ref(), name)?,
-        None => crate::project::manifest::DEFAULT_INDEX_URL.to_string(),
+/** checks that the index that `--index` names takes a login: its config
+has an OAuth client id. wally and pesde indices answer that they take
+none. ember's own index takes one, so without `--index` nothing is cloned. */
+fn login_index(index: Option<&str>) -> Result<(), Error> {
+    let Some(name) = index else {
+        return Ok(());
     };
+    let url = index_url_for(Manifest::load().ok().as_ref(), name)?;
     let index = Index::open(&url, Refresh::Ttl)?;
-    index
-        .github_oauth_id()
-        .map(str::to_string)
-        .ok_or(Error::PublishNotSupported(url))
+    match index.github_oauth_id() {
+        Some(_) => Ok(()),
+        None => Err(Error::PublishNotSupported(url)),
+    }
 }

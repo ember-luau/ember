@@ -30,7 +30,7 @@ pub enum Error {
         asset: String,
     },
 
-    #[error("GitHub authorization failed: {0}")]
+    #[error("The login failed: {0}")]
     AuthFailed(String),
 
     /** the registry refused a publish. `message` is the human-readable

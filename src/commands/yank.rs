@@ -69,17 +69,17 @@ doomed, so it earns one fresh login and one retry, as publish does. */
 pub(crate) fn as_owner(send: impl Fn(&str) -> Result<(), Error>) -> Result<(), Error> {
     let token = match auth::token()? {
         Some(token) => token,
-        None => auth::login(&crate::commands::publish::oauth_client_id()?)?.token,
+        None => auth::login()?.token,
     };
     match send(&token) {
-        // CI has no one to answer the device flow
+        // CI has no one to approve a login
         Err(Error::OwnerActionFailed { status: 401, .. }) if auth::env_token().is_some() => {
             Err(Error::TokenRejected)
         }
         Err(Error::OwnerActionFailed { status: 401, .. }) => {
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored token; logging in again");
-            let credentials = auth::login(&crate::commands::publish::oauth_client_id()?)?;
+            let credentials = auth::login()?;
             send(&credentials.token)
         }
         other => other,

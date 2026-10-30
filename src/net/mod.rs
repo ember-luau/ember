@@ -1,6 +1,6 @@
 /*!
-Remote services. The HTTP wrapper, GitHub's REST API, the OAuth device flow
-layered on them, and embr's own registry API.
+Remote services. The HTTP wrapper, GitHub's REST API, embr's own registry
+API, and the browser login on top of it.
 */
 
 pub mod auth;

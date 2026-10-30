@@ -14,25 +14,6 @@ pub struct Asset {
     pub browser_download_url: String,
 }
 
-#[derive(Deserialize)]
-pub struct DeviceCode {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: u64,
-    /// Minimum seconds between polls, going faster earns a `slow_down` error.
-    pub interval: u64,
-}
-
-/** Device-flow poll result. GitHub reports "not yet" states like
-`authorization_pending` and `slow_down` as HTTP 200 with an `error`
-field, not an error status. */
-#[derive(Deserialize)]
-pub struct AccessToken {
-    pub access_token: Option<String>,
-    pub error: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,52 +58,5 @@ mod tests {
             "https://github.com/luaupm/embr/releases/download/v0.1.0/embr-windows-x86_64.exe"
         );
         assert_eq!(release.assets[1].name, "embr-linux-x86_64");
-    }
-
-    #[test]
-    fn deserializes_device_code() {
-        let json = r#"{
-            "device_code": "3584d83530557fdd1f46af8289938c8ef79f9dc5",
-            "user_code": "WDJB-MJHT",
-            "verification_uri": "https://github.com/login/device",
-            "expires_in": 899,
-            "interval": 5
-        }"#;
-
-        let code: DeviceCode = serde_json::from_str(json).unwrap();
-        assert_eq!(code.device_code, "3584d83530557fdd1f46af8289938c8ef79f9dc5");
-        assert_eq!(code.user_code, "WDJB-MJHT");
-        assert_eq!(code.verification_uri, "https://github.com/login/device");
-        assert_eq!(code.expires_in, 899);
-        assert_eq!(code.interval, 5);
-    }
-
-    #[test]
-    fn deserializes_access_token_pending() {
-        let json = r#"{
-            "error": "authorization_pending",
-            "error_description": "The authorization request is still pending.",
-            "error_uri": "https://docs.github.com/developers/apps/authorizing-oauth-apps#error-codes-for-the-device-flow"
-        }"#;
-
-        let token: AccessToken = serde_json::from_str(json).unwrap();
-        assert!(token.access_token.is_none());
-        assert_eq!(token.error.as_deref(), Some("authorization_pending"));
-    }
-
-    #[test]
-    fn deserializes_access_token_granted() {
-        let json = r#"{
-            "access_token": "gho_16C7e42F292c6912E7710c838347Ae178B4a",
-            "token_type": "bearer",
-            "scope": "repo"
-        }"#;
-
-        let token: AccessToken = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            token.access_token.as_deref(),
-            Some("gho_16C7e42F292c6912E7710c838347Ae178B4a")
-        );
-        assert!(token.error.is_none());
     }
 }

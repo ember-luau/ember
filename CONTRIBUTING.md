@@ -17,7 +17,7 @@ Source is grouped by what the code talks to:
 | `src/commands/` | One file per subcommand |
 | `src/project/` | Manifest schema and editing, lockfile, installed-package inspection |
 | `src/registry/` | Index lookup, dependency resolution, publish packing |
-| `src/net/` | HTTP wrapper, GitHub client, OAuth device flow |
+| `src/net/` | HTTP wrapper, GitHub client, registry API, browser login |
 | `src/sys/` | The `~/.ember` layout, subprocesses, git |
 | `src/tools/` | Tool storage, release archives, shims |
 

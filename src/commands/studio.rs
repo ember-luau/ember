@@ -318,7 +318,7 @@ for it. ShellExecuteW rather than a `cmd /C start` dance. it's the API
 `start` itself wraps, needs no shell quoting, and reports "nothing is
 registered for this" as a distinct code instead of a message to parse. */
 #[cfg(windows)]
-fn os_open(target: &OsStr) -> Result<(), Error> {
+pub(crate) fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::{
         SE_ERR_ACCESSDENIED, SE_ERR_ASSOCINCOMPLETE, SE_ERR_NOASSOC, ShellExecuteW,
@@ -363,7 +363,7 @@ of reasons besides a missing handler, which the bundle check above rules
 out, and prints its own diagnosis to stderr, so the error here just
 carries the code and defers to that message. */
 #[cfg(target_os = "macos")]
-fn os_open(target: &OsStr) -> Result<(), Error> {
+pub(crate) fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::process::Command;
 
     let mut command = Command::new("open");
@@ -380,7 +380,7 @@ fn os_open(target: &OsStr) -> Result<(), Error> {
 official Linux build, so a missing handler gets a pointer at Vinegar
 rather than a bare failure. */
 #[cfg(all(unix, not(target_os = "macos")))]
-fn os_open(target: &OsStr) -> Result<(), Error> {
+pub(crate) fn os_open(target: &OsStr) -> Result<(), Error> {
     use std::process::Command;
 
     let mut command = Command::new("xdg-open");
