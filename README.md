@@ -283,6 +283,25 @@ aliases = false
 definition-files = false
 ```
 
+## Sign in
+
+`embr publish`, `embr yank` and `embr deprecate` need a login. To sign in,
+run `embr auth login`:
+
+1. embr shows a link and a code, and opens the link in your browser.
+2. Sign in on emberpm.dev, if you have no session there.
+3. Make sure that the page shows the code from your terminal. Then click
+   Approve.
+
+embr then stores an Ember token in `~/.ember/credentials.toml`. You do not
+make or paste a token. The link works on all devices, so over SSH you can
+open it on a different computer. The code expires after 10 minutes.
+
+- `embr auth login --token ember_...` stores a token that you made on
+  emberpm.dev.
+- In CI, set `EMBER_TOKEN`. It wins over the stored login.
+- A GitHub login from embr 0.9 changes to an Ember token on first use.
+
 ## Local packages
 
 A local package is a package that only this computer can install. Use it

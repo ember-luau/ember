@@ -68,30 +68,9 @@ fn with_headers(mut request: ureq::Request, headers: &[(&str, &str)]) -> ureq::R
     request
 }
 
-/** Some GitHub endpoints answer 201/204 with an empty body, which serde
-won't parse. Treat that as JSON `null` so `T = serde_json::Value` or an
-Option still deserializes. */
-fn parse_json<T: DeserializeOwned>(response: ureq::Response) -> Result<T, HttpError> {
-    let body = response.into_string()?;
-    if body.trim().is_empty() {
-        return Ok(serde_json::from_str("null")?);
-    }
-
-    Ok(serde_json::from_str(&body)?)
-}
-
 pub fn get_json<T: DeserializeOwned>(url: &str, headers: &[(&str, &str)]) -> Result<T, HttpError> {
     let response = with_headers(agent().get(url), headers).call()?;
     Ok(response.into_json::<T>()?)
-}
-
-pub fn post_form<T: DeserializeOwned>(
-    url: &str,
-    headers: &[(&str, &str)],
-    form: &[(&str, &str)],
-) -> Result<T, HttpError> {
-    let response = with_headers(agent().post(url), headers).send_form(form)?;
-    parse_json(response)
 }
 
 /** GETs `url`, following redirects by hand. ureq 2 only auto-follows
@@ -157,12 +136,12 @@ pub(crate) mod mock {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
-    /// the request line and headers of each request, in arrival order, with header names in lowercase.
+    /// each request in arrival order: the request line, the headers and the body, in lowercase.
     pub type Log = Arc<Mutex<Vec<String>>>;
 
     /** serves `answer` on 127.0.0.1 and gives back its base URL. `answer`
-    takes the request line and headers and gives a whole response. each
-    connection serves one request, so ureq's pool cannot mix them. */
+    takes the request, as the log keeps it, and gives a whole response.
+    each connection serves one request, so ureq's pool cannot mix them. */
     pub fn serve(answer: impl Fn(&str) -> String + Send + 'static) -> (String, Log) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -172,24 +151,36 @@ pub(crate) mod mock {
             for mut stream in listener.incoming().flatten() {
                 let mut request = Vec::new();
                 let mut buffer = [0u8; 4096];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                /* the whole body too. a socket that closes with bytes
+                unread resets the connection, and the client can lose the
+                answer */
+                while !is_whole(&request) {
                     match stream.read(&mut buffer) {
                         Ok(0) | Err(_) => break,
                         Ok(read) => request.extend_from_slice(&buffer[..read]),
                     }
                 }
-                let head = String::from_utf8_lossy(&request).to_lowercase();
-                let head = head
-                    .split("\r\n\r\n")
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                let response = answer(&head);
-                seen.lock().unwrap().push(head);
+                let request = String::from_utf8_lossy(&request).to_lowercase();
+                let response = answer(&request);
+                seen.lock().unwrap().push(request);
                 let _ = stream.write_all(response.as_bytes());
             }
         });
         (base, log)
+    }
+
+    /// whether `request` holds its headers and as many body bytes as its Content-Length.
+    fn is_whole(request: &[u8]) -> bool {
+        let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+        let length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        request.len() >= end + 4 + length
     }
 
     /// a whole response with `status` (like "200 OK") and `body`.
