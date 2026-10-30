@@ -1,9 +1,9 @@
 /*!
 embr's own registry API at api.luaupm.com, the write side of publishing.
 
-Reads never come here. Resolution and installs go through the git index
+Resolution and installs never read here. They go through the git index
 clone and the CDN URLs baked into its entries, so they work even when the
-API is down. The one thing the CLI needs the API for is `POST /v1/publish`,
+API is down. Only `embr mcp` reads here, for its package search. The one thing the CLI needs the API for is `POST /v1/publish`,
 which validates the tarball, stores it in the CDN bucket, and writes the
 index entry. The API is the index repo's only writer.
 */

@@ -319,9 +319,10 @@ not change files, install packages, or publish.
 
 It gives the agent three tools:
 
-- `search_packages` finds ember packages by name or description. It can
-  filter by environment and language. Each result gives the latest version,
-  the download count, and the `embr add` command that installs the package.
+- `search_packages` finds ember packages by name or description, through
+  the registry's search API. It can filter by environment and language.
+  Each result gives the latest version, the download count, and the
+  `embr add` command that installs the package.
 - `search_all` searches ember, Wally, pesde, and Forest at the same time.
   Each result gives its registry, the latest version, and the `embr add`
   command. For Wally, pesde, and Forest, that command adds `--index`, and
