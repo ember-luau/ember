@@ -387,9 +387,8 @@ struct SearchPage {
 
 /** the first [`MAX_LIMIT`] matches of `query` in the registry at `api`,
 most downloaded first. the registry matches each word of the query as a
-prefix, and it filters and ranks the packages. the page size does not
-change with the limit, so search_packages and search_all send the same URL
-for a query, and the API's 60s cache answers the second. */
+prefix, and it filters and ranks the packages. one page of the largest
+limit answers every call, so the page size does not change with it. */
 fn ember_search(
     api: &str,
     query: &str,
@@ -1072,7 +1071,7 @@ mod tests {
         );
         assert_eq!(names(&text), ["chief/core", "chief/bin"]);
 
-        // search_all sends the same URL for the same query, so the API's cache answers it
+        // search_all asks for the same page, with no filters
         let (lines, total) = fetch_at(&url, Registry::Ember, "chief/").unwrap();
         assert_eq!(total, 6);
         assert_eq!(lines.len(), 4);
