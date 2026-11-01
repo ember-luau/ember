@@ -143,7 +143,7 @@ fn publish_project(
         .targets()
         .iter()
         .any(|target| target.language.builder().is_some() && ids.contains(&target.id()));
-    if building && !manifest.dependencies.is_empty() {
+    if building && manifest.all_dependencies().next().is_some() {
         let args = super::install::InstallArgs {
             locked: false,
             refresh: false,
@@ -375,9 +375,8 @@ fn convert_workspace_dependencies(
     project_dir: &Path,
 ) -> Result<(), Error> {
     if !manifest
-        .dependencies
-        .values()
-        .any(|dependency| matches!(dependency, Dependency::Workspace { .. }))
+        .all_dependencies()
+        .any(|(_, dependency)| matches!(dependency, Dependency::Workspace { .. }))
     {
         return Ok(());
     }
@@ -388,7 +387,11 @@ fn convert_workspace_dependencies(
         Some(Workspace::open(project_dir)?)
     };
 
-    for (alias, dependency) in manifest.dependencies.iter_mut() {
+    for (alias, dependency) in manifest
+        .dependencies
+        .iter_mut()
+        .chain(&mut manifest.dev_dependencies)
+    {
         let Dependency::Workspace {
             workspace: name,
             version,
@@ -439,11 +442,15 @@ alias-form values refer to aliases only this manifest has. [patches] points
 at files in this repo, which the archive doesn't carry. shipping either
 would just mislead readers of the packed manifest. a dependency's link
 key stays home too: in the archive, every reader of the package gets the
-link. */
+link. [dev-dependencies] ships, so the registry can show it. */
 fn strip_local_tables(manifest: &mut Manifest) {
     manifest.overrides.clear();
     manifest.patches.clear();
-    for dependency in manifest.dependencies.values_mut() {
+    for dependency in manifest
+        .dependencies
+        .values_mut()
+        .chain(manifest.dev_dependencies.values_mut())
+    {
         if let Dependency::Registry { key, .. } = dependency {
             *key = None;
         }
@@ -588,7 +595,8 @@ mod tests {
         write(
             "packages/extra/ember.toml",
             "[package]\nname = \"acme/extra\"\nversion = \"0.2.0\"\n\n[target]\nenvironment = \"roblox\"\n\n\
-             [dependencies]\ncore = { workspace = \"acme/core\", version = \"~\" }\n",
+             [dependencies]\ncore = { workspace = \"acme/core\", version = \"~\" }\n\n\
+             [dev-dependencies]\ntools = { workspace = \"acme/core\", version = \"=\" }\n",
         );
 
         let member_dir = base.join("packages/extra");
@@ -601,6 +609,11 @@ mod tests {
             &manifest.dependencies["core"],
             Dependency::Registry { name, version, index: None, .. }
                 if name == "acme/core" && version == "~1.2.3"
+        ));
+        // a dev dependency converts the same way
+        assert!(matches!(
+            &manifest.dev_dependencies["tools"],
+            Dependency::Registry { name, version, .. } if name == "acme/core" && version == "=1.2.3"
         ));
         // the converted spec is what the packed manifest carries
         let serialized = toml::to_string(&manifest).unwrap();
@@ -635,6 +648,7 @@ mod tests {
             "[package]\nname = \"acme/x\"\nversion = \"1.0.0\"\n\n\
              [target]\nenvironment = \"roblox\"\n\n\
              [dependencies]\nfoo = { name = \"acme/foo\", version = \"^1\", key = \"0123456789abcdef0123456789abcdef\" }\n\n\
+             [dev-dependencies]\nlest = { name = \"alloy/lest\", version = \"^0.2\", key = \"fedcba9876543210fedcba9876543210\" }\n\n\
              [overrides]\n\"a.b\" = \"acme/fork\"\n\n\
              [patches]\n\"acme/dep@1.0.0\" = \"patches/acme_dep@1.0.0.patch\"\n",
         )
@@ -648,6 +662,29 @@ mod tests {
         assert!(!serialized.contains("patches"), "{serialized}");
         assert!(!serialized.contains("0123456789abcdef"), "{serialized}");
         assert!(serialized.contains("acme/foo"), "{serialized}");
+        // dev dependencies ship for the registry to show, without their keys
+        assert!(!serialized.contains("fedcba9876543210"), "{serialized}");
+        let packed: Manifest = toml::from_str(&serialized).unwrap();
+        assert!(matches!(
+            &packed.dev_dependencies["lest"],
+            Dependency::Registry { name, key: None, .. } if name == "alloy/lest"
+        ));
+    }
+
+    /// `pack` writes the manifest that `strip_local_tables` leaves.
+    #[test]
+    fn the_packed_manifest_keeps_requires() {
+        let mut manifest: Manifest = toml::from_str(
+            "[package]\nname = \"alloy/lattice\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n\
+             requires = { lune = \">=0.9.0\", alloy = \"^0.4.0\" }\n",
+        )
+        .unwrap();
+        strip_local_tables(&mut manifest);
+        let packed: Manifest = toml::from_str(&toml::to_string(&manifest).unwrap()).unwrap();
+        let requires = &packed.target().unwrap().requires;
+        assert_eq!(requires["lune"], ">=0.9.0");
+        assert_eq!(requires["alloy"], "^0.4.0");
     }
 
     #[test]

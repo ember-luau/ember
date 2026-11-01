@@ -53,10 +53,10 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
 
     let mut indices: HashMap<String, Index> = HashMap::new();
     let mut rows = Vec::new();
-    let mut aliases: Vec<&String> = manifest.dependencies.keys().collect();
-    aliases.sort();
-    for alias in aliases {
-        let dependency = &manifest.dependencies[alias];
+    // an alias is in one of the two tables, never both
+    let mut dependencies: Vec<_> = manifest.all_dependencies().collect();
+    dependencies.sort_by_key(|(alias, _)| *alias);
+    for (alias, dependency) in dependencies {
         // a workspace member is the copy being developed, it has no release to be behind
         let Dependency::Registry {
             name,

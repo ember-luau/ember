@@ -121,6 +121,95 @@ fn build_alloy_packages(
     }
 }
 
+/** warns when an installed package's `requires` asks for a version that
+the program on PATH does not have. it never fails the install: the program
+on PATH is not always what runs the project. a missing program, or one
+that prints no version, says nothing. `version_of` is [`version_on_path`]
+outside tests. */
+fn check_versions(
+    manifest: &Manifest,
+    stored: &[StoredPackage],
+    version_of: impl Fn(&str) -> Option<semver::Version>,
+    warn: &mut impl FnMut(String),
+) {
+    let Some(root) = manifest.target() else {
+        return;
+    };
+    // each program runs once, however many packages ask about it
+    let mut on_path: HashMap<String, Option<semver::Version>> = HashMap::new();
+    let mut seen = BTreeSet::new();
+    for package in stored {
+        // a package in two contexts is still one package
+        if !seen.insert(&package.name) {
+            continue;
+        }
+        let Some(target) = fs::read_to_string(manifest::manifest_in(&package.storage))
+            .ok()
+            .and_then(|text| toml::from_str::<Manifest>(&text).ok())
+            .and_then(|manifest| manifest.targets.into_iter().next())
+        else {
+            continue;
+        };
+        for (program, requirement) in version_checks(root, &target) {
+            let Ok(req) = manifest::parse_version_req(requirement) else {
+                continue;
+            };
+            let version = on_path
+                .entry(program.to_string())
+                .or_insert_with(|| version_of(program));
+            if let Some(version) = version
+                && !req.matches(version)
+            {
+                warn(format!(
+                    "warning: {} wants {program} {requirement}; {program} {version} is on PATH",
+                    package.name
+                ));
+            }
+        }
+    }
+}
+
+/** the `requires` entries of `package` that a project with the target
+`root` checks, as (program, requirement). a runtime key counts only when
+the project runs on that runtime, and a language key only when the project
+is in that language: a built Alloy package used from plain Luau needs no
+Alloy compiler. */
+fn version_checks<'a>(
+    root: &manifest::Target,
+    package: &'a manifest::Target,
+) -> Vec<(&'a str, &'a str)> {
+    package
+        .requires
+        .iter()
+        .map(|(key, requirement)| (key.as_str(), requirement.as_str()))
+        .filter(|(key, _)| {
+            let runtime = package.environment.runtime() == Some(*key)
+                && root.environment.runtime() == Some(*key);
+            let language = package.language.as_str() == *key && root.language == package.language;
+            runtime || language
+        })
+        .collect()
+}
+
+/// the version that `<program> --version` prints, None when it is not on PATH or prints none.
+fn version_on_path(program: &str) -> Option<semver::Version> {
+    let output = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .ok()?;
+    // some programs print it to stderr
+    first_version(&String::from_utf8_lossy(&output.stdout))
+        .or_else(|| first_version(&String::from_utf8_lossy(&output.stderr)))
+}
+
+/// the first word of `text` that is a semver version, such as `0.9.0` in `lune 0.9.0` or `v0.9.0`.
+fn first_version(text: &str) -> Option<semver::Version> {
+    text.split_whitespace().find_map(|word| {
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        semver::Version::parse(word.trim_start_matches('v')).ok()
+    })
+}
+
 /** the `.aly` barrel beside the link file at `link_path`, when an Alloy
 project installs an Alloy package, so that its imports read the package's
 own declarations. see [`package::alloy_link_contents`]. */
@@ -436,6 +525,9 @@ pub(crate) fn install_project(
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
     build_alloy_packages(manifest, &stored, &mut |message| progress.warn(&message));
+    check_versions(manifest, &stored, version_on_path, &mut |message| {
+        progress.warn(&message)
+    });
     editor::sync(manifest, Path::new("."), &locked, &mut |message| {
         progress.warn(&message)
     });
@@ -653,7 +745,7 @@ fn fast_path(
     dependencies can only produce zero packages, nothing `^` could ever
     upgrade to, so index freshness doesn't matter either */
     if lock.packages.is_empty() {
-        return Ok(if manifest.dependencies.is_empty() {
+        return Ok(if manifest.all_dependencies().next().is_none() {
             FastPath::Skip
         } else {
             FastPath::Full
@@ -3626,5 +3718,112 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// the target of a manifest that gives `[target]` as `target`.
+    fn target(target: &str) -> manifest::Target {
+        let manifest: Manifest = toml::from_str(&format!("[target]\n{target}\n")).unwrap();
+        manifest.targets.into_iter().next().unwrap()
+    }
+
+    /** a runtime key counts only on that runtime, and a language key only
+    in that language. a built Alloy package used from plain Luau needs no
+    Alloy compiler. */
+    #[test]
+    fn a_project_checks_only_its_own_runtime_and_language() {
+        let package = target(
+            "environment = \"lune\"\nlanguage = \"alloy\"\n\
+             requires = { lune = \">=0.9.0\", alloy = \"^0.4.0\" }",
+        );
+        let checks = |root: &str| version_checks(&target(root), &package);
+
+        assert_eq!(
+            checks("environment = \"lune\"\nlanguage = \"alloy\""),
+            [("alloy", "^0.4.0"), ("lune", ">=0.9.0")]
+        );
+        assert_eq!(checks("environment = \"lune\""), [("lune", ">=0.9.0")]);
+        assert_eq!(
+            checks("environment = \"roblox\"\nlanguage = \"alloy\""),
+            [("alloy", "^0.4.0")]
+        );
+        assert!(checks("environment = \"lute\"").is_empty());
+
+        /* `luau` on a Lune package in Luau is the language key, so a
+        portable Luau project in Alloy does not check it */
+        let luau = target("environment = \"lune\"\nrequires = { luau = \">=0.650.0\" }");
+        assert!(
+            version_checks(
+                &target("environment = \"luau\"\nlanguage = \"alloy\""),
+                &luau
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            version_checks(&target("environment = \"roblox\""), &luau),
+            [("luau", ">=0.650.0")]
+        );
+    }
+
+    #[test]
+    fn a_version_mismatch_warns_once_per_package_and_asks_each_program_once() {
+        let base = std::env::temp_dir().join("embr-test-install-requires");
+        let _ = fs::remove_dir_all(&base);
+        let package = |name: &str, requires: &str| {
+            let storage = base.join(name.replace('/', "_"));
+            fs::create_dir_all(&storage).unwrap();
+            fs::write(
+                storage.join("ember.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\n\n\
+                     [target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\nrequires = {requires}\n"
+                ),
+            )
+            .unwrap();
+            stored(name, storage, Environment::Lune)
+        };
+        let packages = [
+            package(
+                "alloy/lattice",
+                "{ alloy = \"^0.4.0\", lune = \">=0.9.0\" }",
+            ),
+            package("alloy/prism", "{ alloy = \"^0.3.0\" }"),
+            // a package with no manifest of its own, as a wally one has
+            stored("acme/plain", base.join("acme_plain"), Environment::Lune),
+        ];
+        let project: Manifest =
+            toml::from_str("[target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n").unwrap();
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let version_of = |program: &str| {
+            asked.borrow_mut().push(program.to_string());
+            match program {
+                "alloy" => Some(semver::Version::new(0, 3, 2)),
+                _ => None,
+            }
+        };
+        let mut warnings = Vec::new();
+        check_versions(&project, &packages, version_of, &mut |message| {
+            warnings.push(message)
+        });
+
+        assert_eq!(
+            warnings,
+            ["warning: alloy/lattice wants alloy ^0.4.0; alloy 0.3.2 is on PATH"]
+        );
+        // lune is not on PATH, which says nothing, and alloy ran once for two packages
+        assert_eq!(*asked.borrow(), ["alloy", "lune"]);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_first_version_in_the_output_is_the_one() {
+        let version = |text: &str| first_version(text).map(|version| version.to_string());
+        assert_eq!(version("lune 0.10.4\n").as_deref(), Some("0.10.4"));
+        assert_eq!(version("alloy v0.4.1 (abc123)").as_deref(), Some("0.4.1"));
+        assert_eq!(version("seal (v0.8.3)").as_deref(), Some("0.8.3"));
+        // the luau CLI has no --version, and its usage text holds no version
+        assert_eq!(version("Error: Unrecognized option '--version'."), None);
+        assert_eq!(version("Luau 0.650"), None);
     }
 }

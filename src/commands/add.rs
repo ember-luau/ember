@@ -7,6 +7,7 @@ use crate::project::manifest::{
 };
 use crate::registry::index::{Index, Refresh};
 use crate::registry::local;
+use crate::registry::resolver::Allow;
 use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
@@ -32,6 +33,9 @@ pub struct AddArgs {
     /// Re-fetch the index even if it was refreshed recently
     #[arg(long)]
     pub refresh: bool,
+    /// Write to [dev-dependencies], for the tests and tools of this project only; any language goes
+    #[arg(long)]
+    pub dev: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -102,7 +106,11 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         }
         Err(error) => return Err(error),
     };
-    if let Some(allow) = crate::registry::resolver::Allow::for_project(&manifest)
+    let allow = Allow::for_project(&manifest).map(|allow| Allow {
+        any_language: args.dev,
+        ..allow
+    });
+    if let Some(allow) = allow
         && !allow.admits(
             package.language,
             package.environment,
@@ -129,7 +137,19 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if let Some(key) = &key {
         entry.insert("key", key.clone().into());
     }
-    let dependencies = document.table_or_create("dependencies")?;
+    let (table, other) = if args.dev {
+        ("dev-dependencies", "dependencies")
+    } else {
+        ("dependencies", "dev-dependencies")
+    };
+    // the manifest refuses one alias in both tables, so the edit refuses it first
+    if document
+        .table(other)?
+        .is_some_and(|entries| entries.contains_key(&alias))
+    {
+        return Err(Error::AliasInBothTables(alias));
+    }
+    let dependencies = document.table_or_create(table)?;
     /* re-adding an alias rewrites its whole entry, which is how a version
     bump works. `target` and `key` are the keys nothing here can re-ask
     for. dropping `target` would quietly move that dependency's whole

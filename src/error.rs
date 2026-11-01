@@ -349,6 +349,11 @@ pub enum Error {
     DependencyTargetInvalid { alias: String, target: String },
 
     #[error(
+        "'{0}' is in [dependencies] and in [dev-dependencies]; an alias goes in one of the two"
+    )]
+    AliasInBothTables(String),
+
+    #[error(
         "No [package] table in ember.toml; publishing needs one with a name and version (run `embr init` and choose 'package', or add it by hand)"
     )]
     PackageMissing,
