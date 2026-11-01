@@ -200,6 +200,35 @@ The first target is the project's own. `embr add` and `embr install` use
 it to pick a target of each dependency. They prefer the same environment
 and language, then the same environment in plain Luau.
 
+## Runtime and language versions
+
+A target can give the versions of its runtime and its language that it
+needs:
+
+```toml
+[target]
+environment = "lune"
+language = "alloy"
+requires = { lune = ">=0.9.0", alloy = "^0.4.0" }
+```
+
+The keys are the runtime of the target (`lune`, `lute`, `seal`, `zune`, or
+`luau`) and its language (`luau`, `alloy`, `loom`, or `luwu`). Roblox has
+no version key. Each value is a version requirement, the same as the
+version of a dependency. Each `[[target]]` has its own `requires`.
+
+`embr install` compares the `requires` of each installed package with the
+program on PATH. A mismatch gives a warning, and the install continues:
+
+```
+warning: alloy/lattice wants alloy ^0.4.0; alloy 0.3.2 is on PATH
+```
+
+A runtime key counts only when your project uses that runtime. A language
+key counts only when your project is in that language. A built Alloy
+package in a Luau project needs no Alloy compiler, so embr does not check
+`alloy` there.
+
 ## Entry points and collections
 
 The link file of a package requires its entry point. embr looks for it in

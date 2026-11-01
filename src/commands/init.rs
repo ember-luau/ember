@@ -424,6 +424,7 @@ fn package_manifest(
             workspace: Vec::new(),
             language,
             definitions: Vec::new(),
+            requires: Default::default(),
         }],
         config: Default::default(),
         indices: Default::default(),

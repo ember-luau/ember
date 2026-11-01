@@ -281,6 +281,11 @@ pub struct Target {
     or globs. empty means every `.d.luau` in the package, at most ten. */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub definitions: Vec<String>,
+    /** the versions of its runtime and its language that this target needs,
+    such as `{ lune = ">=0.9.0", alloy = "^0.4.0" }`. install only warns on a
+    mismatch, see [`Target::requires_keys`] for the keys. */
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requires: BTreeMap<String, String>,
 }
 
 impl Target {
@@ -291,6 +296,39 @@ impl Target {
             Language::Luau => self.environment.to_string(),
             language => format!("{}-{language}", self.environment),
         }
+    }
+
+    /** the keys `requires` takes: the runtime, when it has a version to ask
+    for, and the language. each key is also the program that gives the
+    version. */
+    pub fn requires_keys(&self) -> Vec<&'static str> {
+        let mut keys: Vec<&str> = self.environment.runtime().into_iter().collect();
+        // portable Luau in Luau names `luau` twice
+        if !keys.contains(&self.language.as_str()) {
+            keys.push(self.language.as_str());
+        }
+        keys
+    }
+
+    /// refuses a `requires` key that [`Target::requires_keys`] does not give, and a value that is no requirement.
+    fn check_requires(&self) -> Result<(), Error> {
+        let keys = self.requires_keys();
+        for (key, requirement) in &self.requires {
+            if !keys.contains(&key.as_str()) {
+                return Err(Error::ManifestInvalid(format!(
+                    "the requires of target '{}' has the key '{key}'; the allowed keys are {}",
+                    self.id(),
+                    keys.join(", ")
+                )));
+            }
+            parse_version_req(requirement).map_err(|error| {
+                Error::ManifestInvalid(format!(
+                    "the requires of target '{}' gives {key} '{requirement}', which is not a version requirement: {error}",
+                    self.id()
+                ))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -465,6 +503,15 @@ impl Environment {
         match self {
             Environment::Server => "roblox_server",
             other => other.dir_name(),
+        }
+    }
+
+    /** the program that runs this environment, which a `requires` key
+    names. None for Roblox: no package can ask for a version of it. */
+    pub fn runtime(self) -> Option<&'static str> {
+        match self {
+            Environment::Roblox | Environment::Server => None,
+            other => Some(other.as_str()),
         }
     }
 
@@ -938,6 +985,7 @@ impl Manifest {
             return Err(Error::ManifestMissing);
         }
         let manifest: Manifest = toml::from_str(&std::fs::read_to_string(path)?)?;
+        manifest.validate()?;
         for (alias, dependency) in &manifest.dependencies {
             if let Dependency::Registry {
                 name,
@@ -955,6 +1003,15 @@ impl Manifest {
             }
         }
         Ok(manifest)
+    }
+
+    /** the checks that span more than one value, so serde cannot make them.
+    [`Manifest::load_from`] runs them, which covers install and publish. */
+    fn validate(&self) -> Result<(), Error> {
+        for target in &self.targets {
+            target.check_requires()?;
+        }
+        Ok(())
     }
 
     /// folder an environment's packages (and their link files) install to.
@@ -2251,6 +2308,99 @@ mod tests {
                 environment
             );
         }
+    }
+
+    /// a manifest parsed and validated, as [`Manifest::load_from`] reads it.
+    fn validated(text: &str) -> Result<Manifest, Error> {
+        let manifest: Manifest = toml::from_str(text)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    #[test]
+    fn requires_takes_the_runtime_and_the_language() {
+        let manifest = validated(
+            "[target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n\
+             requires = { lune = \">=0.9.0\", alloy = \"^0.4.0\" }\n",
+        )
+        .unwrap();
+        let target = manifest.target().unwrap();
+        assert_eq!(target.requires["lune"], ">=0.9.0");
+        assert_eq!(target.requires["alloy"], "^0.4.0");
+
+        // it survives a write, and stays out of the file when empty
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("alloy = \"^0.4.0\""), "{written}");
+        assert_eq!(
+            toml::from_str::<Manifest>(&written)
+                .unwrap()
+                .target()
+                .unwrap()
+                .requires,
+            target.requires
+        );
+        assert!(
+            !toml::to_string(&validated("[target]\nenvironment = \"lune\"\n").unwrap())
+                .unwrap()
+                .contains("requires")
+        );
+
+        // each [[target]] has its own, checked against its own keys
+        let several = validated(
+            "[[target]]\nenvironment = \"seal\"\nrequires = { seal = \"^0.8\" }\n\n\
+             [[target]]\nenvironment = \"luau\"\nlanguage = \"luwu\"\nrequires = { luwu = \"*\", luau = \"^\" }\n",
+        )
+        .unwrap();
+        assert_eq!(several.targets()[0].requires.len(), 1);
+        assert_eq!(several.targets()[1].requires.len(), 2);
+        assert_eq!(several.targets()[1].requires_keys(), ["luau", "luwu"]);
+        // portable Luau in Luau names `luau` once
+        assert_eq!(
+            validated("[target]\nenvironment = \"luau\"\nrequires = { luau = \">=0.650.0\" }\n")
+                .unwrap()
+                .targets()[0]
+                .requires_keys(),
+            ["luau"]
+        );
+    }
+
+    #[test]
+    fn requires_refuses_other_keys_and_bad_requirements() {
+        let error = |text: &str| validated(text).unwrap_err().to_string();
+
+        // a key that is neither the runtime nor the language names itself and the allowed keys
+        let other = error(
+            "[target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\nrequires = { lute = \"^1\" }\n",
+        );
+        assert!(
+            other.contains("'lute'") && other.contains("the allowed keys are lune, alloy"),
+            "{other}"
+        );
+
+        // Roblox has no version to ask for, on either side
+        for environment in ["roblox", "roblox_server"] {
+            let roblox = error(&format!(
+                "[target]\nenvironment = \"{environment}\"\nrequires = {{ {environment} = \"^1\" }}\n"
+            ));
+            assert!(roblox.contains("the allowed keys are luau"), "{roblox}");
+        }
+        let alloy = validated(
+            "[target]\nenvironment = \"roblox\"\nlanguage = \"alloy\"\nrequires = { alloy = \"^0.4\" }\n",
+        );
+        assert!(alloy.is_ok(), "{alloy:?}");
+
+        // a later [[target]] is checked too
+        let later = error(
+            "[[target]]\nenvironment = \"lune\"\n\n[[target]]\nenvironment = \"lute\"\nrequires = { lune = \"^1\" }\n",
+        );
+        assert!(later.contains("target 'lute'"), "{later}");
+
+        let bad =
+            error("[target]\nenvironment = \"lune\"\nrequires = { lune = \"not a version\" }\n");
+        assert!(
+            bad.contains("gives lune 'not a version', which is not a version requirement"),
+            "{bad}"
+        );
     }
 
     #[test]

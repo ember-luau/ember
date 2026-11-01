@@ -650,6 +650,22 @@ mod tests {
         assert!(serialized.contains("acme/foo"), "{serialized}");
     }
 
+    /// `pack` writes the manifest that `strip_local_tables` leaves.
+    #[test]
+    fn the_packed_manifest_keeps_requires() {
+        let mut manifest: Manifest = toml::from_str(
+            "[package]\nname = \"alloy/lattice\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"lune\"\nlanguage = \"alloy\"\n\
+             requires = { lune = \">=0.9.0\", alloy = \"^0.4.0\" }\n",
+        )
+        .unwrap();
+        strip_local_tables(&mut manifest);
+        let packed: Manifest = toml::from_str(&toml::to_string(&manifest).unwrap()).unwrap();
+        let requires = &packed.target().unwrap().requires;
+        assert_eq!(requires["lune"], ">=0.9.0");
+        assert_eq!(requires["alloy"], "^0.4.0");
+    }
+
     #[test]
     fn descriptions_past_the_cap_are_rejected() {
         assert!(validate_description(None).is_ok());
