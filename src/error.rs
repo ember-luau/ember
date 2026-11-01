@@ -133,6 +133,21 @@ pub enum Error {
     WorkspaceMemberMissingManifest(PathBuf),
 
     #[error(
+        "'{0}' sets workspace = true, but no workspace root lists this project under [target] workspace"
+    )]
+    InheritOutsideWorkspace(String),
+
+    #[error(
+        "'{field}' sets workspace = true, but the ember.toml of the workspace root has no '{from}'"
+    )]
+    InheritMissing { field: String, from: String },
+
+    #[error(
+        "'{field}' sets workspace = true, so it cannot also set '{key}'; only a dependency can add 'target' or 'entry'"
+    )]
+    InheritExtraKey { field: String, key: String },
+
+    #[error(
         "No local package is named '{0}'; run `embr publish --local` in the folder of that package first"
     )]
     LocalPackageMissing(String),

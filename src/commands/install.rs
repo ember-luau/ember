@@ -617,7 +617,7 @@ fn tool_jobs(
 
 /** what the fast path saw when it decided to skip, one hash over every
 local input that can change what an install produces. coarse on purpose,
-a comment edit in ember.toml busts the fast path and wastes a few
+any value edit in ember.toml busts the fast path and wastes a few
 milliseconds, anything finer risks missing an input and breaking an
 install. */
 fn state_hash(
@@ -649,10 +649,12 @@ read, the fast path then stays off, the safe direction.
 member installs don't consume global tools (include_global = false), so
 those hash a fixed marker instead of the file, editing ~/.ember/tools.toml
 shouldn't wipe and rebuild every member of a workspace. absence is a
-distinct marker too, not an empty string. */
+distinct marker too, not an empty string.
+
+the manifest input is the manifest as it loads, not its text: a value it
+inherits with `workspace = true` lives in the workspace root's ember.toml. */
 fn state_inputs(include_global: bool) -> Option<(String, String, String)> {
-    let manifest_text =
-        fs::read_to_string(crate::project::manifest::manifest_in(Path::new(""))).ok()?;
+    let manifest_text = toml::to_string(&Manifest::load().ok()?).ok()?;
     let tools_text = if include_global {
         let path = paths::global_tools_file().ok()?;
         if path.exists() {

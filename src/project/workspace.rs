@@ -67,10 +67,18 @@ impl Workspace {
     }
 }
 
-/** the workspace `project_dir` belongs to. walk up, take the first ancestor manifest
-whose member globs match it, pesde's `find_roots`. ancestors that don't claim it
-are skipped, None when nothing does. */
+/// the workspace `project_dir` belongs to, None when no root claims it.
 pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
+    root_of(project_dir)?
+        .map(|(root, _)| Workspace::open(&root))
+        .transpose()
+}
+
+/** the root that claims `project_dir`, its dir and its manifest as plain
+TOML. walk up, take the first ancestor manifest whose member globs match it,
+pesde's `find_roots`. ancestors that don't claim it are skipped. plain TOML,
+because a member that inherits needs this root before it can load. */
+pub(crate) fn root_of(project_dir: &Path) -> Result<Option<(PathBuf, toml::Table)>, Error> {
     let project_dir = absolute(project_dir)?;
     let mut current = project_dir.parent();
     while let Some(dir) = current {
@@ -79,15 +87,38 @@ pub fn containing(project_dir: &Path) -> Result<Option<Workspace>, Error> {
         if !manifest_path.exists() {
             continue;
         }
-        let manifest = Manifest::load_from(&manifest_path)?;
-        if manifest.workspace_members().is_empty() {
-            continue;
-        }
-        if member_dirs(dir, manifest.workspace_members())?.contains(&project_dir) {
-            return Ok(Some(Workspace::open(dir)?));
+        let raw: toml::Table = fs::read_to_string(&manifest_path)?.parse()?;
+        let globs = member_globs(&raw);
+        if !globs.is_empty() && member_dirs(dir, &globs)?.contains(&project_dir) {
+            return Ok(Some((dir.to_path_buf(), raw)));
         }
     }
     Ok(None)
+}
+
+/** the member globs of a manifest read as plain TOML: `workspace`, or its
+alias `workspace_members`, on the first target, the keys serde reads for
+[`Manifest::workspace_members`]. */
+pub(crate) fn member_globs(raw: &toml::Table) -> Vec<String> {
+    let target = match raw.get("target") {
+        Some(toml::Value::Array(targets)) => targets.first(),
+        target => target,
+    };
+    target
+        .and_then(|target| {
+            target
+                .get("workspace")
+                .or_else(|| target.get("workspace_members"))
+        })
+        .and_then(toml::Value::as_array)
+        .map(|globs| {
+            globs
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /** dirs under `root` matching the member globs, sorted. pesde's glob extensions
