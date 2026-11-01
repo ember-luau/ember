@@ -136,6 +136,20 @@ fn publish_project(
     produce, and they hold the build output. each compiler runs once, before
     any target packs, so every archive sees the same output */
     let mut builds = BTreeMap::new();
+    /* the build resolves the imports of the dependencies, so they install
+    first. a fresh clone has no packages folder, and the build then fails.
+    the install fast path makes this free when the packages are current */
+    let building = manifest
+        .targets()
+        .iter()
+        .any(|target| target.language.builder().is_some() && ids.contains(&target.id()));
+    if building && !manifest.dependencies.is_empty() {
+        let args = super::install::InstallArgs {
+            locked: false,
+            refresh: false,
+        };
+        super::install::install_project(&args, &manifest, false)?;
+    }
     for target in manifest.targets() {
         if let Some(program) = target.language.builder()
             && ids.contains(&target.id())

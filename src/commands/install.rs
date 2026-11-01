@@ -225,7 +225,7 @@ fn section(title: &str, printed: &mut bool) {
 /** installs one project from the current directory. global tools only
 install on the primary run since workspace members share them and
 repeating the merge per member would just re-print every pin. */
-fn install_project(
+pub(crate) fn install_project(
     args: &InstallArgs,
     manifest: &Manifest,
     include_global_tools: bool,
