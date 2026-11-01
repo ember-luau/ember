@@ -745,7 +745,7 @@ fn fast_path(
     dependencies can only produce zero packages, nothing `^` could ever
     upgrade to, so index freshness doesn't matter either */
     if lock.packages.is_empty() {
-        return Ok(if manifest.dependencies.is_empty() {
+        return Ok(if manifest.all_dependencies().next().is_none() {
             FastPath::Skip
         } else {
             FastPath::Full

@@ -193,9 +193,8 @@ fn remove(name: Option<String>) -> Result<(), Error> {
     /* deps keyed to the removed index break at the next resolve,
     warn now instead of letting install fail mysteriously later */
     let dependents = manifest
-        .dependencies
-        .values()
-        .filter(|dependency| {
+        .all_dependencies()
+        .filter(|(_, dependency)| {
             matches!(
                 dependency,
                 crate::project::manifest::Dependency::Registry { index: Some(index), .. }

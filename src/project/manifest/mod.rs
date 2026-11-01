@@ -76,6 +76,15 @@ pub struct Manifest {
     pub indices: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
+    /** packages that only this project's tests and tools use. install takes
+    them for the root project alone, never for a dependency, and in any
+    language. a published package keeps the table, but nothing reads it. */
+    #[serde(
+        rename = "dev-dependencies",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub dev_dependencies: BTreeMap<String, Dependency>,
     /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
@@ -986,7 +995,7 @@ impl Manifest {
         }
         let manifest: Manifest = toml::from_str(&std::fs::read_to_string(path)?)?;
         manifest.validate()?;
-        for (alias, dependency) in &manifest.dependencies {
+        for (alias, dependency) in manifest.all_dependencies() {
             if let Dependency::Registry {
                 name,
                 key: Some(key),
@@ -1011,7 +1020,21 @@ impl Manifest {
         for target in &self.targets {
             target.check_requires()?;
         }
+        /* an alias names one link file, so it cannot name two entries.
+        install would link only one of them */
+        if let Some(alias) = self
+            .dev_dependencies
+            .keys()
+            .find(|alias| self.dependencies.contains_key(*alias))
+        {
+            return Err(Error::AliasInBothTables(alias.clone()));
+        }
         Ok(())
+    }
+
+    /// [dependencies] and then [dev-dependencies], for the readers that treat both the same.
+    pub fn all_dependencies(&self) -> impl Iterator<Item = (&String, &Dependency)> {
+        self.dependencies.iter().chain(&self.dev_dependencies)
     }
 
     /// folder an environment's packages (and their link files) install to.
@@ -1044,8 +1067,8 @@ impl Manifest {
     [`Dependency::entry`]. matched case-insensitively, the way package names
     resolve everywhere else. */
     pub fn entry_override(&self, name: &str) -> Option<&str> {
-        self.dependencies
-            .values()
+        self.all_dependencies()
+            .map(|(_, dependency)| dependency)
             .find(|dependency| dependency.package().eq_ignore_ascii_case(name))
             .and_then(Dependency::entry)
     }
@@ -2400,6 +2423,69 @@ mod tests {
         assert!(
             bad.contains("gives lune 'not a version', which is not a version requirement"),
             "{bad}"
+        );
+    }
+
+    #[test]
+    fn dev_dependencies_take_the_shapes_of_dependencies() {
+        let manifest = validated(
+            r#"
+            [indices]
+            wally = "https://github.com/UpliftGames/wally-index"
+
+            [dependencies]
+            Signal = { name = "acme/signal", version = "^1" }
+
+            [dev-dependencies]
+            lest = { name = "alloy/lest", version = "^0.2.0" }
+            TestEZ = { name = "roblox/testez", version = "^0.4", index = "wally" }
+            helper = { workspace = "acme/helper", entry = "src" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dev_dependencies.len(), 3);
+        assert!(matches!(
+            &manifest.dev_dependencies["TestEZ"],
+            Dependency::Registry { index: Some(index), .. } if index == "wally"
+        ));
+        assert!(matches!(
+            &manifest.dev_dependencies["helper"],
+            Dependency::Workspace { .. }
+        ));
+        // an `entry` on a dev dependency counts like one on a dependency
+        assert_eq!(manifest.entry_override("acme/helper"), Some("src"));
+
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("[dev-dependencies"), "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.dev_dependencies.len(), 3);
+        // an absent table stays absent
+        assert!(
+            !toml::to_string(&validated("").unwrap())
+                .unwrap()
+                .contains("dev-dependencies")
+        );
+    }
+
+    #[test]
+    fn one_alias_in_both_tables_is_refused() {
+        let error = validated(
+            "[dependencies]\nlest = { name = \"alloy/lest\", version = \"^0.2\" }\n\n\
+             [dev-dependencies]\nlest = { name = \"alloy/lest\", version = \"^0.2\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::AliasInBothTables(alias) if alias == "lest"),
+            "{error}"
+        );
+        // the check is on aliases, not on packages
+        assert!(
+            validated(
+                "[dependencies]\nlest = { name = \"alloy/lest\", version = \"^0.2\" }\n\n\
+                 [dev-dependencies]\ntests = { name = \"alloy/lest\", version = \"^0.2\" }\n",
+            )
+            .is_ok()
         );
     }
 

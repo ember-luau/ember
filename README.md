@@ -229,6 +229,27 @@ key counts only when your project is in that language. A built Alloy
 package in a Luau project needs no Alloy compiler, so embr does not check
 `alloy` there.
 
+## Dev dependencies
+
+`[dev-dependencies]` holds the packages that only the tests and tools of
+your project use. It takes the same entries as `[dependencies]`:
+
+```toml
+[dev-dependencies]
+lest = { name = "alloy/lest", version = "^0.2.0" }
+```
+
+- `embr add --dev <scope/name>` writes to `[dev-dependencies]`.
+- `embr install` installs the dev dependencies of your project. In a
+  workspace, each member installs its own. The dev dependencies of a
+  dependency never install.
+- A dev dependency can be in any language, so a Luau project can use an
+  Alloy test framework. The environment rules do not change.
+- One alias cannot be in `[dependencies]` and in `[dev-dependencies]`.
+- `embr outdated` lists the dev dependencies too.
+- `embr publish` keeps the table in the package, so the registry can show
+  it.
+
 ## Entry points and collections
 
 The link file of a package requires its entry point. embr looks for it in

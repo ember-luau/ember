@@ -429,6 +429,7 @@ fn package_manifest(
         config: Default::default(),
         indices: Default::default(),
         dependencies: Default::default(),
+        dev_dependencies: Default::default(),
         overrides: Default::default(),
         patches: Default::default(),
         tools: Default::default(),

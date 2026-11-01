@@ -17,6 +17,9 @@ Roblox server takes shared Roblox packages too, wally's realm rule. */
 pub struct Allow {
     pub environment: Environment,
     pub language: Language,
+    /** the rule for a dev dependency. only this project's tests and tools
+    use it, so it may be in any language. the environment rule stays. */
+    pub any_language: bool,
 }
 
 impl Allow {
@@ -26,6 +29,7 @@ impl Allow {
         Some(Allow {
             environment: target.environment,
             language: target.language,
+            any_language: false,
         })
     }
 
@@ -38,7 +42,7 @@ impl Allow {
         environment: Option<Environment>,
         tree: Option<Environment>,
     ) -> bool {
-        self.language.accepts(language)
+        (self.any_language || self.language.accepts(language))
             && match (tree, environment) {
                 (Some(tree), Some(environment)) => tree.accepts(environment),
                 _ => true,
@@ -59,7 +63,7 @@ impl Allow {
         /* a language cannot be crossed, a project cannot run what it does
         not read. an environment can, on purpose, the way a Lute project
         might vendor Roblox code it never runs */
-        let what = if self.language.accepts(language) {
+        let what = if self.any_language || self.language.accepts(language) {
             format!("{what}. Set `target` on the dependency to take it on purpose")
         } else {
             what
@@ -281,19 +285,31 @@ fn resolve_once(
 
     /* Seed all direct deps before any transitive one is discovered. first
     entry per (name, context) wins, so a package that also shows up
-    transitively still links under its manifest alias. */
-    for (alias, dependency) in &manifest.dependencies {
-        let name = dependency_name(dependency).to_lowercase();
-        discovered.insert(vec![alias.clone()], name.clone());
-        queue.push_back(QueueEntry {
-            name,
-            ask: request_for(alias, dependency, manifest)?,
-            link: Some(alias.clone()),
-            alias_path: vec![alias.clone()],
-            context: None,
-            required_by: Requirer::Manifest(alias.clone()),
-        });
+    transitively still links under its manifest alias. dev seeds wait in
+    their own queue, see below. */
+    let mut dev_seeds: VecDeque<QueueEntry> = VecDeque::new();
+    for (seeds, dependencies) in [
+        (&mut queue, &manifest.dependencies),
+        (&mut dev_seeds, &manifest.dev_dependencies),
+    ] {
+        for (alias, dependency) in dependencies {
+            let name = dependency_name(dependency).to_lowercase();
+            discovered.insert(vec![alias.clone()], name.clone());
+            seeds.push_back(QueueEntry {
+                name,
+                ask: request_for(alias, dependency, manifest)?,
+                link: Some(alias.clone()),
+                alias_path: vec![alias.clone()],
+                context: None,
+                required_by: Requirer::Manifest(alias.clone()),
+            });
+        }
     }
+    let dev_allow = allow.map(|allow| Allow {
+        any_language: true,
+        ..*allow
+    });
+    let mut dev = false;
 
     /* (name, context) -> (what we resolved, the req that won, who asked for
     it). BTreeMap keeps the install set, and the lockfile written from it, in
@@ -302,15 +318,25 @@ fn resolve_once(
     let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String, Requirer)> =
         BTreeMap::new();
 
-    while let Some(QueueEntry {
-        name,
-        ask: Ask { request, target },
-        link,
-        alias_path,
-        context,
-        required_by,
-    }) = queue.pop_front()
-    {
+    loop {
+        /* the dev seeds start once every [dependencies] subtree has
+        resolved. a package that both reach is then already in, and it went
+        through the language check */
+        if queue.is_empty() && !dev_seeds.is_empty() {
+            dev = true;
+            queue.append(&mut dev_seeds);
+        }
+        let Some(QueueEntry {
+            name,
+            ask: Ask { request, target },
+            link,
+            alias_path,
+            context,
+            required_by,
+        }) = queue.pop_front()
+        else {
+            break;
+        };
         let req_text = match &request {
             Request::Registry { req_text, .. } => req_text.clone(),
             Request::Workspace => "*".to_string(),
@@ -391,7 +417,8 @@ fn resolve_once(
                     None if target.is_some() => None,
                     None => allow.map(|allow| allow.environment),
                 };
-                if let Some(allow) = allow
+                let rule = if dev { dev_allow.as_ref() } else { allow };
+                if let Some(allow) = rule
                     && !allow.admits(package.language, package.environment, tree)
                 {
                     return Err(allow.refusal(
@@ -499,8 +526,15 @@ fn resolve_once(
             /* recorded even when the gate below dedups, so unmatched-
             override diagnostics can still find this root's tree */
             seed_contexts.insert(alias_path[0].clone(), context);
-            if let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context)) {
+            if let Some((existing, first_req, first_by)) =
+                resolved.get_mut(&(name.clone(), context))
+            {
                 if takes(&req, &existing.version, true) {
+                    /* a dev seed that a [dependencies] subtree already
+                    brought in still gets its link */
+                    if existing.link.is_none() {
+                        existing.link = link;
+                    }
                     continue; // this tree already walked the package, children drop
                 }
                 return Err(Error::DependencyConflict {
@@ -1635,6 +1669,7 @@ mod tests {
         let rule = |environment, language| Allow {
             environment,
             language,
+            any_language: false,
         };
 
         let alloy = rule(Environment::Roblox, Alloy);
@@ -1677,6 +1712,105 @@ mod tests {
         );
     }
 
+    /** a dev dependency may be in any language, since only this project's
+    tests and tools use it. the environment rule stays as it is. */
+    #[test]
+    fn dev_dependencies_take_any_language_but_not_any_environment() {
+        use Language::*;
+        let luau = Allow {
+            environment: Environment::Lune,
+            language: Luau,
+            any_language: false,
+        };
+        let dev = Allow {
+            any_language: true,
+            ..luau
+        };
+        let tree = Some(Environment::Lune);
+        assert!(!luau.admits(Alloy, Some(Environment::Lune), tree));
+        for language in [Luau, Alloy, Loom, Luwu] {
+            assert!(
+                dev.admits(language, Some(Environment::Lune), tree),
+                "{language}"
+            );
+        }
+        assert!(!dev.admits(Alloy, Some(Environment::Lute), tree));
+        // so the refusal points at `target`, the way out for an environment
+        assert!(
+            dev.refusal(
+                "alloy/lest@0.2.0".to_string(),
+                Alloy,
+                Some(Environment::Lute)
+            )
+            .to_string()
+            .ends_with("Set `target` on the dependency to take it on purpose")
+        );
+    }
+
+    /** the root's dev dependencies install, with their links. a workspace
+    member's dev dependencies stay out when the root installs it, as the dev
+    dependencies of any dependency do. */
+    #[test]
+    fn dev_dependencies_install_for_the_root_only() {
+        let base = std::env::temp_dir().join("embr-test-resolver-dev");
+        let _ = fs::remove_dir_all(&base);
+        let member = |name: &str, tables: &str| {
+            write(
+                &base.join("packages").join(name),
+                "ember.toml",
+                &format!(
+                    "[package]\nname = \"acme/{name}\"\nversion = \"1.0.0\"\n\n\
+                     [target]\nenvironment = \"roblox\"\n\n{tables}"
+                ),
+            );
+        };
+        member(
+            "app",
+            "[dependencies]\ncore = { workspace = \"acme/core\" }\n\n\
+             [dev-dependencies]\nspy = { workspace = \"acme/spy\" }\n",
+        );
+        member("core", "");
+        member("lest", "");
+        member("spy", "");
+        write(
+            &base,
+            "ember.toml",
+            "[target]\nenvironment = \"roblox\"\nworkspace = [\"packages/*\"]\n\n\
+             [dependencies]\napp = { workspace = \"acme/app\" }\n\n\
+             [dev-dependencies]\nlest = { workspace = \"acme/lest\" }\n\
+             kore = { workspace = \"acme/core\" }\n",
+        );
+
+        let manifest = Manifest::load_from(&base.join("ember.toml")).unwrap();
+        let installs = resolve(
+            &manifest,
+            &base,
+            Refresh::Never,
+            &Pinned::new(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let summary: Vec<String> = installs
+            .iter()
+            .map(|install| {
+                format!(
+                    "{} {}",
+                    install.name,
+                    install.link.as_deref().unwrap_or("-")
+                )
+            })
+            .collect();
+        /* acme/spy is a dev dependency of app, so it stays out. acme/core
+        came in through app first, and still links as the dev alias `kore` */
+        assert_eq!(
+            summary,
+            ["acme/app app", "acme/core kore", "acme/lest lest"]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn every_project_with_a_target_sets_a_rule() {
         let alloy: Manifest =
@@ -1685,7 +1819,8 @@ mod tests {
             Allow::for_project(&alloy),
             Some(Allow {
                 environment: Environment::Roblox,
-                language: Language::Alloy
+                language: Language::Alloy,
+                any_language: false,
             })
         );
         let consumer: Manifest = toml::from_str("[dependencies]\n").unwrap();
