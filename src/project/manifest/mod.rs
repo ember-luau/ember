@@ -1,4 +1,5 @@
 pub mod edit;
+mod inherit;
 
 use crate::error::Error;
 use crate::net::registry;
@@ -993,7 +994,15 @@ impl Manifest {
         if !path.exists() {
             return Err(Error::ManifestMissing);
         }
-        let manifest: Manifest = toml::from_str(&std::fs::read_to_string(path)?)?;
+        let text = std::fs::read_to_string(path)?;
+        let mut raw: toml::Table = text.parse()?;
+        let manifest: Manifest = if inherit::inherits(&raw) {
+            inherit::apply(&mut raw, path.parent().unwrap_or(Path::new("")))?;
+            raw.try_into()?
+        } else {
+            // from the text, so an error keeps its line and column
+            toml::from_str(&text)?
+        };
         manifest.validate()?;
         for (alias, dependency) in manifest.all_dependencies() {
             if let Dependency::Registry {

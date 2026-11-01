@@ -250,6 +250,46 @@ lest = { name = "alloy/lest", version = "^0.2.0" }
 - `embr publish` keeps the table in the package, so the registry can show
   it.
 
+## Workspace inheritance
+
+The root of a workspace can hold shared values in a `[workspace]` table. A
+member takes a value with `workspace = true`, as in Cargo:
+
+```toml
+# ember.toml at the root
+[target]
+environment = "roblox"
+workspace = ["places/*"]
+
+[workspace.package]
+version = "1.4.0"
+
+[workspace.dependencies]
+signal = { name = "acme/signal", version = "^1.0.0" }
+```
+
+```toml
+# places/lobby/ember.toml
+[package]
+name = "acme/lobby"
+version.workspace = true
+
+[dependencies]
+signal = { workspace = true }
+```
+
+- Any value or table can inherit. It reads the same path under
+  `[workspace]`, so `package.version` reads `workspace.package.version`.
+- `[dev-dependencies]` reads `[workspace.dependencies]`, the same as
+  `[dependencies]`.
+- An inherited dependency can add `target` and `entry`. Any other key next
+  to `workspace = true` is an error.
+- The root can inherit from its own `[workspace]` table.
+- `embr publish` writes the values into the package, and the `[workspace]`
+  table stays home.
+- `embr tool update` skips an inherited tool. Change its version in the
+  root.
+
 ## Entry points and collections
 
 The link file of a package requires its entry point. embr looks for it in

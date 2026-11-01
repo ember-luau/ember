@@ -246,6 +246,14 @@ fn update() -> Result<(), Error> {
     // snapshot the entries up front so the table can be edited while looping
     let entries = table
         .iter()
+        .filter(|(alias, item)| {
+            // the version of an inherited tool is in the workspace root
+            let inherited = item.get("workspace").and_then(|value| value.as_bool()) == Some(true);
+            if inherited {
+                println!("Skipping {alias}: it comes from the workspace root");
+            }
+            !inherited
+        })
         .map(|(alias, item)| {
             item.as_str()
                 .map(|spec| (alias.to_string(), spec.to_string()))
