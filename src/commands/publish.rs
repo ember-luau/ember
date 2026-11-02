@@ -164,17 +164,16 @@ fn publish_project(
     split_package_name(&package_name)?;
     let version = semver::Version::parse(&package.version)?;
 
-    /* the API appends [package] authors to the scope's owner list, each one
-    can then publish to the whole scope, and 400s anything not shaped like
-    a GitHub username. catch that before packing. it does NOT check the
-    account exists, so a typo silently grants a stranger-to-be */
+    /* the API makes each [package] author a collaborator of this one
+    package, and 400s anything not shaped like a GitHub username. catch that
+    before packing */
     if let Some(author) = package
         .authors
         .iter()
         .find(|author| !is_github_username(author))
     {
         return Err(Error::ManifestInvalid(format!(
-            "author '{author}' is not a GitHub username; [package] authors grant publish access to your scope and must be GitHub usernames (no emails or display names)"
+            "author '{author}' is not a GitHub username; [package] authors become collaborators of the package and must be GitHub usernames (no emails or display names)"
         )));
     }
 
@@ -349,9 +348,12 @@ fn publish_target(
         ui::print_success(&format!("Published {package} ({id})"));
         return Ok(());
     }
-    // the browser login only when there is no token at all
+    // the browser login only when there is no token at all, and never in CI
     let stored = match stored {
         Some(stored) => stored,
+        None if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") => {
+            return Err(Error::NoTokenInActions);
+        }
         None => auth::login()?.token,
     };
     let stored = match upload(Some(&stored), oidc_token, &archive) {

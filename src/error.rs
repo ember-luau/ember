@@ -53,6 +53,13 @@ pub enum Error {
     )]
     TokenRejected,
 
+    /** a publish in GitHub Actions with no Ember token and no OIDC token.
+    the browser login would wait for an approval that never comes. */
+    #[error(
+        "This GitHub Actions job has no Ember token; set EMBER_TOKEN, or give the job `permissions: id-token: write` and add a trusted publisher on the Manage tab of the package page"
+    )]
+    NoTokenInActions,
+
     /** the registry API answered 404 for a package that the git index does
     not hold. the hint shows when embr sent no token. */
     #[error("Package {name} was not found{}", if *.signed_in { "" } else {
