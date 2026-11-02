@@ -448,6 +448,49 @@ open it on a different computer. The code expires after 10 minutes.
 - In CI, set `EMBER_TOKEN`. It wins over the stored login.
 - A GitHub login from embr 0.9 changes to an Ember token on first use.
 
+### Trusted publishing
+
+A GitHub Actions workflow can publish with no `EMBER_TOKEN` secret. The
+registry accepts the OIDC token of the workflow when the package names that
+repository and workflow as a trusted publisher. This needs embr 0.12.0 or
+later.
+
+1. Publish the first version with a token. A trusted publisher cannot make
+   a new package.
+2. On emberpm.dev, open the Manage tab of the package. Under Trusted
+   publishing, add the repository (`owner/repo`), the workflow file name
+   (`release.yml`) and, if you want, a GitHub environment.
+3. Give the job `id-token: write`, and run `embr publish` with no
+   `EMBER_TOKEN`:
+
+```yaml
+# .github/workflows/release.yml
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          curl -fsSL -o embr https://github.com/ember-luau/ember/releases/latest/download/embr-linux-x86_64
+          chmod +x embr
+          ./embr publish
+```
+
+- When `EMBER_TOKEN` is set, it wins. The OIDC token then gives provenance
+  only.
+- With no `EMBER_TOKEN` and no stored login, embr uses the OIDC token. It
+  gets a new one for each upload and never opens the browser login.
+- The publish runs as the account that added the trusted publisher. When
+  that account loses its access to the package, the publish fails.
+- When the registry refuses, embr shows its message. It names the
+  repository and the workflow that it saw.
+
 ## Local packages
 
 A local package is a package that only this computer can install. Use it

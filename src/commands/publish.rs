@@ -164,17 +164,16 @@ fn publish_project(
     split_package_name(&package_name)?;
     let version = semver::Version::parse(&package.version)?;
 
-    /* the API appends [package] authors to the scope's owner list, each one
-    can then publish to the whole scope, and 400s anything not shaped like
-    a GitHub username. catch that before packing. it does NOT check the
-    account exists, so a typo silently grants a stranger-to-be */
+    /* the API makes each [package] author a collaborator of this one
+    package, and 400s anything not shaped like a GitHub username. catch that
+    before packing */
     if let Some(author) = package
         .authors
         .iter()
         .find(|author| !is_github_username(author))
     {
         return Err(Error::ManifestInvalid(format!(
-            "author '{author}' is not a GitHub username; [package] authors grant publish access to your scope and must be GitHub usernames (no emails or display names)"
+            "author '{author}' is not a GitHub username; [package] authors become collaborators of the package and must be GitHub usernames (no emails or display names)"
         )));
     }
 
@@ -258,7 +257,8 @@ fn select_targets(targets: &[Target], selected: &[String]) -> Result<Vec<String>
 
 /** packs and uploads the one target that `manifest` holds. `builds` has
 the outcome of each compiler that the selected targets need. `token` is
-the GitHub token, read on the first upload and kept for the next. */
+the Ember token, read on the first upload and kept for the next. a trusted
+publish keeps none. */
 fn publish_target(
     root: &Path,
     manifest: &Manifest,
@@ -332,15 +332,31 @@ fn publish_target(
         return Ok(());
     }
 
-    // EMBER_TOKEN or the stored login first. the browser login only when there is neither
+    // EMBER_TOKEN or the stored login first
     let stored = match token.take() {
-        Some(stored) => stored,
-        None => match auth::token()? {
-            Some(stored) => stored,
-            None => auth::login()?.token,
-        },
+        Some(stored) => Some(stored),
+        None => auth::token()?,
     };
-    let stored = match upload(&stored, oidc_token, &archive) {
+    /* with neither, in a GitHub Actions job with id-token: write, the OIDC
+    token is the credential of a trusted publisher. never the browser login
+    there, CI has no one to approve it. a fresh token for each upload, since
+    one lasts only minutes and a workspace publish makes many uploads */
+    if stored.is_none()
+        && let Some(trusted) = provenance::actions_token()
+    {
+        upload(None, Some(&trusted), &archive)?;
+        ui::print_success(&format!("Published {package} ({id})"));
+        return Ok(());
+    }
+    // the browser login only when there is no token at all, and never in CI
+    let stored = match stored {
+        Some(stored) => stored,
+        None if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") => {
+            return Err(Error::NoTokenInActions);
+        }
+        None => auth::login()?.token,
+    };
+    let stored = match upload(Some(&stored), oidc_token, &archive) {
         // CI has no one to approve a login
         Err(Error::PublishFailed { status: 401, .. }) if auth::env_token().is_some() => {
             return Err(Error::TokenRejected);
@@ -351,7 +367,7 @@ fn publish_target(
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored token; logging in again");
             let fresh = auth::login()?.token;
-            upload(&fresh, oidc_token, &archive)?;
+            upload(Some(&fresh), oidc_token, &archive)?;
             fresh
         }
         other => {
@@ -472,7 +488,7 @@ fn validate_description(description: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
+fn upload(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
     ui::with_spinner("Uploading package", || {
         registry::publish(token, oidc_token, archive)
     })

@@ -3,7 +3,9 @@ publish provenance. inside a GitHub Actions job that can mint OIDC tokens,
 grab one and send it along with the publish so the registry can verify
 "built from repo X at commit Y by workflow Z". local publishes simply have
 no token, which is normal, not suspicious. best effort all the way down,
-nothing here may fail or noticeably delay a publish.
+nothing here may fail or noticeably delay a publish. with no Ember token
+the same OIDC token is the credential of a trusted publisher, and None
+then means the usual login.
 */
 
 use crate::net::http;

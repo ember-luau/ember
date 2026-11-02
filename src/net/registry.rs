@@ -215,16 +215,29 @@ struct ErrorBody {
 The API answers 401 bad token, 400 malformed tarball or ember.toml, 403
 scope owned by someone else since first publish claims a scope, 409
 version already exists, 413 over the size cap. `oidc_token` is the
-Actions provenance token when there is one. It rides along in its own
-header, auth stays the Ember token. */
-pub fn publish(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
-    let url = format!("{}/v1/publish", api_url());
+Actions OIDC token when there is one. It rides along in its own header.
+next to an Ember `token` it is provenance only. with no token it is the
+credential, and the API takes it when the package names this workflow as
+a trusted publisher. */
+pub fn publish(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
+    publish_at(&api_url(), token, oidc_token, archive)
+}
+
+fn publish_at(
+    api: &str,
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    archive: &[u8],
+) -> Result<(), Error> {
+    let url = format!("{api}/v1/publish");
     // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
     let mut request = http::bulk_agent()
         .post(&url)
         .set("User-Agent", http::USER_AGENT)
-        .set("Authorization", &format!("Bearer {token}"))
         .set("Content-Type", "application/gzip");
+    if let Some(token) = token {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    }
     if let Some(oidc_token) = oidc_token {
         request = request.set(crate::net::provenance::HEADER, oidc_token);
     }
@@ -430,6 +443,45 @@ mod tests {
         assert!(!is_link_key("0123456789abcdef"));
         assert!(!is_link_key("0123456789abcdef0123456789abcdeg"));
         assert!(!is_link_key("0123456789abcdef0123456789abcde\n"));
+    }
+
+    /** with no Ember token the OIDC token is the only credential, and a
+    refusal carries the registry's own message */
+    #[test]
+    fn a_trusted_publish_sends_the_oidc_token_and_no_authorization() {
+        let (api, log) = mock::serve(|request| {
+            if request.contains("authorization:") {
+                mock::reply("201 Created", "{}")
+            } else {
+                mock::reply(
+                    "403 Forbidden",
+                    r#"{"error":"no trusted publisher of acme/rocket matches repository acme/fork"}"#,
+                )
+            }
+        });
+
+        let refused = publish_at(&api, None, Some("header.claims.signature"), b"archive");
+        let Err(Error::PublishFailed { status, message }) = refused else {
+            panic!("a refusal is a publish failure: {refused:?}");
+        };
+        assert_eq!(status, 403);
+        assert_eq!(
+            message,
+            "no trusted publisher of acme/rocket matches repository acme/fork"
+        );
+        let sent = log.lock().unwrap()[0].clone();
+        assert!(sent.starts_with("post /v1/publish "), "{sent}");
+        assert!(
+            sent.contains("x-github-oidc-token: header.claims.signature"),
+            "{sent}"
+        );
+        assert!(!sent.contains("authorization"), "{sent}");
+
+        // next to a token, the token is the credential, as before
+        publish_at(&api, Some("ember_abc"), Some("oidc"), b"archive").unwrap();
+        let sent = log.lock().unwrap()[1].clone();
+        assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
+        assert!(sent.contains("x-github-oidc-token: oidc"), "{sent}");
     }
 
     #[test]
