@@ -235,8 +235,8 @@ pub struct Package {
     pub homepage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-    /** a picture of the package, a .png, .jpg, or .webp file inside it. the
-    registry shows it in place of the box icon. it always ships. */
+    /** a picture of the package, a .png, .jpg, .webp, or .gif file inside it.
+    the registry shows it in place of the box icon. it always ships. */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
     /** who sees the package on the registry. absent means public. the name

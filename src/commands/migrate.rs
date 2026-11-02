@@ -940,11 +940,13 @@ fn plan_crater(text: &str, declare: Option<&str>) -> Result<Plan, String> {
             manifest.remove("can_publish");
             writes.push(Write::new("package", "private", !can_publish));
         }
-        // crater takes a .gif or .svg icon too, and ember's logo does not
+        // crater takes an .svg icon too, and ember's logo does not
         let logo = string(&manifest, "icon").filter(|icon| {
             Path::new(&icon.to_lowercase())
                 .extension()
-                .is_some_and(|ext| ["png", "jpg", "webp"].contains(&ext.to_str().unwrap_or("")))
+                .is_some_and(|ext| {
+                    ["png", "jpg", "webp", "gif"].contains(&ext.to_str().unwrap_or(""))
+                })
         });
         if let Some(logo) = logo {
             manifest.remove("icon");
@@ -1603,6 +1605,24 @@ TestEZ = "roblox/testez@0.4.1"
         assert!(rest.contains("beta/adof+0.12.44"), "{rest}");
         assert!(rest.contains("me/lib@path:../lib"), "{rest}");
         assert!(!rest.contains("sleitnick/knit"), "{rest}");
+    }
+
+    #[test]
+    fn a_crater_icon_that_ember_takes_becomes_the_logo() {
+        let with_icon = |icon: &str| {
+            let text = CRATER.replace(r#""icon": """#, &format!(r#""icon": "{icon}""#));
+            plan_crater(&text, Some(DECLARE)).unwrap()
+        };
+        for icon in ["assets/logo.png", "assets/logo.webp", "assets/logo.GIF"] {
+            assert_eq!(
+                written(&with_icon(icon), "package", "logo").unwrap(),
+                format!("\"{icon}\""),
+                "{icon}"
+            );
+        }
+        let svg = with_icon("assets/logo.svg");
+        assert!(written(&svg, "package", "logo").is_none());
+        assert!(svg.kept.contains(&"icon".to_string()), "{:?}", svg.kept);
     }
 
     #[test]

@@ -566,9 +566,12 @@ fn validate_logo(root: &Path, logo: Option<&str>) -> Result<(), Error> {
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase);
-    if !matches!(extension.as_deref(), Some("png" | "jpg" | "jpeg" | "webp")) {
+    if !matches!(
+        extension.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif")
+    ) {
         return Err(Error::LogoInvalid(format!(
-            "'{logo}' must be a .png, .jpg, or .webp file"
+            "'{logo}' must be a .png, .jpg, .webp, or .gif file"
         )));
     }
     let size = std::fs::metadata(root.join(logo))
@@ -993,6 +996,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("assets")).unwrap();
         fs::write(base.join("assets/logo.png"), [0u8; 16]).unwrap();
+        fs::write(base.join("assets/logo.GIF"), b"GIF89a").unwrap();
         fs::write(base.join("assets/logo.svg"), "<svg/>").unwrap();
         fs::write(
             base.join("assets/huge.webp"),
@@ -1002,8 +1006,9 @@ mod tests {
 
         assert!(validate_logo(&base, None).is_ok());
         assert!(validate_logo(&base, Some("assets/logo.png")).is_ok());
+        assert!(validate_logo(&base, Some("assets/logo.GIF")).is_ok());
         for (logo, says) in [
-            ("assets/logo.svg", ".png, .jpg, or .webp"),
+            ("assets/logo.svg", ".png, .jpg, .webp, or .gif"),
             ("assets/missing.png", "does not exist"),
             ("assets/huge.webp", "at most 512 KiB"),
         ] {
