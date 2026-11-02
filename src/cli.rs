@@ -74,6 +74,10 @@ pub enum Commands {
     /// Add a dependency to ember.toml
     Add(commands::add::AddArgs),
 
+    /// Remove dependencies from ember.toml
+    #[command(visible_alias = "rm")]
+    Remove(commands::remove::RemoveArgs),
+
     /// Manage tooling used in the current project
     #[command(subcommand)]
     Tool(commands::tool::ToolCommand),
@@ -98,6 +102,18 @@ pub enum Commands {
 
     /// List the dependencies with a newer release; installs nothing
     Outdated(commands::outdated::OutdatedArgs),
+
+    /// Show the installed dependencies as a tree
+    Tree(commands::tree::TreeArgs),
+
+    /// Show each path from ember.toml to an installed package
+    Why(commands::tree::WhyArgs),
+
+    /// Search the ember registry, or every registry with --all
+    Search(commands::search::SearchArgs),
+
+    /// Show a package's versions, dependencies, and details
+    Info(commands::info::InfoArgs),
 
     /// Log in to the registry, log out, or show the stored login
     Auth(commands::auth::AuthArgs),
@@ -153,12 +169,17 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),
         Commands::Add(args) => done(commands::add::run(args)),
+        Commands::Remove(args) => done(commands::remove::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
         Commands::Migrate(args) => done(commands::migrate::run(args)),
         Commands::Install(args) => done(commands::install::run(args)),
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),
         Commands::Outdated(args) => done(commands::outdated::run(args)),
+        Commands::Tree(args) => done(commands::tree::tree(args)),
+        Commands::Why(args) => done(commands::tree::why(args)),
+        Commands::Search(args) => done(commands::search::run(args)),
+        Commands::Info(args) => done(commands::info::run(args)),
         Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),

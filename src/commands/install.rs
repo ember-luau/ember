@@ -495,16 +495,7 @@ pub(crate) fn install_project(
             /* members link in place, so they're link targets like anything
             else but never get written into, that would dirty a source tree
             the user edits */
-            let (storage, in_place) = match &package.source {
-                index::DownloadSource::Workspace { path } => (PathBuf::from(path), true),
-                _ => (
-                    manifest
-                        .packages_out(package.context())
-                        .join(STORE_DIR)
-                        .join(package.name.replace('/', "_")),
-                    false,
-                ),
-            };
+            let (storage, in_place) = stored_at(manifest, package);
             StoredPackage {
                 /* resolved once here rather than per nested link, and
                 silently: whoever installed this package already said out
@@ -1533,6 +1524,21 @@ fn link_workspace_member(
         patch: None,
         source: job.source,
     })
+}
+
+/** where install puts `package`, relative to the project, and whether that
+is a workspace member linked in place. `embr tree` reads the same folders. */
+pub(crate) fn stored_at(manifest: &Manifest, package: &LockedPackage) -> (PathBuf, bool) {
+    match &package.source {
+        index::DownloadSource::Workspace { path } => (PathBuf::from(path), true),
+        _ => (
+            manifest
+                .packages_out(package.context())
+                .join(STORE_DIR)
+                .join(package.name.replace('/', "_")),
+            false,
+        ),
+    }
 }
 
 /** one installed package, as the nested-link pass sees it. */

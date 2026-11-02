@@ -22,6 +22,8 @@ use crate::ui;
 pub const INSTALL: &str = "install";
 /// hooked by `embr add`, as `preadd` / `postadd`.
 pub const ADD: &str = "add";
+/// hooked by `embr remove`, as `preremove` / `postremove`.
+pub const REMOVE: &str = "remove";
 /// hooked by `embr publish`, as `prepublish` / `postpublish`.
 pub const PUBLISH: &str = "publish";
 
@@ -29,7 +31,7 @@ pub const PUBLISH: &str = "publish";
 these, so this is not the set of hookable names, just the ones that come
 from a command rather than from [scripts] itself. `embr run` reads it to
 tell a real hook from a script that merely starts with "pre". */
-pub const EVENTS: [&str; 3] = [INSTALL, ADD, PUBLISH];
+pub const EVENTS: [&str; 4] = [INSTALL, ADD, REMOVE, PUBLISH];
 
 /** The two hooks one event has in one manifest, resolved up front.
 

@@ -37,11 +37,11 @@ pub enum Kind {
     Package,
 }
 
-fn parse_language(name: &str) -> Result<Language, String> {
+pub(crate) fn parse_language(name: &str) -> Result<Language, String> {
     Language::parse(name).ok_or_else(|| format!("'{name}' is not luau, alloy, loom, or luwu"))
 }
 
-fn parse_environment(name: &str) -> Result<Environment, String> {
+pub(crate) fn parse_environment(name: &str) -> Result<Environment, String> {
     Environment::from_embr(name).map_err(|error| error.to_string())
 }
 
