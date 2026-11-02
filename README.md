@@ -157,6 +157,62 @@ hands your terminal straight to it — nothing is added to any manifest. Names
 pinned under `[tools]` run their pinned version; other bare names come from
 embr's shorthand list; anything else is `owner/repo`.
 
+## `embr remove`: take out a dependency
+
+```sh
+embr remove signal         # an alias from ember.toml
+embr rm chief/core lest    # a scope/name, and more than one at a time
+```
+
+`embr remove` deletes entries from `[dependencies]` and
+`[dev-dependencies]`. Each name is an alias or the `scope/name` of an
+entry. The comments and the format of `ember.toml` stay. If a name matches
+no entry, embr shows the aliases and changes nothing.
+
+`embr remove` does not install. Run `embr install` after it. If
+`[patches]` or `[overrides]` still name a removed dependency, embr shows a
+warning, because `embr install` can fail on that entry. A `preremove`
+script runs before the edit, and a `postremove` script runs after it.
+
+## `embr search` and `embr info`: find a package
+
+```sh
+embr search signal                              # the ember registry
+embr search ecs --environment lune --limit 5
+embr search signal --all                        # also Wally, pesde, and Forest
+embr info chief/core                            # versions, dependencies, details
+embr info chief/core --version "^0.2"
+```
+
+- `embr search` gives the results of the `embr mcp` search tools, most
+  downloaded first. Each line gives the latest version, the environments,
+  the download count, and the `embr add` command. `--environment` and
+  `--language` filter the ember registry. `--limit` sets the number of
+  results: 20 by default, and 50 at most. With `--all`, the limit is for
+  each registry, and the default is 10.
+- `embr info` reads the index, as an install does. It shows the newest
+  version that is not yanked, or the newest version that `--version`
+  matches. It also shows the description, the repository, the targets, the
+  dependencies, the dev dependencies, `requires`, a deprecation, and the 10
+  newest versions. A pesde entry also gives the license and the authors.
+  `--index` reads another index, such as `pesde`. A private or unlisted
+  package comes from the registry API, with your login or its link key.
+
+## `embr tree` and `embr why`: see what is installed
+
+```sh
+embr tree                  # each installed dependency, as a tree
+embr tree --depth 0        # the direct dependencies only
+embr why chief/traits      # each path from ember.toml to a package
+```
+
+Both commands read what `embr install` wrote: `ember.lock`, and the
+manifest of each installed package. Run `embr install` first. A package
+with dependencies that shows a second time gets `(*)`, and its
+dependencies do not show again. When the direct dependencies install in
+more than one environment, such as `roblox` and `roblox_server`, each
+environment gets a heading.
+
 ## One package, several targets
 
 A package can ship one release for each target. Write one `[[target]]`

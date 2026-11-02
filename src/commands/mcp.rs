@@ -10,7 +10,6 @@ messages go to stdout, so any log goes to stderr.
 
 use crate::error::Error;
 use crate::net::http::{self, error::HttpError};
-use crate::net::registry::API_URL;
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language, split_package_name};
 use crate::registry::index::forest;
 use crate::registry::index::pesde::{self, Candidate};
@@ -56,7 +55,7 @@ const DEFAULT_ALL_LIMIT: usize = 10;
 /** search_all asks the registries at the same time and waits this long for
 the answers. a registry that does not answer in time is listed as failed,
 and the other registries still answer. */
-const REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Forest refuses a shorter query, and Wally finds nothing for one.
 const MIN_QUERY_LENGTH: usize = 2;
 /** a Forest search row needs one more request when its scope is claimed,
@@ -280,11 +279,11 @@ fn call(params: &Value) -> Result<Value, String> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SearchArgs {
-    query: String,
-    environment: Option<Environment>,
-    language: Option<Language>,
-    limit: Option<usize>,
+pub(crate) struct SearchArgs {
+    pub(crate) query: String,
+    pub(crate) environment: Option<Environment>,
+    pub(crate) language: Option<Language>,
+    pub(crate) limit: Option<usize>,
 }
 
 /** one package in a `GET /v1/search` answer. older rows can lack
@@ -367,7 +366,7 @@ fn non_empty(text: &Option<String>) -> Option<&str> {
 }
 
 fn search_packages(arguments: Value) -> Result<String, Error> {
-    search_packages_at(API_URL, arguments)
+    search_packages_at(&crate::net::registry::api_url(), arguments)
 }
 
 /// search_packages against the registry API at `api`.
@@ -379,7 +378,7 @@ fn search_packages_at(api: &str, arguments: Value) -> Result<String, Error> {
 
 /// one page of the registry's `GET /v1/search`.
 #[derive(Deserialize)]
-struct SearchPage {
+pub(crate) struct SearchPage {
     /// every match, not only this page
     total: usize,
     results: Vec<SearchEntry>,
@@ -389,7 +388,7 @@ struct SearchPage {
 most downloaded first. the registry matches each word of the query as a
 prefix, and it filters and ranks the packages. one page of the largest
 limit answers every call, so the page size does not change with it. */
-fn ember_search(
+pub(crate) fn ember_search(
     api: &str,
     query: &str,
     environment: Option<Environment>,
@@ -409,7 +408,7 @@ fn ember_search(
 }
 
 /// the search_packages answer for one page of matches, as text.
-fn search(page: &SearchPage, args: &SearchArgs) -> String {
+pub(crate) fn search(page: &SearchPage, args: &SearchArgs) -> String {
     if page.results.is_empty() {
         return format!("No package matches \"{}\".", args.query);
     }
@@ -430,7 +429,7 @@ fn search(page: &SearchPage, args: &SearchArgs) -> String {
 /// a registry that search_all reads. embr installs from each one.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
-enum Registry {
+pub(crate) enum Registry {
     Ember,
     Wally,
     Pesde,
@@ -458,15 +457,15 @@ impl Registry {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SearchAllArgs {
-    query: String,
-    registries: Option<Vec<Registry>>,
-    limit: Option<usize>,
+pub(crate) struct SearchAllArgs {
+    pub(crate) query: String,
+    pub(crate) registries: Option<Vec<Registry>>,
+    pub(crate) limit: Option<usize>,
 }
 
 /** asks one registry for a query. it gives the search_all lines of the
 matches, and the number of matches, which can be more than the lines. */
-type Fetch = fn(Registry, &str) -> Result<(Vec<String>, usize), String>;
+pub(crate) type Fetch = fn(Registry, &str) -> Result<(Vec<String>, usize), String>;
 
 fn search_all(arguments: Value) -> Result<String, Error> {
     let args: SearchAllArgs = serde_json::from_value(arguments)?;
@@ -475,7 +474,7 @@ fn search_all(arguments: Value) -> Result<String, Error> {
 
 /** the search_all answer. `fetch` runs on its own thread for each registry,
 and a registry that has not answered after `timeout` is listed as failed. */
-fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> String {
+pub(crate) fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> String {
     let query = args.query.trim().to_lowercase();
     let registries: Vec<Registry> = REGISTRIES
         .into_iter()
@@ -551,8 +550,8 @@ fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Duration) -> S
 }
 
 /// the live [`Fetch`]: one search request, plus the mirror checks for Forest.
-fn fetch(registry: Registry, query: &str) -> Result<(Vec<String>, usize), String> {
-    fetch_at(API_URL, registry, query)
+pub(crate) fn fetch(registry: Registry, query: &str) -> Result<(Vec<String>, usize), String> {
+    fetch_at(&crate::net::registry::api_url(), registry, query)
 }
 
 /// [`fetch`], with ember's registry API at `api`.

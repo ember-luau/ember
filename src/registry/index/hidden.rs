@@ -34,6 +34,30 @@ pub fn resolve(
     resolve_at(&registry::api_url(), &access, name, req, prefer, pinned).map(Some)
 }
 
+/// what [`pesde::read`] gives: the entries, and the package's deprecation.
+type Entries = (Vec<pesde::Candidate>, Option<String>);
+
+/** every entry of `name` from the API, as [`pesde::read`] gives them from
+the git index. None as for [`resolve`]. `embr info` reads here. */
+pub fn read(name: &str) -> Result<Option<Entries>, Error> {
+    let access = Access::of(name)?;
+    if access.is_empty() {
+        return Ok(None);
+    }
+    read_at(&registry::api_url(), &access, name).map(Some)
+}
+
+fn read_at(api: &str, access: &Access, name: &str) -> Result<Entries, Error> {
+    let package: Package = serde_json::from_str(&registry::package(api, name, access)?)
+        .map_err(crate::net::http::error::HttpError::from)?;
+    let mut file = package.versions;
+    if let Some(reason) = package.deprecated {
+        let meta = toml::Table::from_iter([("deprecated".to_string(), reason.into())]);
+        file.insert("meta".to_string(), meta.into());
+    }
+    pesde::entries(&file.into(), DEFAULT_INDEX_URL, name)
+}
+
 fn resolve_at(
     api: &str,
     access: &Access,
@@ -42,13 +66,6 @@ fn resolve_at(
     prefer: Option<(Environment, Language)>,
     pinned: &[semver::Version],
 ) -> Result<ResolvedPackage, Error> {
-    let package: Package = serde_json::from_str(&registry::package(api, name, access)?)
-        .map_err(crate::net::http::error::HttpError::from)?;
-    let mut file = package.versions;
-    if let Some(reason) = package.deprecated {
-        let meta = toml::Table::from_iter([("deprecated".to_string(), reason.into())]);
-        file.insert("meta".to_string(), meta.into());
-    }
     /* each entry has its `download` URL, so the config needs no `api`. a
     dependency with no index stays in the ember index, where a hidden
     dependency resolves through here again */
@@ -56,7 +73,7 @@ fn resolve_at(
         api: None,
         github_oauth_id: None,
     };
-    let found = pesde::entries(&file.into(), DEFAULT_INDEX_URL, name)?;
+    let found = read_at(api, access, name)?;
     pesde::pick(found, DEFAULT_INDEX_URL, &config, name, req, prefer, pinned)
 }
 

@@ -368,6 +368,18 @@ pub enum Error {
     )]
     AliasInBothTables(String),
 
+    /// `embr remove` got a name that no dependency alias or package name matches.
+    #[error("No dependency in ember.toml is named '{name}'; {known}")]
+    DependencyMissing { name: String, known: String },
+
+    /** what `embr tree` and `embr why` read is not on disk, or it does not
+    match ember.toml. both read what install wrote, so an install fixes it. */
+    #[error("{0}; run `embr install` first")]
+    NotInstalledYet(String),
+
+    #[error("No installed package is named '{0}', and no dependency has that alias")]
+    NotADependency(String),
+
     #[error(
         "No [package] table in ember.toml; publishing needs one with a name and version (run `embr init` and choose 'package', or add it by hand)"
     )]
