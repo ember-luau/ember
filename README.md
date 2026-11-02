@@ -133,7 +133,7 @@ sets a key, its own value stays. Lockfiles stay, and `embr install` writes
   later write beside `crater.json`. It gives each registry name's address,
   the realm of each dependency list, and the default of each field, so
   embr keeps no copy of Crater's rules. The package fields, `can_publish`
-  (as `private`), a `.png`, `.jpg`, or `.webp` `icon` (as `logo`),
+  (as `private`), a `.png`, `.jpg`, `.webp`, or `.gif` `icon` (as `logo`),
   `import_to` (as the environment), `path_to_main`, `exclude` or
   `package_files.exclude`, `workspace`, `scripts`, `tools`, and each
   client and server dependency from Ember, Wally, pesde, or Forest move. A
