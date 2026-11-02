@@ -634,7 +634,14 @@ fn plan_wally(text: &str) -> Result<Plan, String> {
         if named {
             package_strings(
                 package,
-                &["name", "version", "description", "license", "repository"],
+                &[
+                    "name",
+                    "version",
+                    "description",
+                    "license",
+                    "repository",
+                    "homepage",
+                ],
                 &mut writes,
             );
             if let Some(private) = package.get("private").and_then(Item::as_bool) {
@@ -1349,9 +1356,15 @@ TestEZ = "roblox/testez@0.4.1"
         let profile = written(&plan, "dependencies", "ProfileService").unwrap();
         assert!(profile.contains("target = \"roblox_server\""), "{profile}");
 
-        assert_eq!(plan.kept, ["package", "place", "dev-dependencies"]);
+        assert_eq!(
+            written(&plan, "package", "homepage").unwrap(),
+            "\"https://acme.dev\""
+        );
+
+        // every [package] key moved, so only the other tables stay behind
+        assert_eq!(plan.kept, ["place", "dev-dependencies"]);
         let rest = plan.rest.unwrap();
-        assert!(rest.contains("homepage"), "{rest}");
+        assert!(!rest.contains("homepage"), "{rest}");
         assert!(!rest.contains("registry"), "{rest}");
     }
 
