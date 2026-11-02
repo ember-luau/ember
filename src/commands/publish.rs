@@ -258,7 +258,8 @@ fn select_targets(targets: &[Target], selected: &[String]) -> Result<Vec<String>
 
 /** packs and uploads the one target that `manifest` holds. `builds` has
 the outcome of each compiler that the selected targets need. `token` is
-the GitHub token, read on the first upload and kept for the next. */
+the Ember token, read on the first upload and kept for the next. a trusted
+publish keeps none. */
 fn publish_target(
     root: &Path,
     manifest: &Manifest,
@@ -332,15 +333,28 @@ fn publish_target(
         return Ok(());
     }
 
-    // EMBER_TOKEN or the stored login first. the browser login only when there is neither
+    // EMBER_TOKEN or the stored login first
     let stored = match token.take() {
-        Some(stored) => stored,
-        None => match auth::token()? {
-            Some(stored) => stored,
-            None => auth::login()?.token,
-        },
+        Some(stored) => Some(stored),
+        None => auth::token()?,
     };
-    let stored = match upload(&stored, oidc_token, &archive) {
+    /* with neither, in a GitHub Actions job with id-token: write, the OIDC
+    token is the credential of a trusted publisher. never the browser login
+    there, CI has no one to approve it. a fresh token for each upload, since
+    one lasts only minutes and a workspace publish makes many uploads */
+    if stored.is_none()
+        && let Some(trusted) = provenance::actions_token()
+    {
+        upload(None, Some(&trusted), &archive)?;
+        ui::print_success(&format!("Published {package} ({id})"));
+        return Ok(());
+    }
+    // the browser login only when there is no token at all
+    let stored = match stored {
+        Some(stored) => stored,
+        None => auth::login()?.token,
+    };
+    let stored = match upload(Some(&stored), oidc_token, &archive) {
         // CI has no one to approve a login
         Err(Error::PublishFailed { status: 401, .. }) if auth::env_token().is_some() => {
             return Err(Error::TokenRejected);
@@ -351,7 +365,7 @@ fn publish_target(
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored token; logging in again");
             let fresh = auth::login()?.token;
-            upload(&fresh, oidc_token, &archive)?;
+            upload(Some(&fresh), oidc_token, &archive)?;
             fresh
         }
         other => {
@@ -472,7 +486,7 @@ fn validate_description(description: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn upload(token: &str, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
+fn upload(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
     ui::with_spinner("Uploading package", || {
         registry::publish(token, oidc_token, archive)
     })
