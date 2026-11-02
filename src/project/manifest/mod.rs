@@ -230,6 +230,9 @@ pub struct Package {
     pub authors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// a link for the registry's package page, such as the package's own docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
     /** a picture of the package, a .png, .jpg, or .webp file inside it. the
