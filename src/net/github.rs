@@ -65,6 +65,19 @@ impl GithubAPI {
             other => other.into(),
         })
     }
+
+    /** the published releases, newest first. GitHub shows a draft only to a
+    token with push access.
+
+    ponytail: one page of 100, so a prerelease behind 100 newer releases is
+    not seen. follow the `Link` header if a repo ever needs more. */
+    pub fn get_releases(&self, repo: &str) -> Result<Vec<responses::Release>, Error> {
+        let url = format!("{BASE_URL}/repos/{repo}/releases?per_page=100");
+        Ok(http::get_json::<Vec<responses::Release>>(
+            &url,
+            &self.headers(),
+        )?)
+    }
 }
 
 impl Default for GithubAPI {

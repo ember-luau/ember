@@ -16,7 +16,11 @@ pub enum SelfCommand {
     /// Install embr to ~/.ember/bin and add it to your PATH
     Install,
     /// Update embr to the latest GitHub release
-    Update,
+    Update {
+        /// Take the newest prerelease while it is newer than the latest release
+        #[arg(long, visible_alias = "beta")]
+        prerelease: bool,
+    },
     /// Remove embr from your system
     Uninstall,
     /// Set up ember.toml IntelliSense in VS Code
@@ -45,7 +49,7 @@ pub enum OnOff {
 pub fn run(command: SelfCommand) -> Result<(), Error> {
     match command {
         SelfCommand::Install => install(),
-        SelfCommand::Update => update(),
+        SelfCommand::Update { prerelease } => update(prerelease),
         SelfCommand::Uninstall => uninstall(),
         SelfCommand::Code => code(),
         SelfCommand::DefaultIndex { index, reset } => default_index(index, reset),
@@ -236,14 +240,22 @@ fn write_embx_launcher(bin_dir: &Path, source: &Path) -> bool {
     }
 }
 
-fn update() -> Result<(), Error> {
+fn update(prerelease: bool) -> Result<(), Error> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     println!("Checking for updates (currently v{current})");
 
     let github = GithubAPI::new();
-    let release: Release = github.get_latest_release(REPO)?;
+    let (latest, release) = if prerelease {
+        newest_release(github.get_releases(REPO)?)
+            .ok_or_else(|| Error::NoReleases(REPO.to_string()))?
+    } else {
+        let release: Release = github.get_latest_release(REPO)?;
+        (
+            Version::parse(release.tag_name.trim_start_matches('v'))?,
+            release,
+        )
+    };
 
-    let latest = Version::parse(release.tag_name.trim_start_matches('v'))?;
     if latest <= current {
         println!("embr is already up to date");
         /* installs from before embx existed still gain the launcher here,
@@ -299,6 +311,21 @@ fn update() -> Result<(), Error> {
 
     println!("Updated embr v{current} -> v{latest}");
     Ok(())
+}
+
+/** the newest published release by semver, prereleases included. a
+prerelease wins only while it is newer than the newest stable release,
+because semver puts `1.0.0-rc.1` before `1.0.0`. a tag that is not a
+version is skipped. */
+fn newest_release(releases: Vec<Release>) -> Option<(Version, Release)> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            let version = Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
+            Some((version, release))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
 }
 
 /** the new embr binary, unpacked out of a release asset into `staging`.
@@ -797,6 +824,44 @@ mod update_tests {
             writer.write_all(b"\x7fELF not really").unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    fn release(tag: &str, draft: bool) -> Release {
+        Release {
+            tag_name: tag.to_string(),
+            assets: Vec::new(),
+            draft,
+        }
+    }
+
+    #[test]
+    fn a_prerelease_wins_only_while_it_is_newer_than_the_latest_release() {
+        let newest = |tags: &[(&str, bool)]| {
+            let releases = tags
+                .iter()
+                .map(|(tag, draft)| release(tag, *draft))
+                .collect();
+            newest_release(releases).map(|(version, _)| version.to_string())
+        };
+
+        let rc = [
+            ("v1.0.0-rc.1", false),
+            ("v0.13.0", false),
+            ("nightly", false),
+        ];
+        assert_eq!(newest(&rc).as_deref(), Some("1.0.0-rc.1"));
+
+        let stable = [
+            ("v1.0.0", false),
+            ("v1.0.0-rc.2", false),
+            ("v1.0.0-rc.1", false),
+        ];
+        assert_eq!(newest(&stable).as_deref(), Some("1.0.0"));
+
+        let draft = [("v1.1.0-rc.1", true), ("v1.0.0", false)];
+        assert_eq!(newest(&draft).as_deref(), Some("1.0.0"));
+
+        assert_eq!(newest(&[("nightly", false)]), None);
     }
 
     fn staging(name: &str) -> PathBuf {

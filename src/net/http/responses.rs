@@ -6,6 +6,8 @@ use serde::Deserialize;
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 #[derive(Deserialize)]
