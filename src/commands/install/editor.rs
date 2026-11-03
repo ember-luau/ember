@@ -44,10 +44,21 @@ pub(super) fn sync(
     packages: &[LockedPackage],
     warn: &mut impl FnMut(String),
 ) {
-    if manifest.config.aliases != Some(false)
-        && let Err(message) = sync_aliases(manifest, dir, packages)
-    {
-        warn(format!("warning: {message}"));
+    if manifest.config.aliases != Some(false) {
+        let wanted = wanted_aliases(manifest, packages);
+        match sync_aliases(dir, &wanted) {
+            // only an install that changes the file says it, so not every install
+            Ok(true) => {
+                if let Some(Some(path)) = wanted.get(OLD_LUWU_ALIAS) {
+                    warn(format!(
+                        "note: `@{OLD_LUWU_ALIAS}` now points at {path} and goes in embr 0.15. Require `@{}` instead",
+                        alias_name(manifest, Environment::Luau)
+                    ));
+                }
+            }
+            Ok(false) => {}
+            Err(message) => warn(format!("warning: {message}")),
+        }
     }
     if manifest.config.definition_files != Some(false)
         && let Err(reason) = sync_definitions(manifest, dir, packages)
@@ -60,19 +71,24 @@ pub(super) fn sync(
 
 /** the alias that embr gives the folder of `environment`. the project's own
 environment gets `packages`, the name the docs give. each other one gets
-`<folder>-packages`, after its `[config]` key, because Luau allows no `/`
-in an alias name. */
+`<folder>-packages`, after its folder name from [`Manifest::packages_dir`],
+because Luau allows no `/` in an alias name. */
 fn alias_name(manifest: &Manifest, environment: Environment) -> String {
     match manifest.target() {
         Some(target) if target.environment == environment => "packages".to_string(),
-        _ => format!("{}-packages", environment.dir_name()),
+        _ => format!("{}-packages", manifest.packages_dir(environment)),
     }
 }
+
+/* ponytail: before 0.14, the portable tree of a Luwu project on another
+runtime had this alias. it keeps the `luwu` folder for the 0.14 series, so
+requires that spell it still work. drop it in 0.15. */
+const OLD_LUWU_ALIAS: &str = "luau-packages";
 
 /** the aliases for the folders that hold links. an instance-require tree
 gets none: its code gets to packages through `script`, never by string. */
 fn wanted_aliases(manifest: &Manifest, packages: &[LockedPackage]) -> Aliases {
-    Environment::ALL
+    let mut aliases: Aliases = Environment::ALL
         .into_iter()
         .map(|environment| {
             let linked = manifest.require_style(environment) == RequireStyle::String
@@ -85,7 +101,14 @@ fn wanted_aliases(manifest: &Manifest, packages: &[LockedPackage]) -> Aliases {
                 linked.then(|| slashed(&path)),
             )
         })
-        .collect()
+        .collect();
+    // the name moved only where the portable tree is not the project's own
+    let portable = alias_name(manifest, Environment::Luau);
+    if portable != "packages" && portable != OLD_LUWU_ALIAS {
+        let path = aliases[&portable].clone();
+        aliases.insert(OLD_LUWU_ALIAS.to_string(), path);
+    }
+    aliases
 }
 
 fn slashed(path: &Path) -> String {
@@ -111,8 +134,8 @@ fn alias_edit(wanted: Option<&str>, current: Option<&str>, dir: &Path) -> Option
 
 /** writes the aliases to the config file of `dir`: `.config.luau` when the
 project has one, else `.luaurc`, which is made only when an alias needs it.
-the error is the whole warning. */
-fn sync_aliases(manifest: &Manifest, dir: &Path, packages: &[LockedPackage]) -> Result<(), String> {
+true when it changed the file. the error is the whole warning. */
+fn sync_aliases(dir: &Path, wanted: &Aliases) -> Result<bool, String> {
     let luaurc = dir.join(LUAURC);
     let config = dir.join(CONFIG_LUAU);
     let (name, path, edit): (&str, &Path, fn(&str, &Aliases, &Path) -> _) = match (
@@ -134,11 +157,11 @@ fn sync_aliases(manifest: &Manifest, dir: &Path, packages: &[LockedPackage]) -> 
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("embr cannot read {name}: {error}")),
     };
-    match edit(&text, &wanted_aliases(manifest, packages), dir) {
-        Ok(Some(new)) => {
-            fs::write(path, new).map_err(|error| format!("embr cannot write {name}: {error}"))
-        }
-        Ok(None) => Ok(()),
+    match edit(&text, wanted, dir) {
+        Ok(Some(new)) => fs::write(path, new)
+            .map(|()| true)
+            .map_err(|error| format!("embr cannot write {name}: {error}")),
+        Ok(None) => Ok(false),
         Err(reason) => Err(format!("embr does not change {name}: {reason}")),
     }
 }
@@ -656,6 +679,48 @@ mod tests {
         );
     }
 
+    /** a Luwu project's portable tree is `packages/luwu`. on its own runtime
+    it is `@packages`. on another runtime it is `@luwu-packages`, and the old
+    `@luau-packages` points at the same folder until 0.15. */
+    #[test]
+    fn a_luwu_project_aliases_the_luwu_folder() {
+        let packages = [locked("acme/color", Some("color"), Environment::Luau)];
+        let aliases = |target: &str| wanted_aliases(&manifest(target), &packages);
+
+        let luau = aliases("[target]\nenvironment = \"luau\"\n");
+        assert_eq!(luau["packages"].as_deref(), Some("./packages/luau"));
+        let lune = aliases("[target]\nenvironment = \"lune\"\n");
+        assert_eq!(lune["luau-packages"].as_deref(), Some("./packages/luau"));
+        assert!(!lune.contains_key("luwu-packages"));
+
+        let luwu = aliases("[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n");
+        assert_eq!(luwu["packages"].as_deref(), Some("./packages/luwu"));
+        assert!(!luwu.contains_key("luau-packages"));
+
+        let seal = aliases("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n");
+        assert_eq!(seal["luwu-packages"].as_deref(), Some("./packages/luwu"));
+        assert_eq!(seal["luau-packages"].as_deref(), Some("./packages/luwu"));
+
+        // the old alias in a .luaurc that an older embr wrote moves to the new folder
+        let dir = scratch("old-luwu-alias");
+        let old = r#"{ "aliases": { "packages": "./packages/seal", "luau-packages": "./packages/luau" } }"#;
+        let new = edit_luaurc(old, &seal, &dir).unwrap().unwrap();
+        assert!(
+            new.contains(r#""luau-packages": "./packages/luwu""#),
+            "{new}"
+        );
+        assert!(
+            new.contains(r#""luwu-packages": "./packages/luwu""#),
+            "{new}"
+        );
+        // with no portable links the old alias goes too, as its folder is gone
+        let none = wanted_aliases(
+            &manifest("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n"),
+            &[],
+        );
+        assert_eq!(none["luau-packages"], None);
+    }
+
     /// a hand-written .luaurc keeps its comments and keys. only embr's aliases move.
     #[test]
     fn luaurc_edits_keep_everything_else() {
@@ -810,9 +875,9 @@ return {
         let roblox = manifest(ROBLOX);
 
         let dir = scratch("which-none");
-        sync_aliases(&roblox, &dir, &[]).unwrap();
+        sync_aliases(&dir, &wanted_aliases(&roblox, &[])).unwrap();
         assert!(!dir.join(LUAURC).exists(), "nothing to write makes no file");
-        sync_aliases(&roblox, &dir, &packages).unwrap();
+        sync_aliases(&dir, &wanted_aliases(&roblox, &packages)).unwrap();
         assert_eq!(
             fs::read_to_string(dir.join(LUAURC)).unwrap(),
             "{\n  \"aliases\": {\n    \"packages\": \"./packages/roblox\"\n  }\n}\n"
@@ -820,7 +885,7 @@ return {
 
         let dir = scratch("which-luau");
         fs::write(dir.join(CONFIG_LUAU), "return {}\n").unwrap();
-        sync_aliases(&roblox, &dir, &packages).unwrap();
+        sync_aliases(&dir, &wanted_aliases(&roblox, &packages)).unwrap();
         assert!(!dir.join(LUAURC).exists());
         assert!(
             fs::read_to_string(dir.join(CONFIG_LUAU))
@@ -831,7 +896,7 @@ return {
         let dir = scratch("which-both");
         fs::write(dir.join(CONFIG_LUAU), "return {}\n").unwrap();
         fs::write(dir.join(LUAURC), "{}").unwrap();
-        assert!(sync_aliases(&roblox, &dir, &packages).is_err());
+        assert!(sync_aliases(&dir, &wanted_aliases(&roblox, &packages)).is_err());
         assert_eq!(fs::read_to_string(dir.join(LUAURC)).unwrap(), "{}");
     }
 

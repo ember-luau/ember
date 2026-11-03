@@ -477,7 +477,7 @@ fn install_steps(
     packages/shared with it and leave the guard inside with nothing to see.
     it prints when it removes something, so it opens the output and the
     sections below separate themselves from it */
-    let mut printed = progress.suspend(|| remove_legacy_roblox_out(manifest));
+    let mut printed = progress.suspend(|| remove_legacy_outs(manifest, previous.as_ref()));
 
     /* installs rebuild from scratch each run. every env's output folder is
     wiped even with nothing to install, so removing the last dependency
@@ -1104,46 +1104,79 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
     Ok(())
 }
 
-/** the pre-rename output folder of what is now the `roblox` environment,
-see [`Environment::Roblox`]. `packages/shared` was the default until the
-rename, and once installs stopped writing there nothing would ever clear
-it: a whole stale tree of link files, which editors go on autocompleting
-and Rojo goes on syncing. so the first install after the rename takes it
-away, and every install after that finds nothing to do.
+/** each old default output folder, see [`Manifest::legacy_packages_outs`].
+`packages/shared` held the roblox packages until the rename, and
+`packages/luau` held the portable packages of a Luwu project until 0.14.
+once installs stop writing there nothing would ever clear the folder: a
+stale tree of link files, which editors go on autocompleting and Rojo goes
+on syncing. so the first install after the move takes embr's files away,
+and every install after that finds nothing to do.
 
-two things keep this from touching anything that isn't embr's. the folder
-must still hold the `.ember` store an install put there, and no [config] key
-may still point an environment at it -- `shared-packages-out` is a
-supported spelling, and a project that aims one at this exact path means
-it. best-effort: a failure to remove costs a stale folder, not an
-install.
+three things keep this from touching anything that isn't embr's. the folder
+must still hold the `.ember` store an install put there. no [config] key may
+still point an environment at it: `shared-packages-out` is a supported
+spelling, and a project that aims one at this exact path means it. and only
+the store and the link files that `lock`, the last install, wrote there go.
+any other file stays, and so does the folder that holds it. best-effort: a
+failure to remove costs a stale folder, not an install.
 
 said out loud, not swept quietly. the project's own source and Rojo files
-may spell `packages/shared` in requires and `$path`s that embr cannot
-rewrite, so the one build this breaks has to arrive with its reason
-attached. returns whether it removed anything. */
-fn remove_legacy_roblox_out(manifest: &Manifest) -> bool {
-    let legacy = Path::new("packages").join("shared");
-    if !legacy.join(STORE_DIR).is_dir() && !legacy.join(LEGACY_STORE_DIR).is_dir() {
-        return false;
+may spell the old folder in requires and `$path`s that embr cannot rewrite,
+so the one build this breaks has to arrive with its reason attached.
+returns whether it removed anything. */
+fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
+    let mut removed = false;
+    for (legacy, environment) in manifest.legacy_packages_outs() {
+        if !legacy.join(STORE_DIR).is_dir() && !legacy.join(LEGACY_STORE_DIR).is_dir() {
+            continue;
+        }
+        // unresolvable paths can't be compared, so nothing may be removed on them
+        let Ok(absolute) = std::path::absolute(&legacy) else {
+            continue;
+        };
+        let claimed = Environment::ALL.into_iter().any(|environment| {
+            std::path::absolute(manifest.packages_out(environment)).is_ok_and(|out| out == absolute)
+        });
+        if claimed {
+            continue;
+        }
+        let _ = fs::remove_dir_all(legacy.join(STORE_DIR));
+        let _ = fs::remove_dir_all(legacy.join(LEGACY_STORE_DIR));
+        let links = lock
+            .into_iter()
+            .flat_map(|lock| &lock.packages)
+            .filter(|package| package.context() == environment)
+            .filter_map(|package| package.link.as_deref())
+            // the lock is a file on disk, so a link must not climb out of the folder
+            .filter(|link| link.split('/').all(is_plain_file_name));
+        for link in links {
+            let file = legacy.join(format!("{link}.luau"));
+            let _ = fs::remove_file(&file);
+            let _ = fs::remove_file(file.with_extension("aly"));
+            // a scoped link sits in a folder of its scope, which goes once it is empty
+            if let Some((scope, _)) = link.split_once('/') {
+                let _ = fs::remove_dir(legacy.join(scope));
+            }
+        }
+        let moved_to = manifest.packages_out(environment);
+        if fs::remove_dir(&legacy).is_ok() {
+            println!(
+                "Removed the old {} folder; the {environment} packages now install to {}",
+                legacy.display(),
+                moved_to.display()
+            );
+        } else {
+            println!(
+                "Removed embr's files from the old {} folder; the {environment} packages now install to {}",
+                legacy.display(),
+                moved_to.display()
+            );
+            println!("The folder stays, because it holds files that embr did not write");
+        }
+        println!("Update any requires or paths that still spell it");
+        removed = true;
     }
-    // unresolvable paths can't be compared, so nothing may be removed on them
-    let Ok(absolute) = std::path::absolute(&legacy) else {
-        return false;
-    };
-    let claimed = Environment::ALL.into_iter().any(|environment| {
-        std::path::absolute(manifest.packages_out(environment)).is_ok_and(|out| out == absolute)
-    });
-    if claimed || fs::remove_dir_all(&legacy).is_err() {
-        return false;
-    }
-    println!(
-        "Removed the old {} folder; the roblox environment now installs to {}",
-        legacy.display(),
-        manifest.packages_out(Environment::Roblox).display()
-    );
-    println!("Update any requires or Rojo paths that still spell it");
-    true
+    removed
 }
 
 /** stamps every environment that received packages with the state hash.
@@ -2818,9 +2851,10 @@ mod tests {
         );
     }
 
-    /** the one destructive path this rename added. it must take the store
-    an older embr left behind, and nothing else: not a folder of the user's
-    own that happens to sit there, and not the output folder of a project
+    /** the one destructive path these moves added. it must take the store
+    an older embr left behind and the links that the lock names, and nothing
+    else: not a folder of the user's own that happens to sit there, not a
+    file of the user's own inside it, and not the output folder of a project
     that deliberately still points an environment at that path. */
     #[test]
     fn the_legacy_output_folder_goes_only_when_it_is_embr_s() {
@@ -2833,38 +2867,78 @@ mod tests {
             "{PACKAGE}\n[config]\nshared-packages-out = \"packages/shared\"\n"
         ))
         .unwrap();
-
-        let setup = |store: bool| {
-            let _ = fs::remove_dir_all(&base);
-            fs::create_dir_all(base.join("packages/shared")).unwrap();
-            if store {
-                fs::create_dir_all(base.join("packages/shared/.ember/acme_thing")).unwrap();
+        let lock = |environment: &str, links: &[&str]| -> Lockfile {
+            let mut text = "version = 2\n".to_string();
+            for link in links {
+                text.push_str(&format!(
+                    "\n[[package]]\nname = \"acme/{link}\"\nversion = \"1.0.0\"\n\
+                     environment = \"{environment}\"\nlink = \"{link}\"\n\
+                     index = \"https://example.com/index\"\ntype = \"zip\"\nurl = \"https://example.com/{link}\"\n"
+                ));
             }
-            fs::write(base.join("packages/shared/Thing.luau"), "return nil\n").unwrap();
+            toml::from_str(&text).unwrap()
+        };
+        let roblox = lock("shared", &["Thing", "acme/Scoped"]);
+
+        let setup = |folder: &str, store: bool| {
+            let _ = fs::remove_dir_all(&base);
+            let legacy = base.join("packages").join(folder);
+            fs::create_dir_all(legacy.join("acme")).unwrap();
+            if store {
+                fs::create_dir_all(legacy.join(".ember/acme_thing")).unwrap();
+            }
+            fs::write(legacy.join("Thing.luau"), "return nil\n").unwrap();
+            fs::write(legacy.join("acme/Scoped.luau"), "return nil\n").unwrap();
         };
         // the function reads relative paths, so it has to run from the project
-        let in_base = |manifest: &Manifest| {
-            crate::project::workspace::in_dir(&base, || Ok(remove_legacy_roblox_out(manifest)))
-                .unwrap()
+        let in_base = |manifest: &Manifest, lock: &Lockfile| {
+            crate::project::workspace::in_dir(&base, || {
+                Ok(remove_legacy_outs(manifest, Some(lock)))
+            })
+            .unwrap()
         };
 
         // an embr store from before the rename goes, and says so
-        setup(true);
-        assert!(in_base(&plain));
+        setup("shared", true);
+        assert!(in_base(&plain, &roblox));
         assert!(!base.join("packages/shared").exists());
         // ...and a second install finds nothing left to do
-        assert!(!in_base(&plain));
+        assert!(!in_base(&plain, &roblox));
 
         /* a folder of the user's own that merely shares the name is not an
         install output: no `.ember`, no removal */
-        setup(false);
-        assert!(!in_base(&plain));
+        setup("shared", false);
+        assert!(!in_base(&plain, &roblox));
         assert!(base.join("packages/shared/Thing.luau").exists());
 
         // and a project that still aims an environment there keeps it
-        setup(true);
-        assert!(!in_base(&claimed));
+        setup("shared", true);
+        assert!(!in_base(&claimed, &roblox));
         assert!(base.join("packages/shared/.ember").exists());
+
+        /* a Luwu project's packages/luau goes the same way. a file that
+        the lock does not name is the user's, so it and its folder stay */
+        let luwu: Manifest =
+            toml::from_str("[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n").unwrap();
+        let portable = lock("luau", &["Thing", "acme/Scoped", "../outside"]);
+        setup("luau", true);
+        fs::write(base.join("packages/luau/notes.md"), "mine\n").unwrap();
+        fs::write(base.join("packages/outside.luau"), "mine\n").unwrap();
+        assert!(in_base(&luwu, &portable));
+        // a link that climbs out of the folder names nothing that embr wrote
+        assert!(base.join("packages/outside.luau").exists());
+        let old = base.join("packages/luau");
+        assert!(!old.join(".ember").exists());
+        assert!(!old.join("Thing.luau").exists());
+        assert!(!old.join("acme").exists());
+        assert!(old.join("notes.md").exists());
+        // with only the user's file left, the next install has nothing to do
+        assert!(!in_base(&luwu, &portable));
+
+        // a Luau project still installs there, so its folder is no legacy
+        setup("luau", true);
+        assert!(!in_base(&plain, &portable));
+        assert!(old.join("Thing.luau").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

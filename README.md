@@ -87,7 +87,9 @@ entries in `settings.json` survive the edit.
 3. **Runtime:** Roblox, Roblox Server, Lune, Lute, Seal, Zune, or portable
    Luau. Loom offers the two Roblox sides only. Luwu gets no question:
    embr gives Luwu code the portable Luau environment, and a Luwu host such as
-   [Seal](https://github.com/seal-runtime/seal) runs it.
+   [Seal](https://github.com/seal-runtime/seal) runs it. A Luwu project
+   installs those packages to `packages/luwu`, because Luwu code does not
+   run as Luau.
 
 The answers go into `[target]`, so the project takes only packages it can
 run. Flags answer the questions for scripts and CI:
@@ -453,7 +455,9 @@ model at publish and refuses:
   alias. The folder of the project's own environment gets `packages`, so
   `require("@packages/core")` works. Each other folder gets
   `<folder>-packages`, such as `server-packages` for `packages/server`,
-  because Luau allows no `/` in an alias name. The aliases go into
+  because Luau allows no `/` in an alias name. In a Luwu project on another
+  runtime, `packages/luwu` gets `luwu-packages`, and the old
+  `luau-packages` points there too until embr 0.15. The aliases go into
   `.config.luau` when the project has one, else into `.luaurc`. embr makes
   a `.luaurc` only when an alias needs it. A folder with both files gets no
   aliases, because Luau refuses that folder. A tree with
