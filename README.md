@@ -51,6 +51,7 @@ Restart your terminal, then:
 ```sh
 embr --version
 embr self update    # pulls the newest release when there is one
+embr self update --prerelease    # or the newest prerelease, while it is newer
 ```
 
 ### With cargo
