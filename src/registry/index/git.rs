@@ -273,8 +273,16 @@ pub fn export(url: &str, rev: &str, dest: &Path) -> Result<(), Error> {
         url: url.to_string(),
         reason,
     };
+    /* `verbatim`: with core.autocrlf, as git for windows sets it, the
+    archive would get CRLF line ends that the commit does not have */
     let output = Command::new("git")
-        .args(["-C", &dir.to_string_lossy(), "archive", "--format=tar", rev])
+        .args(git::verbatim(&[
+            "-C",
+            &dir.to_string_lossy(),
+            "archive",
+            "--format=tar",
+            rev,
+        ]))
         .output()
         .map_err(|error| failed(format!("could not run git: {error}")))?;
     if !output.status.success() {
