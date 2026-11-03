@@ -639,6 +639,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
             source: DownloadSource::Zip {
                 url: format!("https://example.com/{name}"),
             },

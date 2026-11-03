@@ -3,7 +3,7 @@ use crate::net::registry;
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{
-    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Manifest, parse_version_req, split_package_name,
+    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Manifest, features, parse_version_req, split_package_name,
 };
 use crate::registry::index::{Index, Refresh};
 use crate::registry::local;
@@ -42,6 +42,12 @@ pub struct AddArgs {
     /// Write to [peer-dependencies], for a package the projects that use this one must provide
     #[arg(long, conflicts_with = "dev")]
     pub peer: bool,
+    /// Turn on these features of the package, comma-separated
+    #[arg(long, value_delimiter = ',', value_name = "FEATURES")]
+    pub features: Vec<String>,
+    /// Turn off the features that the package's `default` lists
+    #[arg(long)]
+    pub no_default_features: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -146,6 +152,35 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if args.optional {
         entry.insert("optional", true.into());
     }
+    // a feature that the version does not have would fail the next install
+    let known =
+        |feature: &str| feature == features::DEFAULT || package.features.contains_key(feature);
+    if let Some(feature) = args.features.iter().find(|feature| !known(feature)) {
+        let names: Vec<&str> = package
+            .features
+            .keys()
+            .map(String::as_str)
+            .filter(|name| *name != features::DEFAULT)
+            .collect();
+        return Err(Error::FeatureUnknown {
+            package: format!("{name}@{}", package.version),
+            feature: feature.clone(),
+            by: "--features".to_string(),
+            known: match names.as_slice() {
+                [] => "it has no features".to_string(),
+                names => format!("its features are {}", names.join(", ")),
+            },
+        });
+    }
+    if !args.features.is_empty() {
+        entry.insert(
+            "features",
+            toml_edit::Value::Array(args.features.iter().collect()),
+        );
+    }
+    if args.no_default_features {
+        entry.insert("default-features", false.into());
+    }
     let table = match (args.dev, args.peer) {
         (true, _) => "dev-dependencies",
         (_, true) => "peer-dependencies",
@@ -170,11 +205,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     }
     let dependencies = document.table_or_create(table)?;
     /* re-adding an alias rewrites its whole entry, which is how a version
-    bump works. `target`, `key` and `optional` are carried over when this
-    run does not set them. dropping `target` would quietly move that
-    dependency's whole subtree back into another environment root on the
-    next install, dropping `key` would lose the link, and a version bump
-    must not make an optional dependency required. see `Dependency::target` */
+    bump works. `target`, `key`, `optional`, `features` and
+    `default-features` are carried over when this run does not set them.
+    dropping `target` would quietly move that dependency's whole subtree
+    back into another environment root on the next install, dropping `key`
+    would lose the link, and a version bump must not make an optional
+    dependency required or turn its features off. see `Dependency::target` */
     if let Some(existing) = dependencies.get(&alias) {
         for carried in ["target", "key"] {
             if !entry.contains_key(carried)
@@ -185,6 +221,13 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         }
         if existing.get("optional").and_then(|value| value.as_bool()) == Some(true) {
             entry.insert("optional", true.into());
+        }
+        for carried in ["features", "default-features"] {
+            if !entry.contains_key(carried)
+                && let Some(value) = existing.get(carried).and_then(|value| value.as_value())
+            {
+                entry.insert(carried, value.clone());
+            }
         }
     }
     dependencies.insert(&alias, toml_edit::value(entry));

@@ -94,7 +94,10 @@ pub struct ResolvedPackage {
     pub deprecated: Option<String>,
     /// the whole package's deprecation reason, pesde's `[meta] deprecated`.
     pub package_deprecated: Option<String>,
+    /// every dependency the resolver may install, the gated ones included.
     pub dependencies: Vec<TransitiveDependency>,
+    /// the entry's `features`, see [`crate::project::manifest::features`].
+    pub features: crate::project::manifest::features::Features,
     pub source: DownloadSource,
     /** lowercase hex SHA-256 of the archive, from the entry's `sha256` or
     Forest's `integrity`. None when the index records no hash. */
@@ -110,6 +113,10 @@ pub struct TransitiveDependency {
     pub alias: String,
     /// install skips it when it does not resolve, see [`Dependency::optional`](crate::project::manifest::Dependency::optional).
     pub optional: bool,
+    /// the features the parent turns on in it, see [`Dependency::features`](crate::project::manifest::Dependency::features).
+    pub features: Vec<String>,
+    /// `default-features`, true unless the parent turns the defaults off.
+    pub default_features: bool,
 }
 
 /** Everything needed to re-download a resolved package, also stored in

@@ -1183,6 +1183,35 @@ impl DependencyKind {
     }
 }
 
+/** the aliases of the dependencies that a feature of the package at `dir`
+gates and that its `enabled` features leave off, from its shipped
+ember.toml or lpm.toml. install did not install them, so the nested-link
+pass gives them no link and no warning. a manifest that is not there or
+does not parse gates nothing. */
+pub fn features_off(dir: &Path, enabled: &[String]) -> std::collections::BTreeSet<String> {
+    use crate::project::manifest::features;
+    let parsed = [MANIFEST_FILE, LEGACY_MANIFEST_FILE]
+        .into_iter()
+        .find_map(|file| {
+            fs::read_to_string(dir.join(file))
+                .ok()?
+                .parse::<toml::Table>()
+                .ok()
+        });
+    let Some(parsed) = parsed else {
+        return std::collections::BTreeSet::new();
+    };
+    let table: features::Features = parsed
+        .get("features")
+        .cloned()
+        .and_then(|table| table.try_into().ok())
+        .unwrap_or_default();
+    let aliases = parsed.get("dependencies").and_then(toml::Value::as_table);
+    let is_alias = |alias: &str| aliases.is_some_and(|aliases| aliases.contains_key(alias));
+    let enabled = enabled.iter().cloned().collect();
+    features::off(&table, &enabled, &is_alias)
+}
+
 /// a package's forest.json, if it ships one that parses.
 fn forest_manifest(dir: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&fs::read_to_string(dir.join("forest.json")).ok()?).ok()

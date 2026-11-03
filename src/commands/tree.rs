@@ -197,8 +197,11 @@ impl<'lock> Graph<'lock> {
             } else {
                 package::declared_dependencies(&storage)
             };
+            // a gated dependency that no enabled feature lists is no edge
+            let off = package::features_off(&storage, &package.features);
             let edges = declared
                 .into_iter()
+                .filter(|(alias, ..)| !off.contains(alias))
                 .filter_map(|(alias, declared, kind)| {
                     // an [overrides] redirect on this edge installed the replacement
                     let name = package.redirects.get(&alias).unwrap_or(&declared);
@@ -231,11 +234,15 @@ impl<'lock> Graph<'lock> {
         contexts
     }
 
-    /** `scope/name@version`. the alias follows when it is not the short
-    name, because the alias names the link file. */
+    /** `scope/name@version`, then its enabled features in brackets. the
+    alias follows when it is not the short name, because the alias names
+    the link file. */
     fn label(&self, node: usize, alias: &str) -> String {
         let package = &self.packages[node];
         let mut label = format!("{}@{}", package.name, package.version);
+        if !package.features.is_empty() {
+            label.push_str(&format!(" [{}]", package.features.join(", ")));
+        }
         if package.name.rsplit('/').next() != Some(alias) {
             label.push_str(&format!(" as '{alias}'").dark_grey().to_string());
         }
@@ -373,6 +380,7 @@ impl<'lock> Graph<'lock> {
             "name": package.name,
             "version": package.version,
             "environment": package.context().as_str(),
+            "features": package.features,
             "optional": matches!(kind, DependencyKind::Optional),
             "peer": matches!(kind, DependencyKind::Peer(_)),
             "repeated": repeated,
@@ -786,6 +794,7 @@ mod tests {
                 "name": name,
                 "version": version,
                 "environment": environment,
+                "features": [],
                 "optional": false,
                 "peer": false,
                 "repeated": false,
@@ -875,6 +884,47 @@ mod tests {
                 }],
             })
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** the tree shows the enabled features of each package. a gated
+    dependency that its features leave off is no edge, also when another
+    package installed the same package in this root. */
+    #[test]
+    fn features_show_and_a_gated_dependency_that_is_off_is_no_edge() {
+        let base = std::env::temp_dir().join("embr-test-tree-features");
+        let _ = fs::remove_dir_all(&base);
+        let store = base.join("packages/roblox/.ember");
+        let ui = "[dependencies]\nicons = { name = \"acme/icons\", version = \"^1\" }\n\
+                  theme = { name = \"acme/theme\", version = \"^1\" }\n\
+                  [features]\npretty = [\"icons\"]\ndark = [\"theme/dark\"]\n";
+        write(&store.join("acme_ui"), "ember.toml", ui);
+        write(&store.join("acme_theme"), "init.luau", "");
+        write(&store.join("acme_icons"), "init.luau", "");
+        let manifest: Manifest = toml::from_str(
+            "[target]\nenvironment = \"roblox\"\n[dependencies]\n\
+             ui = { name = \"acme/ui\", version = \"^1\", features = [\"dark\"] }\n\
+             icons = { name = \"acme/icons\", version = \"^1\" }\n",
+        )
+        .unwrap();
+        let lock: Lockfile = toml::from_str(
+            "version = 2\n\
+             [[package]]\nname = \"acme/icons\"\nversion = \"1.0.0\"\nenvironment = \"roblox\"\nlink = \"icons\"\nindex = \"i\"\ntype = \"tar-gz\"\nurl = \"u\"\n\
+             [[package]]\nname = \"acme/theme\"\nversion = \"1.0.0\"\nenvironment = \"roblox\"\nfeatures = [\"dark\"]\nindex = \"i\"\ntype = \"tar-gz\"\nurl = \"u\"\n\
+             [[package]]\nname = \"acme/ui\"\nversion = \"1.2.0\"\nenvironment = \"roblox\"\nlink = \"ui\"\nfeatures = [\"dark\"]\nindex = \"i\"\ntype = \"tar-gz\"\nurl = \"u\"\n",
+        )
+        .unwrap();
+        let graph = Graph::read(&manifest, &lock, &base).unwrap();
+        assert_eq!(
+            plain(&graph.tree(None)),
+            "acme/icons@1.0.0\n\
+             acme/ui@1.2.0 [dark]\n\
+             └── acme/theme@1.0.0 [dark]\n"
+        );
+        let ui = &graph.tree_json(None)["dependencies"][1];
+        assert_eq!(ui["features"], json!(["dark"]));
+        assert_eq!(ui["dependencies"][0]["name"], "acme/theme");
+        assert_eq!(ui["dependencies"].as_array().unwrap().len(), 1);
         let _ = fs::remove_dir_all(&base);
     }
 

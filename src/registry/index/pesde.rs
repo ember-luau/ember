@@ -99,6 +99,14 @@ pub(crate) fn pick(
     let candidate = same_version.swap_remove(picked);
 
     let dependencies = parse_dependencies(&candidate.entry, index_url)?;
+    /* the registry checks the table at publish. one of another shape reads
+    as none, so its gated dependencies stay out */
+    let features = candidate
+        .entry
+        .get("features")
+        .cloned()
+        .and_then(|table| table.try_into().ok())
+        .unwrap_or_default();
     let source = download_source(config, index_url, name, &candidate)?;
     let sha256 = sha256_of(&candidate, name)?;
 
@@ -110,6 +118,7 @@ pub(crate) fn pick(
         deprecated: candidate.deprecated,
         package_deprecated,
         dependencies,
+        features,
         source,
         sha256,
     })
@@ -314,19 +323,25 @@ fn download_source(
 }
 
 /** the dependencies of an entry that install resolves. an ember entry
-keeps its optional ones in `optional-dependencies`, so an embr before
-0.14.0 never sees them and cannot fail on them. its peers are in
+keeps its optional ones in `optional-dependencies` and the ones that a
+feature gates in `feature-dependencies`, so an embr before 0.14.0 never
+sees them and cannot fail on them. the resolver reads the entry's
+`features` to know when a gated one installs. its peers are in
 `peer-dependencies`, which install never reads: a peer is never installed. */
 pub fn parse_dependencies(
     entry: &Value,
     index_url: &str,
 ) -> Result<Vec<TransitiveDependency>, Error> {
-    let tables = ["dependencies", "optional-dependencies"]
-        .into_iter()
-        .filter_map(|table| match entry.get(table) {
-            Some(Value::Table(dependencies)) => Some((table, dependencies)),
-            _ => None,
-        });
+    let tables = [
+        "dependencies",
+        "optional-dependencies",
+        "feature-dependencies",
+    ]
+    .into_iter()
+    .filter_map(|table| match entry.get(table) {
+        Some(Value::Table(dependencies)) => Some((table, dependencies)),
+        _ => None,
+    });
 
     let mut parsed = Vec::new();
     for (table, alias, spec) in
@@ -396,6 +411,15 @@ pub fn parse_dependencies(
             index_url: dep_index_url,
             alias: alias.clone(),
             optional,
+            features: spec
+                .get("features")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            default_features: spec.get("default-features").and_then(Value::as_bool) != Some(false),
         });
     }
 
@@ -523,6 +547,38 @@ mod tests {
             .map(|d| (d.alias.as_str(), d.optional))
             .collect();
         assert_eq!(names, [("foo", false), ("signal", true)]);
+    }
+
+    /** an entry keeps the dependencies that a feature gates in
+    `feature-dependencies`, which an embr before 0.14.0 does not read. a
+    dependency entry passes the features it turns on through. */
+    #[test]
+    fn feature_dependencies_come_from_their_table_with_their_features() {
+        let entry = parse_entries(
+            r#"
+            [dependencies]
+            ui = { name = "acme/ui", version = "^1.0.0", features = ["icons"], default-features = false }
+
+            [feature-dependencies]
+            svg = { name = "acme/svg", version = "^2.0.0" }
+
+            [features]
+            default = ["pretty"]
+            pretty = ["svg", "ui/dark"]
+            "#,
+        );
+        let deps = parse_dependencies(&entry, "https://example.com/index").unwrap();
+        let shown: Vec<(&str, &[String], bool)> = deps
+            .iter()
+            .map(|d| (d.alias.as_str(), d.features.as_slice(), d.default_features))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("ui", &["icons".to_string()][..], false),
+                ("svg", &[][..], true)
+            ]
+        );
     }
 
     #[test]

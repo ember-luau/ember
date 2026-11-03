@@ -417,6 +417,8 @@ fn convert_workspace_dependencies(
             version,
             target,
             entry,
+            features,
+            default_features,
         } = dependency
         else {
             continue;
@@ -452,6 +454,9 @@ fn convert_workspace_dependencies(
             entry: entry.clone(),
             key: None,
             optional: false,
+            // the features it turns on in the member stay on
+            features: features.clone(),
+            default_features: *default_features,
         };
     }
     Ok(())
@@ -658,6 +663,8 @@ mod tests {
                 version: "^".to_string(),
                 target: None,
                 entry: None,
+                features: Vec::new(),
+                default_features: true,
             },
         );
         assert!(matches!(
