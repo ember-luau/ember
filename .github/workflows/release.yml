@@ -269,6 +269,8 @@ jobs:
           # formula for the audit, the install and the test.
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           brew tap-new --no-git ember-luau/tap
+          # Homebrew refuses a formula from a tap it does not trust.
+          brew trust ember-luau/tap
           cp out/embr.rb "$(brew --repository ember-luau/tap)/Formula/embr.rb"
           brew audit --strict --online --formula ember-luau/tap/embr
           brew install --formula ember-luau/tap/embr
