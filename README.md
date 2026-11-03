@@ -241,25 +241,31 @@ environment gets a heading.
 
 ## `embr notices`: what the owners say
 
-The owners of a package can post a notice or a warning on the package or
-on a range of its versions. `embr install` and `embr add` end with one line
-for each item:
+The owners of a package can post a notice, a warning, or a security notice
+on the package or on a range of its versions. A security notice names a
+known vulnerability or a malicious version. `embr install` and `embr add`
+end with one line for each item, security notices first, in red:
 
 ```text
+security: acme/fuel@0.2.0: 0.2.0 sends the place file to a remote host
 warning: acme/rocket@1.0.0: 1.x leaks memory
 deprecated: acme/old: no longer kept up, use acme/new instead
 notice: acme/rocket: the docs moved to rocket.dev
 ```
 
-- A warning and a deprecation show on each install. A notice shows when
-  the install adds or updates the package.
+- A security notice, a warning and a deprecation show on each install. A
+  notice shows when the install adds or updates the package.
 - `embr notices` lists every notice, warning, deprecation and yank of the
   installed packages, with the dependency that brings each one in. It
-  exits with 0. `embr notices --deny warnings,deprecations` exits with 1
-  when one of them applies, for CI.
+  exits with 0. `embr notices --deny security,warnings,deprecations` exits
+  with 1 when one of them applies, for CI.
+- `embr audit` lists only the security notices and the yanked versions.
+  It exits with 1 when a security notice applies, else with 0.
+  `--deny warnings` (or another kind) also fails it on that kind.
 - The owners post with `embr notices add acme/rocket "1.x leaks memory"
-  --warning --versions "<2.0.0"`, and remove with `embr notices remove
-  acme/rocket <id>`. `embr info` shows each id.
+  --warning --versions "<2.0.0"`, or `--security` for a security notice,
+  and remove with `embr notices remove acme/rocket <id>`. `embr info`
+  shows each id.
 - `embr deprecate acme/old "no longer kept up" --use acme/new` names the
   package to use instead.
 
