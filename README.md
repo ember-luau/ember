@@ -40,6 +40,10 @@ chmod +x embr-macos-aarch64
 .\embr-windows-x86_64.exe self install
 ```
 
+From 0.14.0 on, each release has a `SHA256SUMS` file. To check a download,
+run `sha256sum --check --ignore-missing SHA256SUMS` in its folder (on macOS,
+`shasum -a 256 --check --ignore-missing SHA256SUMS`).
+
 `self install` copies embr to `~/.ember/bin`. On Windows it adds that folder to
 your PATH for you; elsewhere it prints the line to add to your shell profile.
 Restart your terminal, then:
