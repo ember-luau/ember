@@ -81,6 +81,11 @@ pub fn index_cache_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("index-cache"))
 }
 
+/// ~/.ember/templates, one folder per template that `embr template save` keeps.
+pub fn templates_dir() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("templates"))
+}
+
 /// ~/.ember/local, the registry that `embr publish --local` writes.
 pub fn local_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("local"))
@@ -141,6 +146,7 @@ mod tests {
             global_tools_file().unwrap(),
             credentials_file().unwrap(),
             index_cache_dir().unwrap(),
+            templates_dir().unwrap(),
         ] {
             assert!(
                 path.starts_with(&root),

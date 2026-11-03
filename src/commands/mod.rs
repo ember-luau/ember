@@ -18,6 +18,7 @@ pub mod script;
 pub mod search;
 pub mod self_cmd;
 pub mod studio;
+pub mod template;
 pub mod tool;
 pub mod tree;
 pub mod yank;

@@ -33,6 +33,9 @@ path = "src/main.rs"
 # wrap_help so `Command::term_width` is honoured: the help beside the logo has
 # to wrap inside its own column, and without the feature clap ignores the width
 # and long lines run past the terminal. See main::print_root_help.
+# base64 for the GitHub blob API. ureq already depends on it, so it costs
+# the binary nothing new.
+base64 = "0.22"
 clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
 crossterm = "0.25"
 dirs = "6.0.0"

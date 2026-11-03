@@ -84,6 +84,16 @@ pub enum Error {
     #[error("{0}")]
     InitArgs(String),
 
+    /// a template that embr cannot save, find, or unpack
+    #[error("{0}")]
+    Template(String),
+
+    #[error("No GitHub token found; log in with `gh auth login`, or set GH_TOKEN or GITHUB_TOKEN")]
+    GithubTokenMissing,
+
+    #[error("GitHub refused the request ({status}): {message}")]
+    GithubRefused { status: u16, message: String },
+
     #[error(
         "Package archive is {size_mb:.1} MB; the registry accepts at most {limit_mb} MB. Trim it with `includes`/`excludes` under [target]"
     )]
