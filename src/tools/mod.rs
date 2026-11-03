@@ -1,8 +1,10 @@
 /*! GitHub-released binaries a project pins by version. this module stores
 and installs them. `archive` picks and unpacks the right release asset,
-`shim` maps an alias to one of the stored binaries. */
+`shim` maps an alias to one of the stored binaries. `npm` does the same
+for tools that npm publishes. */
 
 pub mod archive;
+pub mod npm;
 pub mod shim;
 
 use crate::error::Error;
@@ -87,10 +89,11 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
         return Err(Error::ReservedToolAlias(alias.to_string()));
     }
-    Ok(
-        stored_is_usable(&stored_executable(&tool.repository, &tool.version)?)
-            && shim::path(alias)?.exists(),
-    )
+    let stored = match tool.npm_package() {
+        Some(package) => npm::is_stored(package, &tool.version)?,
+        None => stored_is_usable(&stored_executable(&tool.repository, &tool.version)?),
+    };
+    Ok(stored && shim::path(alias)?.exists())
 }
 
 /** Installs a manifest tool, skipping the network when the version is
@@ -105,6 +108,11 @@ pub fn install_tool(
 ) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
         return Err(Error::ReservedToolAlias(alias.to_string()));
+    }
+    if let Some(package) = tool.npm_package() {
+        let installed = npm::install(package, &tool.version)?;
+        shim::write(&shim::path(alias)?)?;
+        return Ok(installed);
     }
     let stored = stored_executable(&tool.repository, &tool.version)?;
     if stored_is_usable(&stored) {

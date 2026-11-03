@@ -64,7 +64,7 @@ pub enum Commands {
     #[command(visible_alias = "x")]
     Execute(commands::execute::ExecuteArgs),
 
-    /// Set up and open this project's place in Roblox Studio
+    /// Set up and open this project's place in Roblox Studio, and push packages to it
     #[command(arg_required_else_help = true)]
     Studio {
         #[command(subcommand)]

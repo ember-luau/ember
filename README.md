@@ -157,6 +157,28 @@ hands your terminal straight to it — nothing is added to any manifest. Names
 pinned under `[tools]` run their pinned version; other bare names come from
 embr's shorthand list; anything else is `owner/repo`.
 
+## `embr studio push`: packages in Studio with Azul
+
+```toml
+[studio]
+sync = "azul"    # optional: a sync/ folder with a Studio service in it also tells embr
+
+[tools]
+azul = "npm:azul-sync@2.4.0"    # npm tools need Node.js
+```
+
+[Azul](https://azul.ransomwave.games) mirrors Studio to disk, so it does not
+read the packages folders into Studio. `embr studio push` runs
+`azul push --source <folder> --destination <path> --destructive --rojo --no-warn`
+for each installed folder. The roblox packages go to
+`ReplicatedStorage.Packages` and the server packages go to
+`ServerStorage.Packages`. `roblox-packages` and `server-packages` under
+`[studio]` change that. After `embr install` changes a folder, embr pushes
+it, if Studio is open and the Azul plugin connects in 15 seconds. Else embr
+prints one line, and the install does not fail. embr adds the copies that
+Azul mirrors back, such as `sync/ReplicatedStorage/Packages/`, to
+`.gitignore`, and `embr publish` does not pack them.
+
 ## `embr remove`: take out a dependency
 
 ```sh

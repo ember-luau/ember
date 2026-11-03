@@ -49,14 +49,26 @@ pub fn invoked_as_embx() -> bool {
 exit code only comes back on platforms without exec, meaning windows. */
 pub fn run(alias: &str) -> Result<i32, Error> {
     let tool = resolve_alias(alias, &env::current_dir()?, &paths::global_tools_file()?)?;
-    let stored = stored_executable(&tool.repository, &tool.version)?;
-    if !stored.exists() {
-        return Err(Error::ToolNotInstalled(alias.to_string()));
-    }
-
-    let mut command = std::process::Command::new(&stored);
+    let mut command = match tool.npm_package() {
+        Some(package) => super::npm::command(alias, package, &tool.version)?,
+        None => {
+            let stored = stored_executable(&tool.repository, &tool.version)?;
+            if !stored.exists() {
+                return Err(Error::ToolNotInstalled(alias.to_string()));
+            }
+            std::process::Command::new(&stored)
+        }
+    };
     command.args(env::args_os().skip(1));
-    process::exec(command)
+    match process::exec(command) {
+        // the npm command is node, and a missing node deserves its own message
+        Err(Error::Io(error))
+            if tool.npm_package().is_some() && error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Err(Error::NodeMissing)
+        }
+        result => result,
+    }
 }
 
 /// the shim an alias is invoked through, e.g. ~/.ember/bin/stylua.

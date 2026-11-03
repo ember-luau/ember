@@ -1,5 +1,6 @@
 use crate::error::Error;
-use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest, is_manifest};
+use crate::project::azul;
+use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest, SyncTool, is_manifest};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,11 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
     walk straight into a whole vendored `.ember` store and ship somebody
     else's packages inside this archive */
     out_dirs.push(Path::new("packages").join("shared"));
+    /* Azul mirrors the packages that embr pushed into Studio back to disk.
+    those copies are somebody else's packages too */
+    if azul::sync_tool(manifest, root) == SyncTool::Azul {
+        out_dirs.extend(azul::mirror_dirs(manifest));
+    }
 
     let mut files = Vec::new();
     walk(root, root, &out_dirs, &mut files)?;
@@ -245,6 +251,36 @@ mod tests {
         assert_eq!(
             files,
             vec![PathBuf::from("ember.toml"), PathBuf::from("src/init.luau")]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn never_packs_the_packages_that_azul_mirrors_back() {
+        let base = std::env::temp_dir().join("embr-test-pack-azul-mirror");
+        let _ = fs::remove_dir_all(&base);
+
+        write(&base, "ember.toml", "");
+        // the package's own code lives in the mirror, so that part ships
+        write(&base, "sync/ReplicatedStorage/Lib/init.luau", "return {}");
+        write(&base, "sync/ReplicatedStorage/Packages/promise.luau", "");
+        write(&base, "sync/ServerStorage/Packages/lapis.luau", "");
+
+        let manifest = parse_manifest(
+            r#"
+            [package]
+            name = "acme/rocket"
+            version = "1.0.0"
+            "#,
+        );
+        let files = packed_files(&base, &manifest).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("ember.toml"),
+                PathBuf::from("sync/ReplicatedStorage/Lib/init.luau"),
+            ]
         );
 
         let _ = fs::remove_dir_all(&base);

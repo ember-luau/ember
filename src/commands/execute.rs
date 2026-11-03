@@ -7,7 +7,7 @@ network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
-use crate::project::manifest::Tool;
+use crate::project::manifest::{NPM_PREFIX, Tool};
 use crate::sys::{paths, process};
 use crate::tools;
 use clap::Args;
@@ -81,6 +81,18 @@ pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
         )?
     };
     let (repository, version) = pick(&spec, pinned.as_ref())?;
+
+    // a tool that npm publishes runs through node, see `tools::npm`
+    if let Some(package) = repository.strip_prefix(NPM_PREFIX) {
+        let version = match version {
+            Some(version) => version,
+            None => tools::npm::latest(package)?,
+        };
+        tools::npm::install(package, &version)?;
+        let mut executable = tools::npm::command(&spec.name, package, &version)?;
+        executable.args(command);
+        return process::exec(executable);
+    }
 
     let github = GithubAPI::new();
     let stored = match &version {

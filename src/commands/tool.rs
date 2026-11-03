@@ -4,8 +4,9 @@ use crate::{
     error::Error,
     net::github::GithubAPI,
     project::manifest::{
-        Tool,
+        NPM_PREFIX, Tool,
         edit::{ManifestDoc, Scope},
+        split_npm_spec,
     },
     sys::paths,
     tools, ui,
@@ -17,7 +18,7 @@ use semver::Version;
 pub enum ToolCommand {
     /// Use a tool in the current project
     Add {
-        /// Name of the tool, e.g. owner/repo
+        /// Name of the tool, e.g. owner/repo, or npm:package for a tool that npm publishes
         name: String,
 
         /// Specific version to add
@@ -146,6 +147,9 @@ fn sweep_tool_store(tools_dir: &std::path::Path) -> (u64, Vec<(String, std::io::
 fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
     let github = GithubAPI::new();
     let name = tools::expand_shorthand(&name);
+    if let Some(spec) = name.strip_prefix(NPM_PREFIX) {
+        return add_npm(spec, version, global);
+    }
     let (owner, repo) = Tool::split_repository(&name)?;
 
     /* the repo short name becomes the alias key and its bin shim, a repo
@@ -178,6 +182,35 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     }
     println!("Run `embr install` to install it");
 
+    Ok(())
+}
+
+/** pins a tool that npm publishes, `npm:package` with an optional
+`@version`. the alias is the package's command, so `npm:azul-sync` pins as
+`azul`. npm answers which version and command, nothing is installed. */
+fn add_npm(spec: &str, version: Option<String>, global: bool) -> Result<(), Error> {
+    let invalid = || Error::InvalidToolSpec(format!("{NPM_PREFIX}{spec}"));
+    let (package, pinned) = split_npm_spec(spec).ok_or_else(invalid)?;
+    let wanted = version
+        .as_deref()
+        .or(pinned)
+        .filter(|wanted| !wanted.is_empty());
+    let (version, alias) = tools::npm::resolve(package, wanted)?;
+    if tools::is_reserved_alias(&alias) {
+        return Err(Error::ReservedToolAlias(alias));
+    }
+
+    let tool = format!("{NPM_PREFIX}{package}@{version}");
+    let mut manifest = ManifestDoc::open_or_create(Scope::from_global(global))?;
+    manifest.table_or_create("tools")?[alias.as_str()] = toml_edit::value(&tool);
+    manifest.save()?;
+
+    if global {
+        ui::print_success(&format!("Added global tool {tool} as `{alias}`"));
+    } else {
+        ui::print_success(&format!("Added tool {tool} as `{alias}` to ember.toml"));
+    }
+    println!("Run `embr install` to install it");
     Ok(())
 }
 
@@ -272,8 +305,15 @@ fn update() -> Result<(), Error> {
     for (alias, spec) in entries {
         let tool = Tool::parse(&spec)?;
 
-        let release = github.get_latest_release(&tool.repository)?;
-        let latest = release.tag_name.trim_start_matches('v');
+        let latest = match tool.npm_package() {
+            Some(package) => tools::npm::latest(package)?,
+            None => github
+                .get_latest_release(&tool.repository)?
+                .tag_name
+                .trim_start_matches('v')
+                .to_string(),
+        };
+        let latest = latest.as_str();
 
         if !is_outdated(&tool.version, latest) {
             continue;
@@ -324,6 +364,7 @@ fn list() -> Result<(), Error> {
 
     // what's stored on disk
     let tools_dir = paths::tools_dir()?;
+    let mut stored = Vec::new();
     if tools_dir.is_dir() {
         for entry in fs::read_dir(&tools_dir)? {
             let entry = entry?;
@@ -334,12 +375,25 @@ fn list() -> Result<(), Error> {
             /* github owners can never contain '_', so the first '_' in the
             directory name splits owner from repo */
             let dir_name = entry.file_name().to_string_lossy().into_owned();
+            // npm tools sit one level down, a '+' in place of a scope's '/'
+            if dir_name == "npm" {
+                for package in fs::read_dir(entry.path())? {
+                    let package = package?;
+                    let name = package.file_name().to_string_lossy().replace('+', "/");
+                    stored.push((format!("{NPM_PREFIX}{name}"), package.path()));
+                }
+                continue;
+            }
             let Some((owner, repo)) = dir_name.split_once('_') else {
                 continue;
             };
-            let name = format!("{owner}/{repo}");
-
-            for version in fs::read_dir(entry.path())? {
+            stored.push((format!("{owner}/{repo}"), entry.path()));
+        }
+        for (name, path) in stored {
+            if !path.is_dir() {
+                continue;
+            }
+            for version in fs::read_dir(path)? {
                 let version = version?;
                 if version.path().is_dir() {
                     let version = version.file_name().to_string_lossy().into_owned();
@@ -409,8 +463,22 @@ fn list() -> Result<(), Error> {
 
 fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     let name = tools::expand_shorthand(&name);
-    let (owner, repo) = Tool::split_repository(&name)?;
-    let tool_dir = paths::tools_dir()?.join(format!("{owner}_{repo}"));
+    /* the shim of a GitHub tool is named after its repo. an npm tool's shim
+    is named after its command, which only its package.json knows, so that
+    shim stays and says "run `embr install`" until one runs */
+    let (tool_dir, shim) = match name.strip_prefix(NPM_PREFIX) {
+        Some(spec) => match split_npm_spec(spec) {
+            Some((package, None)) => (tools::npm::package_root(package)?, None),
+            _ => return Err(Error::InvalidToolSpec(name.clone())),
+        },
+        None => {
+            let (owner, repo) = Tool::split_repository(&name)?;
+            (
+                paths::tools_dir()?.join(format!("{owner}_{repo}")),
+                Some(repo.to_string()),
+            )
+        }
+    };
     let version = version
         .as_deref()
         .map(|version| version.trim_start_matches('v'));
@@ -436,8 +504,8 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
             .unwrap_or(true);
     if tool_gone {
         let _ = fs::remove_dir_all(&tool_dir);
-        if let Ok(bin_dir) = paths::bin_dir() {
-            let _ = fs::remove_file(bin_dir.join(format!("{repo}{EXE_SUFFIX}")));
+        if let (Some(shim), Ok(bin_dir)) = (shim, paths::bin_dir()) {
+            let _ = fs::remove_file(bin_dir.join(format!("{shim}{EXE_SUFFIX}")));
         }
     }
 

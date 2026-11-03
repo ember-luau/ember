@@ -444,19 +444,20 @@ fn write_manifest(path: &Path, contents: &str) -> Result<(), Error> {
     std::fs::write(path, contents)?;
     crate::ui::print_success("Created ember.toml");
 
-    if let Some(message) = gitignore_embr(Path::new(".gitignore"))? {
+    if let Some(message) = gitignore(Path::new(".gitignore"), &IGNORED)? {
         crate::ui::print_success(&message);
     }
 
     Ok(())
 }
 
-/** git-ignores embr's generated folders, the packages output and patch
-working copies, creating .gitignore if missing. returns a message saying
-what changed, None when everything was already covered. */
-fn gitignore_embr(path: &Path) -> Result<Option<String>, Error> {
-    const ENTRIES: [&str; 2] = ["packages/", ".ember-patch/"];
+/// embr's generated folders, the packages output and patch working copies.
+const IGNORED: [&str; 2] = ["packages/", ".ember-patch/"];
 
+/** git-ignores `entries`, creating .gitignore if missing. returns a message
+saying what changed, None when everything was already covered. a line
+already there in any common spelling is not added again. */
+pub(crate) fn gitignore(path: &Path, entries: &[&str]) -> Result<Option<String>, Error> {
     // any common spelling counts, bare, trailing slash, leading slash
     let ignored = |contents: &str, entry: &str| {
         let bare = entry.trim_end_matches('/');
@@ -469,16 +470,17 @@ fn gitignore_embr(path: &Path) -> Result<Option<String>, Error> {
     };
 
     if !path.exists() {
-        std::fs::write(path, format!("{}\n", ENTRIES.join("\n")))?;
+        std::fs::write(path, format!("{}\n", entries.join("\n")))?;
         return Ok(Some(format!(
             "Created .gitignore with {}",
-            ENTRIES.join(" and ")
+            entries.join(" and ")
         )));
     }
 
     let contents = std::fs::read_to_string(path)?;
-    let missing: Vec<&str> = ENTRIES
-        .into_iter()
+    let missing: Vec<&str> = entries
+        .iter()
+        .copied()
         .filter(|entry| !ignored(&contents, entry))
         .collect();
     if missing.is_empty() {
@@ -730,7 +732,7 @@ mod tests {
 
         // missing file gets created with both entries
         assert_eq!(
-            gitignore_embr(&path).unwrap().as_deref(),
+            gitignore(&path, &IGNORED).unwrap().as_deref(),
             Some("Created .gitignore with packages/ and .ember-patch/")
         );
         assert_eq!(
@@ -739,15 +741,15 @@ mod tests {
         );
 
         // both there in any common spelling leaves the file alone
-        assert_eq!(gitignore_embr(&path).unwrap(), None);
+        assert_eq!(gitignore(&path, &IGNORED).unwrap(), None);
         std::fs::write(&path, "/target\npackages\n/.ember-patch\n").unwrap();
-        assert_eq!(gitignore_embr(&path).unwrap(), None);
+        assert_eq!(gitignore(&path, &IGNORED).unwrap(), None);
 
         /* file missing entries gets exactly the missing ones appended,
         even with no trailing newline */
         std::fs::write(&path, "/target").unwrap();
         assert_eq!(
-            gitignore_embr(&path).unwrap().as_deref(),
+            gitignore(&path, &IGNORED).unwrap().as_deref(),
             Some("Added packages/ and .ember-patch/ to .gitignore")
         );
         assert_eq!(
@@ -756,7 +758,7 @@ mod tests {
         );
         std::fs::write(&path, "packages/\n").unwrap();
         assert_eq!(
-            gitignore_embr(&path).unwrap().as_deref(),
+            gitignore(&path, &IGNORED).unwrap().as_deref(),
             Some("Added .ember-patch/ to .gitignore")
         );
 
