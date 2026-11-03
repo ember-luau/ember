@@ -690,9 +690,62 @@ impl Studio {
     }
 }
 
+/* untagged, so serde tries the shapes in order. `Git` and `Path` come
+first: `{ path = "../lib", name = "acme/lib", version = "^1" }` also has
+the keys of `Registry` */
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Dependency {
+    /** a git repository: `{ git = "https://github.com/acme/lib", tag =
+    "v1.2.0" }`. at most one of `rev`, `tag` and `branch`, and none means
+    the default branch. ember.lock keeps the commit, so a branch stays
+    where it was until `embr install --refresh`. the registry part works
+    as on [`Dependency::Path`]. */
+    Git {
+        /// an https or ssh URL, see [`crate::registry::index::git::check_url`].
+        git: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<String>,
+        /// see [`Dependency::target`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// see [`Dependency::entry`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+        /// read only so that [`Manifest::validate`] can refuse `path` beside `git`.
+        #[serde(default, skip_serializing)]
+        path: Option<toml::Value>,
+    },
+    /** a folder on this computer: `{ path = "../my-lib" }`. install links
+    it in place, as it links a workspace member, so an edit there shows on
+    the next install. `name`, `version` and `index` are the registry part:
+    publish writes them in place of the path, as Cargo does. */
+    Path {
+        /// the folder, relative to the manifest that names it.
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<String>,
+        /// see [`Dependency::target`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// see [`Dependency::entry`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+    },
     /// package from an index: `{ name = "scope/pkg", version = "^", index = "wally" }`.
     Registry {
         /// "scope/name" identifier.
@@ -788,9 +841,10 @@ impl Dependency {
     installs itself, where the same entry is a direct dependency. */
     pub fn target(&self) -> Option<&str> {
         match self {
-            Dependency::Registry { target, .. } | Dependency::Workspace { target, .. } => {
-                target.as_deref()
-            }
+            Dependency::Registry { target, .. }
+            | Dependency::Workspace { target, .. }
+            | Dependency::Path { target, .. }
+            | Dependency::Git { target, .. } => target.as_deref(),
         }
     }
 
@@ -807,9 +861,10 @@ impl Dependency {
     link to that package uses it too. */
     pub fn entry(&self) -> Option<&str> {
         match self {
-            Dependency::Registry { entry, .. } | Dependency::Workspace { entry, .. } => {
-                entry.as_deref()
-            }
+            Dependency::Registry { entry, .. }
+            | Dependency::Workspace { entry, .. }
+            | Dependency::Path { entry, .. }
+            | Dependency::Git { entry, .. } => entry.as_deref(),
         }
     }
 
@@ -821,12 +876,13 @@ impl Dependency {
     /** the features that this entry turns on in the package, e.g.
     `ui = { name = "acme/ui", version = "^1", features = ["icons"] }`. the
     enabled features of a package are the union over every dependent in one
-    environment root, as in Cargo. */
+    environment root, as in Cargo. a path or git entry takes none yet. */
     pub fn features(&self) -> &[String] {
         match self {
             Dependency::Registry { features, .. } | Dependency::Workspace { features, .. } => {
                 features
             }
+            Dependency::Path { .. } | Dependency::Git { .. } => &[],
         }
     }
 
@@ -839,14 +895,20 @@ impl Dependency {
             | Dependency::Workspace {
                 default_features, ..
             } => *default_features,
+            Dependency::Path { .. } | Dependency::Git { .. } => true,
         }
     }
 
-    /// the package this entry names, whichever shape it takes.
+    /** the package this entry names, whichever shape it takes. a path or
+    git entry without `name` names none here: the package's own manifest
+    says it, and the resolver reads that. */
     pub fn package(&self) -> &str {
         match self {
             Dependency::Registry { name, .. } => name,
             Dependency::Workspace { workspace, .. } => workspace,
+            Dependency::Path { name, .. } | Dependency::Git { name, .. } => {
+                name.as_deref().unwrap_or_default()
+            }
         }
     }
 }
@@ -898,7 +960,7 @@ pub enum Override {
     /// alias of an entry under this manifest's own [dependencies]
     Alias(String),
     /// a dependency specifier, same shapes as a [dependencies] value
-    Specifier(Dependency),
+    Specifier(Box<Dependency>),
 }
 
 /** expands an [overrides] key into alias paths, dot-separated chains from
@@ -1176,11 +1238,65 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /** a manifest from its text alone, as a git commit holds it. nothing
+    there can inherit, since no workspace root is beside it. */
+    pub(crate) fn parse(text: &str) -> Result<Self, Error> {
+        let manifest: Manifest = toml::from_str(text)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
     /** the checks that span more than one value, so serde cannot make them.
     [`Manifest::load_from`] runs them, which covers install and publish. */
     fn validate(&self) -> Result<(), Error> {
         for target in &self.targets {
             target.check_requires()?;
+        }
+        for (alias, dependency) in self.all_dependencies().chain(&self.peer_dependencies) {
+            if let Dependency::Git {
+                git,
+                rev,
+                tag,
+                branch,
+                path,
+                ..
+            } = dependency
+            {
+                let invalid = |reason: String| {
+                    Error::ManifestInvalid(format!("dependency '{alias}' {reason}"))
+                };
+                if path.is_some() {
+                    return Err(invalid("has `path` and `git`; use one".to_string()));
+                }
+                let references = [rev, tag, branch].into_iter().flatten();
+                if references.clone().count() > 1 {
+                    return Err(invalid(
+                        "has more than one of `rev`, `tag` and `branch`; use one".to_string(),
+                    ));
+                }
+                // git would read a leading dash as an option
+                if references
+                    .clone()
+                    .any(|reference| reference.starts_with('-'))
+                {
+                    return Err(invalid(
+                        "has a git reference that starts with '-'".to_string(),
+                    ));
+                }
+                crate::registry::index::git::check_url(git).map_err(invalid)?;
+            }
+            // the registry part of a path or git entry is what publish writes
+            if let Dependency::Path {
+                version: Some(version),
+                ..
+            }
+            | Dependency::Git {
+                version: Some(version),
+                ..
+            } = dependency
+            {
+                parse_version_req(version)?;
+            }
         }
         /* an alias names one link file, so it cannot name two entries.
         install would link only one of them */
@@ -2444,8 +2560,11 @@ mod tests {
         ));
         assert!(matches!(
             &manifest.overrides["foo.baz"],
-            Override::Specifier(Dependency::Registry { name, index, .. })
-                if name == "acme/qux" && index.as_deref() == Some("wally")
+            Override::Specifier(dependency) if matches!(
+                &**dependency,
+                Dependency::Registry { name, index, .. }
+                    if name == "acme/qux" && index.as_deref() == Some("wally")
+            )
         ));
 
         // absent table stays absent on write
@@ -2828,6 +2947,63 @@ mod tests {
             ),
         ] {
             assert_eq!(validated(&bad).unwrap_err().to_string(), why);
+        }
+    }
+
+    /** a path or git entry parses as its own shape, also with the keys of
+    a registry entry beside it. an ssh URL in the scp form passes, a bad
+    URL, `path` beside `git` and two references do not. */
+    #[test]
+    fn path_and_git_dependencies_parse_and_check() {
+        let manifest = validated(
+            r#"
+            [dependencies]
+            lib = { path = "../lib", name = "acme/lib", version = "^1.0.0" }
+            ui = { git = "git@github.com:acme/ui.git", tag = "v1.2.0", target = "roblox_server" }
+
+            [dev-dependencies]
+            spec = { git = "https://github.com/acme/spec" }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &manifest.dependencies["lib"],
+            Dependency::Path { path, version: Some(version), .. } if path == "../lib" && version == "^1.0.0"
+        ));
+        assert_eq!(manifest.dependencies["lib"].package(), "acme/lib");
+        assert!(matches!(
+            &manifest.dependencies["ui"],
+            Dependency::Git { git, tag: Some(tag), .. } if git == "git@github.com:acme/ui.git" && tag == "v1.2.0"
+        ));
+        assert_eq!(manifest.dependencies["ui"].target(), Some("roblox_server"));
+        assert_eq!(manifest.dev_dependencies["spec"].package(), "");
+        let written = toml::to_string(&manifest).unwrap();
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert!(
+            matches!(&reparsed.dependencies["lib"], Dependency::Path { .. }),
+            "{written}"
+        );
+
+        for (entry, error) in [
+            (
+                r#"{ git = "http://github.com/acme/ui" }"#,
+                "dependency 'ui' has the git URL 'http://github.com/acme/ui', which is not an https or ssh URL; use https://, ssh:// or user@host:path",
+            ),
+            (
+                r#"{ git = "https://github.com/acme/ui", path = "../ui" }"#,
+                "dependency 'ui' has `path` and `git`; use one",
+            ),
+            (
+                r#"{ git = "https://github.com/acme/ui", tag = "v1", branch = "main" }"#,
+                "dependency 'ui' has more than one of `rev`, `tag` and `branch`; use one",
+            ),
+            (
+                r#"{ git = "https://github.com/acme/ui", branch = "-x" }"#,
+                "dependency 'ui' has a git reference that starts with '-'",
+            ),
+        ] {
+            let found = validated(&format!("[dependencies]\nui = {entry}\n")).unwrap_err();
+            assert!(found.to_string().ends_with(error), "{found}");
         }
     }
 

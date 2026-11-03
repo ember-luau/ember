@@ -37,6 +37,8 @@ pub struct Lockfile {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LockedPackage {
     pub name: String,
+    /// empty for a path dependency, whose folder is the source and has no pin.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
     /// the package's own environment. names the nested-link folder
     /// dependents require it through.
@@ -52,8 +54,9 @@ pub struct LockedPackage {
     pub link: Option<String>,
     pub index: String,
     /** this package's [overrides]-rewritten edges, declared alias -> the
-    replacement's package name. additive, locks without it parse fine,
-    and `--locked` needs it to relink redirected dependencies. */
+    replacement's package name, and its path or git edges without `name`.
+    additive, locks without it parse fine, and `--locked` needs it to
+    relink redirected dependencies. */
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub redirects: std::collections::BTreeMap<String, String>,
     /** the patch this copy was built with, when [patches] named it.
@@ -76,8 +79,9 @@ pub struct LockedPackage {
     /** lowercase hex SHA-256 of the archive: the index entry's, else the
     one the first install computed. later installs and `--locked` refuse
     an archive with another hash. additive within v2, a lock from before
-    it gets the hashes on its next install. none for workspace members and
-    the local registry. */
+    it gets the hashes on its next install. none for workspace members,
+    path folders and the local registry, and none for a git commit, whose
+    `rev` is its integrity. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
@@ -105,7 +109,21 @@ impl PatchRecord {
     }
 }
 
+/// `scope/name@version` in output, or the name alone when there is no version.
+pub fn package_id(name: &str, version: &str) -> String {
+    if version.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}@{version}")
+    }
+}
+
 impl LockedPackage {
+    /// see [`package_id`].
+    pub fn id(&self) -> String {
+        package_id(&self.name, &self.version)
+    }
+
     /// the environment root this package installs under.
     pub fn context(&self) -> Environment {
         self.context.unwrap_or(self.environment)
@@ -312,6 +330,47 @@ mod tests {
         assert!(
             matches!(&read.package[0].source, DownloadSource::TarGz { url } if url.ends_with("1.0.0"))
         );
+    }
+
+    /** a path entry keeps the folder and no version. a git entry keeps the
+    commit and the branch that ember.toml asked for. */
+    #[test]
+    fn path_and_git_entries_keep_their_source() {
+        let text = "version = 2\n\n\
+             [[package]]\n\
+             name = \"acme/lib\"\n\
+             environment = \"roblox\"\n\
+             link = \"lib\"\n\
+             index = \"path\"\n\
+             type = \"path\"\n\
+             path = \"../lib\"\n\n\
+             [[package]]\n\
+             name = \"acme/ui\"\n\
+             version = \"1.2.0\"\n\
+             environment = \"roblox\"\n\
+             link = \"ui\"\n\
+             index = \"git\"\n\
+             type = \"git\"\n\
+             url = \"https://github.com/acme/ui\"\n\
+             rev = \"0123456789abcdef0123456789abcdef01234567\"\n\
+             branch = \"main\"\n";
+        let parsed: Lockfile = toml::from_str(text).unwrap();
+        assert_eq!(parsed.packages[0].id(), "acme/lib");
+        assert_eq!(
+            parsed.packages[0].source,
+            DownloadSource::Path {
+                path: "../lib".to_string()
+            }
+        );
+        assert_eq!(parsed.packages[1].id(), "acme/ui@1.2.0");
+        assert_eq!(
+            parsed.packages[1].source.local_label().as_deref(),
+            Some("git https://github.com/acme/ui 0123456")
+        );
+        let written = toml::to_string(&parsed).unwrap();
+        assert_eq!(written.matches("version = ").count(), 2, "{written}");
+        let again: Lockfile = toml::from_str(&written).unwrap();
+        assert_eq!(again.packages[1].source, parsed.packages[1].source);
     }
 
     #[test]

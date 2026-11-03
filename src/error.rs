@@ -473,6 +473,55 @@ pub enum Error {
         reason: String,
     },
 
+    #[error("Failed to fetch the git dependency {url}: {reason}")]
+    GitFetch { url: String, reason: String },
+
+    #[error("The git dependency {url} has no {reference}")]
+    GitReferenceMissing { url: String, reference: String },
+
+    #[error("The git dependency {url} has no ember.toml at commit {commit}")]
+    GitManifestMissing { url: String, commit: String },
+
+    #[error(
+        "Dependency '{0}' of a git package is a path dependency; a git package cannot name a folder"
+    )]
+    GitPathDependency(String),
+
+    #[error("Dependency '{alias}' points at {path}, which has no ember.toml")]
+    PathDependencyMissing { alias: String, path: String },
+
+    #[error(
+        "Dependency '{alias}' names no package: {at} has no [package] name, so add `name = \"scope/name\"` to the entry"
+    )]
+    LocalNameMissing { alias: String, at: String },
+
+    #[error("Dependency '{alias}' names {named}, but {at} is {own}")]
+    LocalNameMismatch {
+        alias: String,
+        named: String,
+        at: String,
+        own: String,
+    },
+
+    /** one package from two places in one environment root, such as a
+    path and the registry. install keeps one copy of a package there. */
+    #[error(
+        "{name} comes from two sources in the {context} tree: {first} (from {first_by}) and {second} (from {second_by}); use one of them"
+    )]
+    SourceConflict {
+        name: String,
+        context: Environment,
+        first: String,
+        first_by: String,
+        second: String,
+        second_by: String,
+    },
+
+    #[error(
+        "Dependency '{alias}' is a {kind} dependency without a registry `version`, so a project that installs this package cannot get it. Add `version` to the entry: publish then writes the registry part (`name`, `version`, `index`) in place of the {kind}, as Cargo does"
+    )]
+    PublishLocalDependency { alias: String, kind: &'static str },
+
     #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,
 

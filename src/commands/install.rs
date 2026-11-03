@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::progress::{Progress, Task};
 use crate::project::hooks::{self, Lifecycle};
-use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord};
+use crate::project::lockfile::{LockedPackage, Lockfile, PatchRecord, package_id};
 use crate::project::manifest::{self, Environment, Language, Manifest, RequireStyle, Tool};
 use crate::project::package;
 use crate::project::requires;
@@ -50,7 +50,7 @@ pub struct InstallArgs {
     #[arg(long)]
     pub strict_peers: bool,
 
-    /// Download this package again and lock its archive hash, also when the hash changed
+    /// Download this package again and lock its archive hash, also when the hash changed; a git package moves to the newest commit of its branch or tag
     #[arg(long, value_name = "PACKAGE", conflicts_with = "locked")]
     pub update: Vec<String>,
 }
@@ -479,12 +479,13 @@ fn install_steps(
         };
         let mut warnings = Vec::new();
         let pinned = pinned_versions();
-        let resolved = resolver::resolve(
+        let resolved = resolver::resolve_updating(
             manifest,
             Path::new("."),
             mode,
             &pinned,
             resolver::Allow::for_project(manifest).as_ref(),
+            &args.update,
             &mut warnings,
         );
         // around the live line, a bare eprintln would land mid-frame
@@ -497,7 +498,11 @@ fn install_steps(
             .into_iter()
             .map(|package| Job {
                 name: package.name,
-                version: package.version.to_string(),
+                // the lock keeps no version for a path folder, see `DownloadSource::Path`
+                version: match package.source {
+                    index::DownloadSource::Path { .. } => String::new(),
+                    _ => package.version.to_string(),
+                },
                 environment: package.environment,
                 context: package.context,
                 source: package.source,
@@ -846,11 +851,14 @@ fn fast_path(
 
     if lock.packages.iter().any(|package| {
         /* a local publish can replace a version, and the lock would
-        not see it, so a local package always installs again */
-        matches!(package.source, index::DownloadSource::Workspace { .. })
+        not see it, so a local package always installs again. a member and
+        a path folder are source that can change with no edit here */
+        package.source.in_place().is_some()
             || package.index == crate::registry::local::NAME
-            // a lock from before the hashes records them on a full install
-            || package.sha256.is_none()
+            /* a lock from before the hashes records them on a full install.
+            a git commit is its own integrity, so it has no hash */
+            || (package.sha256.is_none()
+                && !matches!(package.source, index::DownloadSource::Git { .. }))
     }) {
         return Ok(FastPath::Full);
     }
@@ -873,9 +881,11 @@ fn fast_path(
     resolving could possibly answer differently. fresh caches mean it
     provably can't, same index state, same inputs, deterministic resolver.
     stale ones mean `^` requirements have a real question to ask */
+    // a git commit stays where the lock put it, so it never makes the lock stale
     let fresh = lock
         .packages
         .iter()
+        .filter(|package| !matches!(package.source, index::DownloadSource::Git { .. }))
         .map(|package| package.index.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -951,9 +961,12 @@ fn attach_patches(manifest: &Manifest, project_dir: &Path, jobs: &mut [Job]) -> 
                 index::DownloadSource::Zip { url } | index::DownloadSource::TarGz { url } => {
                     urls.insert(url.clone());
                 }
-                index::DownloadSource::Workspace { .. } => {
+                index::DownloadSource::Git { url, rev, .. } => {
+                    urls.insert(format!("{url}#{rev}"));
+                }
+                index::DownloadSource::Workspace { .. } | index::DownloadSource::Path { .. } => {
                     return Err(Error::ManifestInvalid(format!(
-                        "[patches] key '{key}' names a workspace member; edit its source directly instead of patching"
+                        "[patches] key '{key}' names a workspace member or a path dependency; edit its source directly instead of patching"
                     )));
                 }
             }
@@ -1364,13 +1377,14 @@ fn install_packages(
     let mut slots: Vec<Option<LockedPackage>> = Vec::new();
     slots.resize_with(jobs.len(), || None);
 
-    /* workspace members link in place on this thread, no network and
-    they touch source dirs the user owns. registry jobs queue for the pool */
+    /* workspace members and path folders link in place on this thread, no
+    network and they touch source dirs the user owns. registry and git jobs
+    queue for the pool */
     let mut queue: VecDeque<(usize, Job)> = VecDeque::new();
     for (slot, job) in jobs.into_iter().enumerate() {
-        if matches!(job.source, index::DownloadSource::Workspace { .. }) {
-            let task = progress.task(format!("{}@{}", job.name, job.version));
-            slots[slot] = Some(link_workspace_member(manifest, job, progress, task)?);
+        if job.source.in_place().is_some() {
+            let task = progress.task(package_id(&job.name, &job.version));
+            slots[slot] = Some(link_in_place(manifest, job, progress, task)?);
         } else {
             queue.push_back((slot, job));
         }
@@ -1414,7 +1428,7 @@ fn install_packages(
                     ));
                     /* the row lives until this thread's result is handled,
                     the link file written on the main thread included */
-                    let task = progress.task(format!("{}@{}", job.name, job.version));
+                    let task = progress.task(package_id(&job.name, &job.version));
                     let result = install_one(manifest, &job, &staging, cache, progress, &task);
                     // an optional package that fails is skipped, so the others go on
                     if result.as_ref().is_err_and(|error| !skips(&job, error)) {
@@ -1449,13 +1463,19 @@ fn install_packages(
                         .link
                         .clone()
                         .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
+                    let source = job
+                        .source
+                        .local_label()
+                        .map_or(String::new(), |label| format!(" ({label})"));
                     task.done(&ui::success_line(&format!(
-                        "{}@{} → {}/{shown}",
+                        "{}@{} → {}/{shown}{source}",
                         job.name, job.version, job.context
                     )));
-                    // a local publish can replace a version, so its hash means nothing
-                    let sha256 =
-                        (job.index_url != crate::registry::local::NAME).then_some(extracted.sha256);
+                    /* a local publish can replace a version, so its hash means
+                    nothing. a git commit is its own integrity */
+                    let sha256 = (job.index_url != crate::registry::local::NAME
+                        && !matches!(job.source, index::DownloadSource::Git { .. }))
+                    .then_some(extracted.sha256);
                     slots[slot] = Some(LockedPackage {
                         name: job.name,
                         version: job.version,
@@ -1477,8 +1497,8 @@ fn install_packages(
                 matters */
                 Err(error) if skips(&job, &error) => {
                     progress.warn(&format!(
-                        "skipped optional dependency {}@{}: {error}",
-                        job.name, job.version
+                        "skipped optional dependency {}: {error}",
+                        package_id(&job.name, &job.version)
                     ));
                     skipped.insert(slot);
                 }
@@ -1682,17 +1702,17 @@ fn write_registry_link(
     Ok(())
 }
 
-/** workspace members link in place, no download, no copy under .ember/,
-so edits to the member are picked up without reinstalling, like pesde's
-symlinks. */
-fn link_workspace_member(
+/** workspace members and path folders link in place, no download, no
+copy under .ember/, so edits there are picked up without reinstalling,
+like pesde's symlinks. */
+fn link_in_place(
     manifest: &Manifest,
     job: Job,
     progress: &Progress,
     task: Task,
 ) -> Result<LockedPackage, Error> {
-    let index::DownloadSource::Workspace { path } = &job.source else {
-        unreachable!("only workspace jobs are linked in place");
+    let Some(path) = job.source.in_place() else {
+        unreachable!("only workspace and path jobs are linked in place");
     };
     let member_dir = Path::new(path);
     let environment = job
@@ -1739,9 +1759,14 @@ fn link_workspace_member(
         .link
         .clone()
         .unwrap_or_else(|| job.name.replace('/', "_"));
+    let source = job
+        .source
+        .local_label()
+        .unwrap_or_else(|| "workspace".to_string());
     task.done(&ui::success_line(&format!(
-        "{}@{} → {}/{shown} (workspace)",
-        job.name, job.version, job.context
+        "{} → {}/{shown} ({source})",
+        package_id(&job.name, &job.version),
+        job.context
     )));
     Ok(LockedPackage {
         name: job.name,
@@ -1751,7 +1776,7 @@ fn link_workspace_member(
         link: job.link,
         index: job.index_url,
         redirects: job.redirects,
-        // members are the user's own source, attach_patches refused them
+        // members and path folders are the user's own source, attach_patches refused them
         patch: None,
         optional: job.optional,
         features: job.features,
@@ -1761,11 +1786,12 @@ fn link_workspace_member(
 }
 
 /** where install puts `package`, relative to the project, and whether that
-is a workspace member linked in place. `embr tree` reads the same folders. */
+is a workspace member or a path folder linked in place. `embr tree` reads
+the same folders. */
 pub(crate) fn stored_at(manifest: &Manifest, package: &LockedPackage) -> (PathBuf, bool) {
-    match &package.source {
-        index::DownloadSource::Workspace { path } => (PathBuf::from(path), true),
-        _ => (
+    match package.source.in_place() {
+        Some(path) => (PathBuf::from(path), true),
+        None => (
             manifest
                 .packages_out(package.context())
                 .join(STORE_DIR)
@@ -2275,6 +2301,15 @@ anything printed, so the caller can separate it. */
 fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[InstalledTool]) -> bool {
     use crossterm::style::Stylize;
 
+    // a path folder has no version in the lock
+    let version_text = |version: &str| {
+        if version.is_empty() {
+            String::new()
+        } else {
+            format!(" {version}")
+        }
+    };
+
     let added = || "+".with(ui::accent());
     let removed = || "-".with(ui::rgb(ui::CRIMSON));
     let mut printed = false;
@@ -2291,8 +2326,9 @@ fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[Install
                     name,
                     version,
                 } => println!(
-                    "  {} {link} {version}  {}",
+                    "  {} {link}{}  {}",
                     added(),
+                    version_text(version),
                     name.as_str().dark_grey()
                 ),
                 Change::Removed {
@@ -2300,8 +2336,9 @@ fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[Install
                     name,
                     version,
                 } => println!(
-                    "  {} {link} {version}  {}",
+                    "  {} {link}{}  {}",
                     removed(),
+                    version_text(version),
                     name.as_str().dark_grey()
                 ),
                 Change::Moved {
@@ -3622,6 +3659,99 @@ mod tests {
             let error = install(locked(optional, "changed/1.0.0.tar.gz")).unwrap_err();
             assert!(matches!(error, Error::IntegrityMismatch { .. }), "{error}");
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a path folder links in place, so an edit there needs no install.
+    a git commit installs into the store from the git cache, as an archive
+    does. the lock keeps no version for the folder. */
+    #[test]
+    fn a_path_folder_links_in_place_and_a_git_commit_installs() {
+        let base = std::env::temp_dir().join("embr-test-install-path-git");
+        let _ = fs::remove_dir_all(&base);
+        let lib = base.join("lib");
+        write(
+            &lib,
+            "ember.toml",
+            "[package]\nname = \"acme/lib\"\nversion = \"0.1.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n",
+        );
+        write(&lib, "src/init.luau", "return 1\n");
+        let remote = crate::registry::index::git::fixture::Remote::new("install");
+        let rev = remote.commit(&[
+            (
+                "ember.toml",
+                "[package]\nname = \"acme/ui\"\nversion = \"2.0.0\"\n\n\
+                 [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n",
+            ),
+            ("src/init.luau", "return 2\n"),
+        ]);
+        let out = base.join("out");
+        let manifest: Manifest = toml::from_str(&format!(
+            "[target]\nenvironment = \"roblox\"\n\n[config]\nroblox-packages-out = '{}'\n",
+            out.display()
+        ))
+        .unwrap();
+        let job = |name: &str, version: &str, link: &str, source| Job {
+            name: name.to_string(),
+            version: version.to_string(),
+            environment: Some(Environment::Roblox),
+            context: Environment::Roblox,
+            source,
+            index_url: "path".to_string(),
+            link: Some(link.to_string()),
+            redirects: BTreeMap::new(),
+            patch: None,
+            optional: false,
+            features: Vec::new(),
+            sha256: None,
+            sha256_in_lock: false,
+        };
+        let jobs = vec![
+            job(
+                "acme/lib",
+                "",
+                "lib",
+                index::DownloadSource::Path {
+                    path: lib.to_string_lossy().into_owned(),
+                },
+            ),
+            job(
+                "acme/ui",
+                "2.0.0",
+                "ui",
+                index::DownloadSource::Git {
+                    url: remote.url.clone(),
+                    rev,
+                    branch: None,
+                    tag: None,
+                },
+            ),
+        ];
+        let locked = install_packages(
+            &manifest,
+            jobs,
+            &base.join("staging"),
+            &Progress::hidden(),
+            index::CachePolicy::Use,
+        )
+        .unwrap();
+        assert_eq!(locked[0].version, "");
+        assert!(matches!(
+            locked[0].source,
+            index::DownloadSource::Path { .. }
+        ));
+        let link = fs::read_to_string(out.join("lib.luau")).unwrap();
+        assert!(link.contains("../lib/src"), "{link}");
+        assert!(!out.join(".ember/acme_lib").exists());
+        assert_eq!(
+            fs::read_to_string(out.join(".ember/acme_ui/src/init.luau")).unwrap(),
+            "return 2\n"
+        );
+        let link = fs::read_to_string(out.join("ui.luau")).unwrap();
+        assert!(link.contains(".ember/acme_ui/src"), "{link}");
+        // the commit is the integrity of a git package, so it has no archive hash
+        assert_eq!(locked[1].sha256, None);
         let _ = fs::remove_dir_all(&base);
     }
 

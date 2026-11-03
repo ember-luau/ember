@@ -1,13 +1,15 @@
 use crate::error::Error;
+use crate::project::lockfile::{Lockfile, lockfile_in};
 use crate::project::manifest::features::{self, Features};
 use crate::project::manifest::{
-    Dependency, Environment, Language, Manifest, Override, dependency_target, override_paths,
-    parse_version_req, takes,
+    Dependency, Environment, Language, Manifest, Override, dependency_target, manifest_in,
+    override_paths, parse_version_req, takes,
 };
 use crate::project::workspace::{self, Workspace};
+use crate::registry::index::git::{self, Reference};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /** what a project may install, set by its own environment and language,
 so runtimes and languages do not reach into each other. a project takes
@@ -128,7 +130,8 @@ pub struct ResolvedInstall {
     the replacement's package name. The nested-link pass reads a package's
     declared dependencies back off disk by name, so a name-changing override
     must travel to the linker and the lockfile or the dependent would link
-    the original, or nothing. */
+    the original, or nothing. a path or git edge without `name` lands here
+    too, with the name its own manifest gave. */
     pub redirects: BTreeMap<String, String>,
     /** only optional edges reach this package. install skips it, with one
     line, when its download fails. */
@@ -154,6 +157,15 @@ enum Request {
     the specifier is ignored locally, you get the member's current version.
     The req only matters when publishing. */
     Workspace,
+    /// a path dependency: its folder, absolute and without `.` or `..`.
+    Path {
+        dir: PathBuf,
+    },
+    /// a git dependency, see [`git::locate`].
+    Git {
+        url: String,
+        reference: Reference,
+    },
 }
 
 /// What one specifier asks for: where it comes from, and its `target`, if any.
@@ -236,13 +248,31 @@ pub fn resolve(
     allow: Option<&Allow>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
+    resolve_updating(manifest, project_dir, refresh, pinned, allow, &[], warnings)
+}
+
+/** [`resolve`], and the git packages that `update` names leave the commit
+of ember.lock, as `--refresh` makes every one of them do. */
+pub fn resolve_updating(
+    manifest: &Manifest,
+    project_dir: &Path,
+    refresh: Refresh,
+    pinned: &Pinned,
+    allow: Option<&Allow>,
+    update: &[String],
+    warnings: &mut Vec<String>,
+) -> Result<Vec<ResolvedInstall>, Error> {
     let mut ttl_skipped = false;
+    /* the retry below forces a refresh of the indices, not of the git
+    commits. only `--refresh` and `--update` move a locked branch */
+    let pins = GitPins::read(project_dir, refresh == Refresh::Force, update);
     match resolve_skipping(
         manifest,
         project_dir,
         refresh,
         pinned,
         allow,
+        &pins,
         &mut ttl_skipped,
         warnings,
     ) {
@@ -261,6 +291,7 @@ pub fn resolve(
                 Refresh::Force,
                 pinned,
                 allow,
+                &pins,
                 &mut ignored,
                 warnings,
             )
@@ -274,12 +305,14 @@ pub fn resolve(
 edge. such a failure leaves that edge out, and the next run starts from
 the top, so the optional package goes with all that it alone brought in.
 each skip gives one line. the bool says whether any edge went out. */
+#[allow(clippy::too_many_arguments)]
 fn resolve_skipping(
     manifest: &Manifest,
     project_dir: &Path,
     refresh: Refresh,
     pinned: &Pinned,
     allow: Option<&Allow>,
+    pins: &GitPins,
     ttl_skipped: &mut bool,
     warnings: &mut Vec<String>,
 ) -> Result<(Vec<ResolvedInstall>, bool), Error> {
@@ -295,6 +328,7 @@ fn resolve_skipping(
             refresh,
             pinned,
             allow,
+            pins,
             &mut indices,
             &excluded,
             ttl_skipped,
@@ -328,6 +362,7 @@ fn resolve_once(
     refresh: Refresh,
     pinned: &Pinned,
     allow: Option<&Allow>,
+    pins: &GitPins,
     indices: &mut HashMap<String, Index>,
     excluded: &HashSet<Vec<String>>,
     ttl_skipped: &mut bool,
@@ -352,7 +387,7 @@ fn resolve_once(
     let mut overrides: HashMap<Vec<String>, (String, Ask)> = HashMap::new();
     for (key, value) in &manifest.overrides {
         for path in override_paths(key)? {
-            let edge = overridden_edge(value, &path, manifest)?;
+            let edge = overridden_edge(value, &path, manifest, project_dir)?;
             if overrides.insert(path.clone(), edge).is_some() {
                 return Err(Error::OverrideDuplicatePath(path.join(".")));
             }
@@ -367,6 +402,8 @@ fn resolve_once(
     root alias's context, so diagnostics look in the right tree */
     let mut discovered: HashMap<Vec<String>, String> = HashMap::new();
     let mut walked_at: HashMap<(String, Environment), Vec<String>> = HashMap::new();
+    // the alias path of each path or git edge without `name`, and the name it read
+    let mut unnamed: Vec<(Vec<String>, String)> = Vec::new();
     let mut seed_contexts: HashMap<String, Environment> = HashMap::new();
 
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
@@ -392,7 +429,7 @@ fn resolve_once(
                     .optional()
                     .then(|| (alias_path.clone(), name.clone())),
                 name,
-                ask: request_for(alias, dependency, manifest)?,
+                ask: request_for(alias, dependency, manifest, Some(project_dir))?,
                 link: Some(alias.clone()),
                 alias_path,
                 context: None,
@@ -447,9 +484,27 @@ fn resolve_once(
         failing.clone_from(&optional);
         let req_text = match &request {
             Request::Registry { req_text, .. } => req_text.clone(),
-            Request::Workspace => "*".to_string(),
+            Request::Workspace | Request::Path { .. } | Request::Git { .. } => "*".to_string(),
         };
         let req = parse_version_req(&req_text)?;
+        /* a path or git package says its own name, so it is read before the
+        gates below, which go by name */
+        let local = match &request {
+            Request::Path { .. } | Request::Git { .. } => {
+                let alias = alias_path.last().map_or("", String::as_str);
+                Some(locate(&request, &name, alias, project_dir, pins)?)
+            }
+            Request::Registry { .. } | Request::Workspace => None,
+        };
+        let name = match &local {
+            Some(local) => {
+                if name.is_empty() && alias_path.len() > 1 {
+                    unnamed.push((alias_path.clone(), local.name.clone()));
+                }
+                local.name.clone()
+            }
+            None => name,
+        };
 
         /* transitives inherit their context, so their dedup gate runs
         before any network. a seed's context is decided by its own resolve,
@@ -458,9 +513,19 @@ fn resolve_once(
             && let Some(existing) = resolved.get_mut(&(name.clone(), context))
         {
             /* a prerelease here was the latest of a package with no stable
-            version, so another `^` takes it too. the features that this
-            edge asks for join the package's, and what they turn on queues */
+            version, so another `^` takes it too. a path or git copy must
+            be the same copy. the features that this edge asks for join the
+            package's, and what they turn on queues */
             if takes(&req, &existing.install.version, true) {
+                let local = local.as_ref().map(|local| &local.source);
+                same_source(
+                    &name,
+                    context,
+                    local,
+                    &existing.install,
+                    &existing.by,
+                    &required_by,
+                )?;
                 existing.enable(&asked, defaults, &required_by)?;
                 existing.queue_edges(&mut queue, &mut edges);
                 continue;
@@ -616,33 +681,17 @@ fn resolve_once(
                 /* The member's own deps install for the consumer too. its
                 registry deps resolve against the member's [indices], but
                 the consumer's [overrides] still apply to the edges. */
-                for (alias, dependency) in &member.manifest.dependencies {
-                    let mut child_path = alias_path.clone();
-                    child_path.push(alias.clone());
-                    if dependency.optional() && excluded.contains(&child_path) {
-                        continue;
-                    }
-
-                    let (child_name, child_ask) = match overrides.get(&child_path) {
-                        Some((child_name, child_ask)) => {
-                            pending_matched.push(child_path.clone());
-                            redirects.insert(alias.clone(), child_name.clone());
-                            (child_name.clone(), child_ask.clone())
-                        }
-                        None => (
-                            dependency_name(dependency).to_lowercase(),
-                            request_for(alias, dependency, &member.manifest)?,
-                        ),
-                    };
-                    pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push(Child {
-                        name: child_name,
-                        ask: child_ask,
-                        path: child_path,
-                        alias: alias.clone(),
-                        optional: dependency.optional(),
-                    });
-                }
+                manifest_edges(
+                    &member.manifest,
+                    Some(&member.dir),
+                    &alias_path,
+                    &overrides,
+                    excluded,
+                    &mut pending_matched,
+                    &mut pending_discovered,
+                    &mut redirects,
+                    &mut children,
+                )?;
 
                 let path =
                     workspace::relative_path(&std::path::absolute(project_dir)?, &member.dir);
@@ -653,6 +702,34 @@ fn resolve_once(
                     None,
                     "workspace".to_string(),
                     member.manifest.features.clone(),
+                )
+            }
+            // a path or git package reads its edges from its own manifest, as a member does
+            Request::Path { .. } | Request::Git { .. } => {
+                let local = local.expect("a path or git request was read above");
+                manifest_edges(
+                    &local.manifest,
+                    local.dir.as_deref(),
+                    &alias_path,
+                    &overrides,
+                    excluded,
+                    &mut pending_matched,
+                    &mut pending_discovered,
+                    &mut redirects,
+                    &mut children,
+                )?;
+                let index_url = match local.source {
+                    DownloadSource::Git { .. } => "git",
+                    _ => "path",
+                };
+                // a git commit is its own integrity, and a folder has none
+                (
+                    local.version,
+                    local.environment,
+                    local.source,
+                    None,
+                    index_url.to_string(),
+                    local.manifest.features,
                 )
             }
         };
@@ -671,6 +748,15 @@ fn resolve_once(
             root_edges.push(((name.clone(), context), optional.is_some()));
             if let Some(existing) = resolved.get_mut(&(name.clone(), context)) {
                 if takes(&req, &existing.install.version, true) {
+                    let local = source.local_label().is_some().then_some(&source);
+                    same_source(
+                        &name,
+                        context,
+                        local,
+                        &existing.install,
+                        &existing.by,
+                        &required_by,
+                    )?;
                     /* a dev seed that a [dependencies] subtree already
                     brought in still gets its link */
                     if existing.install.link.is_none() {
@@ -776,6 +862,29 @@ fn resolve_once(
                 path.join(".")
             ),
         });
+    }
+
+    /* the parent's manifest names no package on such an edge, and the
+    nested links and `embr tree` read that manifest. so the parent records
+    the name in its redirects, as an [overrides] edge does. the walk queued
+    the edge under no name, so the graph gets it too. a path or git entry
+    is never optional */
+    for (path, child) in unnamed {
+        let (parent, alias) = path.split_at(path.len() - 1);
+        for (key, walked) in &walked_at {
+            if walked == parent
+                && let Some(walked) = resolved.get_mut(key)
+            {
+                walked
+                    .install
+                    .redirects
+                    .insert(alias[0].clone(), child.clone());
+                edges
+                    .entry(key.clone())
+                    .or_default()
+                    .push(((child.clone(), key.1), false));
+            }
+        }
     }
 
     let required = required_packages(&root_edges, &edges);
@@ -930,6 +1039,7 @@ fn overridden_edge(
     replacement: &Override,
     path: &[String],
     manifest: &Manifest,
+    project_dir: &Path,
 ) -> Result<(String, Ask), Error> {
     /* the label is what an error about this specifier tells the user to go
     and edit, so it has to follow the alias form to the [dependencies] entry
@@ -946,11 +1056,11 @@ fn overridden_edge(
                     alias: alias.clone(),
                 })?,
         ),
-        Override::Specifier(dependency) => (path.join("."), dependency),
+        Override::Specifier(dependency) => (path.join("."), &**dependency),
     };
     Ok((
         dependency_name(dependency).to_lowercase(),
-        request_for(&label, dependency, manifest)?,
+        request_for(&label, dependency, manifest, Some(project_dir))?,
     ))
 }
 
@@ -1000,28 +1110,279 @@ fn seed_context(
 }
 
 fn dependency_name(dependency: &Dependency) -> &str {
-    match dependency {
-        Dependency::Registry { name, .. } => name,
-        Dependency::Workspace { workspace, .. } => workspace,
-    }
+    dependency.package()
 }
 
 /** Queue entry for a dependency of `owner`. Index keys resolve against the
 owner's [indices], so a member's deps use the member's. `alias` names the
 entry in errors about it. */
-fn request_for(alias: &str, dependency: &Dependency, owner: &Manifest) -> Result<Ask, Error> {
+fn request_for(
+    alias: &str,
+    dependency: &Dependency,
+    owner: &Manifest,
+    owner_dir: Option<&Path>,
+) -> Result<Ask, Error> {
     let request = match dependency {
         Dependency::Registry { version, index, .. } => Request::Registry {
             req_text: version.clone(),
             index_url: owner.index_url(index.as_deref())?.to_string(),
         },
         Dependency::Workspace { .. } => Request::Workspace,
+        // a path is relative to the manifest that names it
+        Dependency::Path { path, .. } => {
+            let owner_dir = owner_dir.ok_or_else(|| Error::GitPathDependency(alias.to_string()))?;
+            Request::Path {
+                dir: workspace::lexical(&std::path::absolute(owner_dir.join(path))?),
+            }
+        }
+        Dependency::Git {
+            git,
+            rev,
+            tag,
+            branch,
+            ..
+        } => Request::Git {
+            url: git.clone(),
+            reference: Reference::of(rev.as_deref(), tag.as_deref(), branch.as_deref()),
+        },
     };
     Ok(Ask {
         request,
         target: dependency_target(alias, dependency)?,
         features: dependency.features().iter().cloned().collect(),
         defaults: dependency.default_features(),
+    })
+}
+
+/** queues the edges of a package that embr reads from its own manifest: a
+workspace member, a path folder or a git commit. its registry entries
+resolve against its own [indices] and its paths against `owner_dir`, but
+the project's [overrides] still apply to the edges. */
+#[allow(clippy::too_many_arguments)]
+fn manifest_edges(
+    owner: &Manifest,
+    owner_dir: Option<&Path>,
+    alias_path: &[String],
+    overrides: &HashMap<Vec<String>, (String, Ask)>,
+    excluded: &HashSet<Vec<String>>,
+    matched: &mut Vec<Vec<String>>,
+    discovered: &mut Vec<(Vec<String>, String)>,
+    redirects: &mut BTreeMap<String, String>,
+    children: &mut Vec<Child>,
+) -> Result<(), Error> {
+    for (alias, dependency) in &owner.dependencies {
+        let mut child_path = alias_path.to_vec();
+        child_path.push(alias.clone());
+        if dependency.optional() && excluded.contains(&child_path) {
+            continue;
+        }
+
+        let (child_name, child_ask) = match overrides.get(&child_path) {
+            Some((child_name, child_ask)) => {
+                matched.push(child_path.clone());
+                redirects.insert(alias.clone(), child_name.clone());
+                (child_name.clone(), child_ask.clone())
+            }
+            None => (
+                dependency_name(dependency).to_lowercase(),
+                request_for(alias, dependency, owner, owner_dir)?,
+            ),
+        };
+        discovered.push((child_path.clone(), child_name.clone()));
+        children.push(Child {
+            name: child_name,
+            ask: child_ask,
+            path: child_path,
+            alias: alias.clone(),
+            optional: dependency.optional(),
+        });
+    }
+    Ok(())
+}
+
+/** the commits that ember.lock holds for git dependencies, by URL and the
+`branch` or `tag` asked for. a branch or tag resolves to its pin while the
+pin is there, so it moves only with `relock`, which `--refresh` sets.
+`found` keeps what each URL and reference gave, so one resolve fetches a
+repository once, however many packages name it. */
+struct GitPins {
+    locked: HashMap<(String, Option<String>, Option<String>), String>,
+    relock: bool,
+    found: std::cell::RefCell<HashMap<(String, Reference), (String, String)>>,
+}
+
+impl GitPins {
+    /// the pins of the lock in `project_dir`, without those of the packages that `update` names.
+    fn read(project_dir: &Path, relock: bool, update: &[String]) -> Self {
+        let lock = std::fs::read_to_string(lockfile_in(project_dir))
+            .ok()
+            .and_then(|text| toml::from_str::<Lockfile>(&text).ok());
+        let locked = lock
+            .into_iter()
+            .flat_map(|lock| lock.packages)
+            .filter(|package| {
+                !update
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&package.name))
+            })
+            .filter_map(|package| match package.source {
+                DownloadSource::Git {
+                    url,
+                    rev,
+                    branch,
+                    tag,
+                } => Some(((url, branch, tag), rev)),
+                _ => None,
+            })
+            .collect();
+        GitPins {
+            locked,
+            relock,
+            found: Default::default(),
+        }
+    }
+
+    /// the commit and the ember.toml text of `url` at `reference`, see [`git::locate`].
+    fn locate(&self, url: &str, reference: &Reference) -> Result<(String, String), Error> {
+        let key = (url.to_string(), reference.clone());
+        if let Some(found) = self.found.borrow().get(&key) {
+            return Ok(found.clone());
+        }
+        let found = git::locate(url, reference, self.get(url, reference), self.relock)?;
+        self.found.borrow_mut().insert(key, found.clone());
+        Ok(found)
+    }
+
+    /// the locked commit of `url` at `reference`. a `rev` is its own pin.
+    fn get(&self, url: &str, reference: &Reference) -> Option<&str> {
+        if matches!(reference, Reference::Rev(_)) {
+            return None;
+        }
+        let (branch, tag) = reference.locked();
+        self.locked
+            .get(&(url.to_string(), branch, tag))
+            .map(String::as_str)
+    }
+}
+
+/// a path or git package, read before its walk, see [`locate`].
+struct Local {
+    name: String,
+    /// its [package] version. a folder without one reads as 0.0.0.
+    version: semver::Version,
+    environment: Option<Environment>,
+    source: DownloadSource,
+    manifest: Manifest,
+    /// the folder that its own path dependencies resolve against. None for git.
+    dir: Option<PathBuf>,
+}
+
+/** reads the manifest of a path folder or of a git commit. `named` is the
+entry's own `name`, lowercase, or empty. the package's [package] name wins,
+and the two must agree when both are there. */
+fn locate(
+    request: &Request,
+    named: &str,
+    alias: &str,
+    project_dir: &Path,
+    pins: &GitPins,
+) -> Result<Local, Error> {
+    let (manifest, source, dir, at) = match request {
+        Request::Path { dir } => {
+            let file = manifest_in(dir);
+            let path = workspace::relative_path(&std::path::absolute(project_dir)?, dir);
+            if !file.exists() {
+                return Err(Error::PathDependencyMissing {
+                    alias: alias.to_string(),
+                    path,
+                });
+            }
+            let at = format!("{path}/{}", crate::project::manifest::MANIFEST_FILE);
+            (
+                Manifest::load_from(&file)?,
+                DownloadSource::Path { path },
+                Some(dir.clone()),
+                at,
+            )
+        }
+        Request::Git { url, reference } => {
+            let (rev, text) = pins.locate(url, reference)?;
+            let (branch, tag) = reference.locked();
+            let at = format!("{url} at {}", rev.get(..7).unwrap_or(&rev));
+            let source = DownloadSource::Git {
+                url: url.clone(),
+                rev,
+                branch,
+                tag,
+            };
+            (Manifest::parse(&text)?, source, None, at)
+        }
+        Request::Registry { .. } | Request::Workspace => {
+            unreachable!("only path and git requests are read here")
+        }
+    };
+    let name = match manifest.name().map(str::to_lowercase) {
+        Some(own) if named.is_empty() || named == own => own,
+        Some(own) => {
+            return Err(Error::LocalNameMismatch {
+                alias: alias.to_string(),
+                named: named.to_string(),
+                at,
+                own,
+            });
+        }
+        None if !named.is_empty() => named.to_string(),
+        None => {
+            return Err(Error::LocalNameMissing {
+                alias: alias.to_string(),
+                at,
+            });
+        }
+    };
+    let version = match manifest.package.as_ref() {
+        Some(package) => semver::Version::parse(&package.version)?,
+        None => semver::Version::new(0, 0, 0),
+    };
+    let environment = manifest.target().map(|target| target.environment);
+    // a folder links in place, so nothing can read its environment off an archive
+    if environment.is_none() && dir.is_some() {
+        return Err(Error::UnknownPackageEnvironment(name));
+    }
+    Ok(Local {
+        name,
+        version,
+        environment,
+        source,
+        manifest,
+        dir,
+    })
+}
+
+/** a path or git package that meets a copy already in its environment
+root: the same source is the same copy, another one is a conflict, since
+the root keeps one copy of a package. `local` is the new source, None for a
+registry or workspace request, which takes the copy that is there. */
+fn same_source(
+    name: &str,
+    context: Environment,
+    local: Option<&DownloadSource>,
+    existing: &ResolvedInstall,
+    first_by: &Requirer,
+    required_by: &Requirer,
+) -> Result<(), Error> {
+    let Some(local) = local.filter(|local| **local != existing.source) else {
+        return Ok(());
+    };
+    Err(Error::SourceConflict {
+        name: name.to_string(),
+        context,
+        first: existing
+            .source
+            .local_label()
+            .unwrap_or_else(|| existing.index_url.clone()),
+        first_by: first_by.label(),
+        second: local.local_label().unwrap_or_default(),
+        second_by: required_by.label(),
     })
 }
 
@@ -2381,6 +2742,21 @@ mod tests {
             .collect()
     }
 
+    /// `name source link` for each install, the source as `local_label` writes it.
+    fn sources(installs: &[ResolvedInstall]) -> Vec<String> {
+        installs
+            .iter()
+            .map(|install| {
+                format!(
+                    "{} {} {}",
+                    install.name,
+                    install.source.local_label().unwrap_or_default(),
+                    install.link.as_deref().unwrap_or("-")
+                )
+            })
+            .collect()
+    }
+
     /// the index for the feature tests: acme/ui gates acme/icons behind `pretty`, its default.
     fn feature_origin(name: &str) -> PesdeOrigin {
         let needs_ui = |name: &str, features: &str| {
@@ -2531,6 +2907,238 @@ mod tests {
             warnings[0].starts_with("skipped optional dependency 'wide.ghost' (acme/ghost)"),
             "{warnings:?}"
         );
+    }
+
+    fn resolve_in(
+        project: &Path,
+        tables: &str,
+        refresh: Refresh,
+    ) -> Result<Vec<ResolvedInstall>, Error> {
+        let manifest: Manifest =
+            toml::from_str(&format!("[target]\nenvironment = \"roblox\"\n\n{tables}")).unwrap();
+        resolve(
+            &manifest,
+            project,
+            refresh,
+            &Pinned::new(),
+            None,
+            &mut Vec::new(),
+        )
+    }
+
+    /** a path dependency reads the folder's ember.toml, and its own path
+    dependencies resolve against that folder. an edit there shows on the
+    next resolve. the entry's `name` must agree with the folder's. */
+    #[test]
+    fn a_path_dependency_reads_its_folder() {
+        let base = std::env::temp_dir().join("embr-test-resolver-path");
+        let _ = fs::remove_dir_all(&base);
+        let project = base.join("game");
+        fs::create_dir_all(&project).unwrap();
+        let package = |name: &str, extra: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.2.0\"\n\n\
+                 [target]\nenvironment = \"roblox\"\n\n{extra}"
+            )
+        };
+        write(
+            &base.join("libs/lib"),
+            "ember.toml",
+            &package(
+                "acme/lib",
+                "[dependencies]\nutil = { path = \"../util\" }\n",
+            ),
+        );
+        write(
+            &base.join("libs/util"),
+            "ember.toml",
+            &package("acme/util", ""),
+        );
+        write(
+            &base.join("libs/other"),
+            "ember.toml",
+            &package("acme/other", ""),
+        );
+
+        let tables = "[dependencies]\nlib = { path = \"../libs/./lib\" }\n";
+        let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
+        assert_eq!(
+            sources(&installs),
+            [
+                "acme/lib path ../libs/lib lib",
+                "acme/util path ../libs/util -"
+            ]
+        );
+        assert_eq!(installs[0].index_url, "path");
+        assert_eq!(installs[0].environment, Some(Environment::Roblox));
+        // the folder's edge names no package, so lib records the name it read
+        assert_eq!(installs[0].redirects["util"], "acme/util");
+        assert!(!installs[1].optional);
+
+        // the folder is the source, so its edit shows at once
+        write(
+            &base.join("libs/lib"),
+            "ember.toml",
+            &package(
+                "acme/lib",
+                "[dependencies]\nother = { path = \"../other\" }\n",
+            ),
+        );
+        let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
+        assert_eq!(
+            sources(&installs),
+            [
+                "acme/lib path ../libs/lib lib",
+                "acme/other path ../libs/other -"
+            ]
+        );
+
+        let error = resolve_in(
+            &project,
+            "[dependencies]\nlib = { path = \"../libs/lib\", name = \"acme/else\" }\n",
+            Refresh::Never,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Dependency 'lib' names acme/else, but ../libs/lib/ember.toml is acme/lib"
+        );
+        let error = resolve_in(
+            &project,
+            "[dependencies]\nlib = { path = \"../none\" }\n",
+            Refresh::Never,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Dependency 'lib' points at ../none, which has no ember.toml"
+        );
+        // one folder spelled two ways is one source, two folders of one package are two
+        let one = "[dependencies]\nlib = { path = \"../libs/lib\" }\n\
+                   util = { path = \"../libs/other/../util\" }\n";
+        assert!(resolve_in(&project, one, Refresh::Never).is_ok());
+        write(
+            &base.join("libs/copy"),
+            "ember.toml",
+            &package("acme/other", ""),
+        );
+        let two = "[dependencies]\nlib = { path = \"../libs/lib\" }\n\
+                   copy = { path = \"../libs/copy\" }\n";
+        let error = resolve_in(&project, two, Refresh::Never).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "acme/other comes from two sources in the roblox tree: path ../libs/copy (from ember.toml (as 'copy')) and path ../libs/other (from acme/lib@0.2.0 (as 'other')); use one of them"
+        );
+
+        // the folder's own [features] gate its edges, and its defaults are on
+        let gated = |default: &str| {
+            package(
+                "acme/lib",
+                &format!(
+                    "[dependencies]\nutil = {{ path = \"../util\" }}\n\n\
+                     [features]\ndefault = [{default}]\npretty = [\"util\"]\n"
+                ),
+            )
+        };
+        write(&base.join("libs/lib"), "ember.toml", &gated("\"pretty\""));
+        let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
+        assert_eq!(installs[0].features, ["pretty"]);
+        assert_eq!(installs[1].name, "acme/util");
+        write(&base.join("libs/lib"), "ember.toml", &gated(""));
+        let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
+        assert_eq!(sources(&installs), ["acme/lib path ../libs/lib lib"]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a git dependency resolves to a commit. ember.lock pins a branch, so
+    a new commit there does not move it until a refresh. a `rev` stays where
+    it points. */
+    #[test]
+    fn a_git_dependency_locks_its_commit() {
+        let remote = crate::registry::index::git::fixture::Remote::new("resolver");
+        let manifest = |version: &str| {
+            format!(
+                "[package]\nname = \"acme/gitlib\"\nversion = \"{version}\"\n\n\
+                 [target]\nenvironment = \"roblox\"\n"
+            )
+        };
+        let first = remote.commit(&[("ember.toml", &manifest("1.0.0"))]);
+        let project = std::env::temp_dir().join("embr-test-resolver-git");
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(&project).unwrap();
+
+        let branch = format!(
+            "[dependencies]\nlib = {{ git = \"{}\", branch = \"main\" }}\n",
+            remote.url
+        );
+        let installs = resolve_in(&project, &branch, Refresh::Ttl).unwrap();
+        assert_eq!(installs[0].name, "acme/gitlib");
+        assert_eq!(installs[0].version.to_string(), "1.0.0");
+        assert_eq!(installs[0].index_url, "git");
+        assert_eq!(
+            installs[0].source,
+            DownloadSource::Git {
+                url: remote.url.clone(),
+                rev: first.clone(),
+                branch: Some("main".to_string()),
+                tag: None,
+            }
+        );
+
+        // the lock that install would write pins the branch
+        let lock = Lockfile::new(vec![crate::project::lockfile::LockedPackage {
+            name: "acme/gitlib".to_string(),
+            version: "1.0.0".to_string(),
+            environment: Environment::Roblox,
+            context: None,
+            link: Some("lib".to_string()),
+            index: "git".to_string(),
+            redirects: BTreeMap::new(),
+            patch: None,
+            optional: false,
+            features: Vec::new(),
+            source: installs[0].source.clone(),
+            sha256: None,
+        }]);
+        fs::write(project.join("ember.lock"), toml::to_string(&lock).unwrap()).unwrap();
+
+        let second = remote.commit(&[("ember.toml", &manifest("1.1.0"))]);
+        let installs = resolve_in(&project, &branch, Refresh::Ttl).unwrap();
+        assert!(
+            matches!(&installs[0].source, DownloadSource::Git { rev, .. } if *rev == first),
+            "{:?}",
+            installs[0].source
+        );
+        // `--update` with its name moves it, and so does `--refresh`
+        let manifest: Manifest =
+            toml::from_str(&format!("[target]\nenvironment = \"roblox\"\n\n{branch}")).unwrap();
+        let update = ["ACME/gitlib".to_string()];
+        let installs = resolve_updating(
+            &manifest,
+            &project,
+            Refresh::Ttl,
+            &Pinned::new(),
+            None,
+            &update,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(&installs[0].source, DownloadSource::Git { rev, .. } if *rev == second));
+        let installs = resolve_in(&project, &branch, Refresh::Force).unwrap();
+        assert!(matches!(&installs[0].source, DownloadSource::Git { rev, .. } if *rev == second));
+        assert_eq!(installs[0].version.to_string(), "1.1.0");
+
+        // a rev is its own pin, whatever the branch does
+        let pinned = format!(
+            "[dependencies]\nlib = {{ git = \"{}\", rev = \"{}\" }}\n",
+            remote.url,
+            &first[..10]
+        );
+        let installs = resolve_in(&project, &pinned, Refresh::Force).unwrap();
+        assert!(
+            matches!(&installs[0].source, DownloadSource::Git { rev, branch: None, .. } if *rev == first)
+        );
+        let _ = fs::remove_dir_all(&project);
     }
 
     #[test]
