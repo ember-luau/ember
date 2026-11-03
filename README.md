@@ -40,6 +40,10 @@ chmod +x embr-macos-aarch64
 .\embr-windows-x86_64.exe self install
 ```
 
+From 0.14.0 on, each release has a `SHA256SUMS` file. To check a download,
+run `sha256sum --check --ignore-missing SHA256SUMS` in its folder (on macOS,
+`shasum -a 256 --check --ignore-missing SHA256SUMS`).
+
 `self install` copies embr to `~/.ember/bin`. On Windows it adds that folder to
 your PATH for you; elsewhere it prints the line to add to your shell profile.
 Restart your terminal, then:
@@ -58,13 +62,55 @@ embr self install     # still worth running: tool shims live in ~/.ember/bin
 
 ### Arch Linux (AUR)
 
+Not available yet. The AUR takes no new accounts for now, so the package
+`embr-bin` is not on the AUR, and the release skips its AUR push. On Arch,
+use the release binary or cargo.
+
+### Homebrew (macOS and Linux)
+
+Once the tap `ember-luau/homebrew-tap` is set up:
+
 ```sh
-yay -S embr-bin    # or: paru -S embr-bin
-embr self install  # still worth running: tool shims live in ~/.ember/bin
+brew install ember-luau/tap/embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
 ```
 
-The package puts `embr` in `/usr/bin`, and pacman updates it with each
-release.
+`brew upgrade embr` updates it.
+
+### Scoop (Windows)
+
+Once the bucket `ember-luau/scoop-bucket` is set up:
+
+```powershell
+scoop bucket add ember-luau https://github.com/ember-luau/scoop-bucket
+scoop install ember-luau/embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
+```
+
+`scoop update embr` updates it.
+
+### winget (Windows)
+
+Once winget has the package `ember-luau.embr`:
+
+```powershell
+winget install ember-luau.embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
+```
+
+`winget upgrade ember-luau.embr` updates it.
+
+### Nix
+
+The flake builds embr from source:
+
+```sh
+nix run github:ember-luau/ember -- --version           # the newest commit
+nix profile install github:ember-luau/ember/v0.14.0    # a release, from 0.14.0 on
+```
+
+Pinned tools run through shims in `~/.ember/bin`, so add that folder to
+your PATH. `nix profile upgrade` updates a profile install.
 
 ### VS Code IntelliSense
 

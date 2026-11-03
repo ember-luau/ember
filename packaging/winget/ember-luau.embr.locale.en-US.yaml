@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+
+PackageIdentifier: ember-luau.embr
+PackageVersion: "@VERSION@"
+PackageLocale: en-US
+Publisher: ember-luau
+PublisherUrl: https://github.com/ember-luau
+PublisherSupportUrl: https://github.com/ember-luau/ember/issues
+PackageName: embr
+PackageUrl: https://emberpm.dev
+License: MIT
+LicenseUrl: https://github.com/ember-luau/ember/blob/master/LICENSE
+ShortDescription: A package manager built for Luau
+Description: >-
+  embr installs Luau packages from the ember registry and from the wally,
+  pesde, and Forest indices. It publishes packages, pins the tools of a
+  project, and runs its scripts.
+Moniker: embr
+Tags:
+- luau
+- roblox
+- package-manager
+ReleaseNotesUrl: https://github.com/ember-luau/ember/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

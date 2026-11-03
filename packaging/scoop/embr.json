@@ -1,0 +1,26 @@
+{
+  "version": "@VERSION@",
+  "description": "A package manager built for Luau: publish, discover, and install packages",
+  "homepage": "https://emberpm.dev",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/ember-luau/ember/releases/download/v@VERSION@/embr-windows-x86_64.zip",
+      "hash": "@SHA256_WINDOWS_X86_64@"
+    }
+  },
+  "bin": "embr.exe",
+  "checkver": {
+    "github": "https://github.com/ember-luau/ember"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/ember-luau/ember/releases/download/v$version/embr-windows-x86_64.zip"
+      }
+    },
+    "hash": {
+      "url": "$baseurl/SHA256SUMS"
+    }
+  }
+}
