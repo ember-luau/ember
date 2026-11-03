@@ -4,6 +4,7 @@ and installs them. `archive` picks and unpacks the right release asset,
 
 pub mod archive;
 pub mod shim;
+mod shorthands;
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
@@ -15,8 +16,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// tools addable and `embr execute`-runnable by bare name. anything else
-/// must be "owner/repo".
+/** tools addable and `embr execute`-runnable by bare name. the registry
+adds more (`shorthands`), but never one of these. anything else must be
+"owner/repo". */
 const SHORTHANDS: &[(&str, &str)] = &[
     ("create-chief-project", "ryancundiff/create-chief-project"),
     ("darklua", "seaofvoices/darklua"),
@@ -30,17 +32,25 @@ const SHORTHANDS: &[(&str, &str)] = &[
 
 /// shorthand to full repo name, unknown names pass through as "owner/repo".
 pub fn expand_shorthand(name: &str) -> String {
-    shorthand_repository(name).map_or_else(|| name.to_string(), str::to_string)
+    shorthand_repository(name).unwrap_or_else(|| name.to_string())
 }
 
-/** the repo behind a shorthand, for matching manifest entries by value,
+/** the target behind a shorthand, for matching manifest entries by value,
 not alias key. case-insensitive, like alias resolution. windows command
-lookup doesn't care and neither should "StyLua". */
-pub fn shorthand_repository(name: &str) -> Option<&'static str> {
-    SHORTHANDS
+lookup doesn't care and neither should "StyLua". a registry target can be
+`npm:<package>` as well as "owner/repo". */
+pub fn shorthand_repository(name: &str) -> Option<String> {
+    resolve_shorthand(name, shorthands::lookup)
+}
+
+/** the built-ins first, always. only a bare name they do not know asks the
+registry, which may fetch its list once a run. */
+fn resolve_shorthand(name: &str, registry: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+    let builtin = SHORTHANDS
         .iter()
         .find(|(short, _)| short.eq_ignore_ascii_case(name))
-        .map(|(_, full)| *full)
+        .map(|(_, full)| full.to_string());
+    builtin.or_else(|| shorthands::is_name(name).then(|| registry(name)).flatten())
 }
 
 /** alias names embr's own binaries occupy in ~/.ember/bin. a tool shim under
@@ -456,12 +466,56 @@ mod tests {
     fn expands_known_shorthands_only() {
         assert_eq!(expand_shorthand("rojo"), "rojo-rbx/rojo");
         assert_eq!(expand_shorthand("acme/tool"), "acme/tool");
-        assert_eq!(shorthand_repository("stylua"), Some("johnnymorganz/stylua"));
+        assert_eq!(
+            shorthand_repository("stylua").as_deref(),
+            Some("johnnymorganz/stylua")
+        );
         assert_eq!(shorthand_repository("acme/tool"), None);
         assert_eq!(expand_shorthand("luaux"), "luau-xml/luaux");
         // case-insensitive, like alias resolution and windows command lookup
         assert_eq!(expand_shorthand("StyLua"), "johnnymorganz/stylua");
-        assert_eq!(shorthand_repository("ROJO"), Some("rojo-rbx/rojo"));
+        assert_eq!(
+            shorthand_repository("ROJO").as_deref(),
+            Some("rojo-rbx/rojo")
+        );
+    }
+
+    #[test]
+    fn built_ins_win_and_only_bare_names_ask_the_registry() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let registry = |name: &str| {
+            asked.borrow_mut().push(name.to_string());
+            match name {
+                "rojo" => Some("evil/rojo".to_string()),
+                "azul" => Some("npm:azul-sync".to_string()),
+                _ => None,
+            }
+        };
+
+        // a built-in never asks, so the registry can never re-point it
+        assert_eq!(
+            resolve_shorthand("rojo", registry).as_deref(),
+            Some("rojo-rbx/rojo")
+        );
+        assert_eq!(
+            resolve_shorthand("StyLua", registry).as_deref(),
+            Some("johnnymorganz/stylua")
+        );
+        assert!(asked.borrow().is_empty());
+
+        // then the registry, for a name the built-ins do not know
+        assert_eq!(
+            resolve_shorthand("azul", registry).as_deref(),
+            Some("npm:azul-sync")
+        );
+        assert_eq!(resolve_shorthand("wally", registry), None);
+        assert_eq!(*asked.borrow(), ["azul", "wally"]);
+
+        // a full name is never a shorthand
+        for full in ["acme/tool", "npm:azul-sync", "rojo@7.4.4"] {
+            assert_eq!(resolve_shorthand(full, registry), None, "{full}");
+        }
+        assert_eq!(asked.borrow().len(), 2);
     }
 
     #[test]

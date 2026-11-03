@@ -19,9 +19,9 @@ What <SPEC> can be, first match winning:
   a [tools] alias   stylua                 runs the exact version pinned by
                                            the surrounding project or the
                                            global tools file
-  a shorthand       create-chief-project,  the curated names embr knows,
-                    rojo, stylua, ...      the same list `embr tool add`
-                                           accepts
+  a shorthand       create-chief-project,  the names embr knows, then the
+                    rojo, stylua, ...      ones the registry adds; the same
+                                           list `embr tool add` accepts
   a repository      JohnnyMorganz/StyLua   any GitHub repo with releases
 Add @version for an exact release: stylua@2.0.2.
 
@@ -158,7 +158,7 @@ fn pick(spec: &Spec, pinned: Option<&Tool>) -> Result<(String, Option<String>), 
     }
 
     match tools::shorthand_repository(&spec.name) {
-        Some(full) => Ok((full.to_string(), spec.version.clone())),
+        Some(full) => Ok((full, spec.version.clone())),
         None => Err(Error::ExecuteUnknownName(spec.name.clone())),
     }
 }

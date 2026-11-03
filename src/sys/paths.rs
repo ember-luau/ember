@@ -86,6 +86,12 @@ pub fn local_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("local"))
 }
 
+/** ~/.ember/shorthands.json, the tool shorthands of the registry, kept for a
+day. `embr cache clean` deletes it. */
+pub fn shorthands_file() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("shorthands.json"))
+}
+
 /// ~/.ember/archive-cache, downloaded package archives. `embr cache clean` deletes it.
 pub fn archive_cache_root() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("archive-cache"))

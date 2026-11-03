@@ -155,7 +155,8 @@ embx JohnnyMorganz/StyLua@2.0.2 .    # any GitHub repo, exact versions too
 GitHub-released executable on first use, caches it under `~/.ember/tools`, and
 hands your terminal straight to it — nothing is added to any manifest. Names
 pinned under `[tools]` run their pinned version; other bare names come from
-embr's shorthand list; anything else is `owner/repo`.
+embr's built-in shorthands, then from the ones the registry adds (such as
+`azul`); anything else is `owner/repo`. A built-in shorthand always wins.
 
 ## `embr remove`: take out a dependency
 
