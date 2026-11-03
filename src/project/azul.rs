@@ -289,39 +289,39 @@ fn kill(child: &mut std::process::Child) {
 }
 
 /** whether Roblox Studio runs on this machine. None when the check itself
-cannot run, which a caller reads as "maybe". on Linux, Studio runs under
-Wine through Vinegar, so the Windows process name is what shows. */
+cannot run, which a caller reads as "maybe". */
+#[cfg(windows)]
 pub fn studio_running() -> Option<bool> {
-    #[cfg(windows)]
-    {
-        let output = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq RobloxStudioBeta.exe", "/NH"])
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
-        let listed = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-        Some(listed.contains("robloxstudiobeta.exe"))
-    }
-    #[cfg(not(windows))]
-    {
-        let pattern = if cfg!(target_os = "macos") {
-            ["-x", "RobloxStudio"]
-        } else {
-            ["-f", "RobloxStudioBeta"]
-        };
-        let status = Command::new("pgrep")
-            .args(pattern)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()?;
-        // pgrep exits 0 on a match, 1 on none, and higher when it fails
-        match status.code() {
-            Some(0) => Some(true),
-            Some(1) => Some(false),
-            _ => None,
-        }
+    let output = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq RobloxStudioBeta.exe", "/NH"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let listed = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    Some(listed.contains("robloxstudiobeta.exe"))
+}
+
+/** the same check through pgrep. on Linux, Studio runs under Wine through
+Vinegar, so the Windows process name is what shows. */
+#[cfg(not(windows))]
+pub fn studio_running() -> Option<bool> {
+    let pattern = if cfg!(target_os = "macos") {
+        ["-x", "RobloxStudio"]
+    } else {
+        ["-f", "RobloxStudioBeta"]
+    };
+    let status = Command::new("pgrep")
+        .args(pattern)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    // pgrep exits 0 on a match, 1 on none, and higher when it fails
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
     }
 }
 
