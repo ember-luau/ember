@@ -30,6 +30,27 @@ pub enum Refresh {
     Force,
 }
 
+/** the indices that embr knows by name, with their URLs. `embr index add`
+fills in these URLs, and an index entry that names its dependency's index
+by one of them reads it as the URL, see [`named_index_url`]. */
+pub const KNOWN_INDICES: &[(&str, &str)] = &[
+    ("forest", forest::API_URL),
+    ("pesde", "https://github.com/pesde-pkg/index"),
+    ("wally", "https://github.com/UpliftGames/wally-index"),
+];
+
+/** the URL of an index that embr knows by `name`: ember's own, or one of
+[`KNOWN_INDICES`]. None for any other name. */
+pub fn named_index_url(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case(crate::project::manifest::EMBER_INDEX_NAME) {
+        return Some(DEFAULT_INDEX_URL);
+    }
+    KNOWN_INDICES
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, url)| *url)
+}
+
 /// default TTL. `EMBER_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
 const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
 

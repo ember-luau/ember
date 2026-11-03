@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::project::manifest::Manifest;
 use crate::project::manifest::edit::{ManifestDoc, Scope};
+// autocomplete suggestions only. any name and url the user types is accepted as-is
+use crate::registry::index::KNOWN_INDICES;
 use crate::ui;
 use clap::Subcommand;
 use inquire::CustomUserError;
@@ -23,14 +25,6 @@ pub enum IndexCommand {
         name: Option<String>,
     },
 }
-
-/** autocomplete suggestions only. any name and url the user
-types is accepted as-is. */
-const KNOWN_INDICES: &[(&str, &str)] = &[
-    ("forest", crate::registry::index::forest::API_URL),
-    ("pesde", "https://github.com/pesde-pkg/index"),
-    ("wally", "https://github.com/UpliftGames/wally-index"),
-];
 
 fn known_url(name: &str) -> Option<&'static str> {
     KNOWN_INDICES

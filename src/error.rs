@@ -522,6 +522,16 @@ pub enum Error {
     )]
     PublishLocalDependency { alias: String, kind: &'static str },
 
+    #[error(
+        "Dependency '{alias}' names the index '{index}', which is not in [indices] and is not ember, wally, pesde or forest; add it with `embr index add {index} <url>`"
+    )]
+    PublishUnknownIndex { alias: String, index: String },
+
+    #[error(
+        "Dependency '{alias}' is in the local registry, which a project that installs this package cannot reach; publish that package first, or use `embr publish --local`"
+    )]
+    PublishLocalIndex { alias: String },
+
     #[error("ember.lock is missing; run `embr install` without --locked to create it")]
     LockfileMissing,
 

@@ -387,7 +387,9 @@ pub fn parse_dependencies(
         let index = spec.get("index").and_then(Value::as_str);
 
         /* Published entries name a dependency's index by URL. "default" or
-        nothing means the index the entry itself came from. */
+        nothing means the index the entry itself came from. some entries
+        name a well-known index, such as alloy/lattice 0.1.0 with "wally",
+        and that name reads as its URL */
         let dep_index_url = match index {
             Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
                 Some(url.to_string())
@@ -401,7 +403,10 @@ pub fn parse_dependencies(
                 }
                 None
             }
-            Some(alias) => return Err(Error::UnknownIndex(alias.to_string())),
+            Some(alias) => match crate::registry::index::named_index_url(alias) {
+                Some(url) => Some(url.to_string()),
+                None => return Err(Error::UnknownIndex(alias.to_string())),
+            },
         };
 
         parsed.push(TransitiveDependency {
@@ -603,6 +608,44 @@ mod tests {
             "#,
         );
         assert!(parse_dependencies(&bad, "https://example.com/index").is_err());
+    }
+
+    /** an entry that names a well-known index, as alloy/lattice 0.1.0 does
+    with "wally", reads it as the URL. another name is still an error. */
+    #[test]
+    fn a_well_known_index_name_reads_as_its_url() {
+        let entry = parse_entries(
+            r#"
+            [dependencies]
+            promise = { wally = "wally#evaera/promise", version = "^4.0.0", index = "wally" }
+            core = { name = "chief/core", version = "^0.2", index = "ember" }
+            "#,
+        );
+        let deps = parse_dependencies(&entry, "https://example.com/index").unwrap();
+        let url = |name: &str| {
+            deps.iter()
+                .find(|dep| dep.name == name)
+                .and_then(|dep| dep.index_url.clone())
+        };
+        assert_eq!(
+            url("evaera/promise").as_deref(),
+            Some("https://github.com/UpliftGames/wally-index")
+        );
+        assert_eq!(
+            url("chief/core").as_deref(),
+            Some(crate::project::manifest::DEFAULT_INDEX_URL)
+        );
+
+        let unknown = parse_entries(
+            r#"
+            [dependencies]
+            core = { name = "chief/core", version = "^0.2", index = "mine" }
+            "#,
+        );
+        assert!(matches!(
+            parse_dependencies(&unknown, "https://example.com/index"),
+            Err(Error::UnknownIndex(name)) if name == "mine"
+        ));
     }
 
     #[test]
