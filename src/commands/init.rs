@@ -1,7 +1,8 @@
+use crate::commands::template;
 use crate::error::Error;
 use crate::net::auth;
 use crate::project::manifest::{
-    Environment, Language, Manifest, Package, Target, is_github_username,
+    Environment, Language, MANIFEST_FILE, Manifest, Package, Target, is_github_username,
 };
 use crate::sys::git;
 use clap::Args;
@@ -23,6 +24,9 @@ pub struct InitArgs {
     /// The package name, as scope/name
     #[arg(long)]
     pub name: Option<String>,
+    /// Start from a template: a saved name, owner/repo[#ref] on GitHub, or a folder
+    #[arg(long, conflicts_with_all = ["kind", "language", "environment"])]
+    pub template: Option<String>,
     /// Take the default for every question that no flag answers
     #[arg(short, long)]
     pub yes: bool,
@@ -229,6 +233,23 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
         inquire::set_global_render_config(crate::ui::render_config());
     }
 
+    /* asked first: a template brings its own ember.toml, so it answers the
+    questions after this one. a flag that answers one of them skips it */
+    let template = match &args.template {
+        Some(template) => Some(template.clone()),
+        None if interactive
+            && args.kind.is_none()
+            && args.language.is_none()
+            && args.environment.is_none() =>
+        {
+            ask_template()?
+        }
+        None => None,
+    };
+    if let Some(template) = template {
+        return init_from_template(&template, args.name, interactive);
+    }
+
     /* asked first because the answer decides whether the registry metadata
     below is worth asking. a project is the common case */
     let kind = match args.kind {
@@ -312,32 +333,7 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
         }
     };
 
-    let name = match args.name {
-        Some(name) => {
-            validate_name(&name).map_err(Error::InitArgs)?;
-            name
-        }
-        None if interactive => {
-            let mut name_prompt = Text::new("name:")
-                .with_help_message("Scoped as 'scope/name'; letters and numbers only")
-                .with_validator(|input: &str| match validate_name(input) {
-                    Ok(()) => Ok(Validation::Valid),
-                    Err(message) => Ok(Validation::Invalid(message.into())),
-                });
-            if let Some(default) = &defaults.name {
-                name_prompt = name_prompt.with_default(default);
-            }
-            name_prompt.prompt()?
-        }
-        None => match &defaults.name {
-            Some(name) if validate_name(name).is_ok() => name.clone(),
-            _ => {
-                return Err(Error::InitArgs(
-                    "embr cannot guess a package name here; pass --name scope/name".to_string(),
-                ));
-            }
-        },
-    };
+    let name = package_name(args.name, interactive, &defaults)?;
 
     let version = ask(
         Text::new("version:")
@@ -406,6 +402,113 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
     };
     let manifest = package_manifest(package, environment, language, non_empty(main));
     write_manifest(manifest_path, &toml::to_string(&manifest)?)
+}
+
+/// the package name: the flag, else the prompt, else the guess from git.
+fn package_name(
+    name: Option<String>,
+    interactive: bool,
+    defaults: &Defaults,
+) -> Result<String, Error> {
+    match name {
+        Some(name) => {
+            validate_name(&name).map_err(Error::InitArgs)?;
+            Ok(name)
+        }
+        None if interactive => {
+            let mut name_prompt = Text::new("name:")
+                .with_help_message("Scoped as 'scope/name'; letters and numbers only")
+                .with_validator(|input: &str| match validate_name(input) {
+                    Ok(()) => Ok(Validation::Valid),
+                    Err(message) => Ok(Validation::Invalid(message.into())),
+                });
+            if let Some(default) = &defaults.name {
+                name_prompt = name_prompt.with_default(default);
+            }
+            Ok(name_prompt.prompt()?)
+        }
+        None => match &defaults.name {
+            Some(name) if validate_name(name).is_ok() => Ok(name.clone()),
+            _ => Err(Error::InitArgs(
+                "embr cannot guess a package name here; pass --name scope/name".to_string(),
+            )),
+        },
+    }
+}
+
+/// the template step: none, a saved template, or a GitHub repository.
+fn ask_template() -> Result<Option<String>, Error> {
+    let saved = template::saved()?;
+    let mut options = vec!["none".to_string()];
+    options.extend(saved.iter().cloned());
+    options.push("GitHub repository…".to_string());
+    let picked = Select::new("template:", options)
+        .with_help_message("Start from a project template, or from nothing")
+        .raw_prompt()?;
+    match picked.index {
+        0 => Ok(None),
+        index if index <= saved.len() => Ok(Some(saved[index - 1].clone())),
+        _ => Ok(Some(
+            Text::new("repository:")
+                .with_help_message("owner/repo, with an optional #branch or #tag")
+                .with_validator(|input: &str| match template::github_spec(input.trim()) {
+                    Some(_) => Ok(Validation::Valid),
+                    None => Ok(Validation::Invalid("Write it as owner/repo".into())),
+                })
+                .prompt()?
+                .trim()
+                .to_string(),
+        )),
+    }
+}
+
+/** copies a template into the current folder. a package template then gets
+the name from the prompt or the guess, and version 0.1.0. the name comes
+first, so a failed guess leaves the folder empty. nothing else in the files
+changes. */
+fn init_from_template(spec: &str, name: Option<String>, interactive: bool) -> Result<(), Error> {
+    let fetched = template::fetch(spec, Path::new("."))?;
+    let package = fetched
+        .manifest
+        .parse::<toml_edit::DocumentMut>()?
+        .contains_table("package");
+    let name = match package {
+        true => Some(package_name(name, interactive, &Defaults::guess())?),
+        false => None,
+    };
+
+    let files = fetched.write(Path::new("."))?;
+    crate::ui::print_success(&format!(
+        "Created {files} file{} from template {spec}",
+        crate::ui::plural(files)
+    ));
+    if let Some(name) = name {
+        std::fs::write(MANIFEST_FILE, named(&fetched.manifest, &name)?)?;
+        crate::ui::print_success(&format!("Set the package name to {name}, version 0.1.0"));
+    }
+    Ok(())
+}
+
+/** `text` with `[package] name` set to `name` and `version` to 0.1.0. each
+value keeps its comments and spacing. */
+fn named(text: &str, name: &str) -> Result<String, Error> {
+    let mut document: toml_edit::DocumentMut = text.parse()?;
+    let package = document["package"]
+        .as_table_like_mut()
+        .ok_or_else(|| Error::ManifestInvalid("[package] is not a table".to_string()))?;
+    for (key, new) in [("name", name), ("version", "0.1.0")] {
+        match package.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+            Some(value) => {
+                let decor = value.decor().clone();
+                *value = new.into();
+                *value.decor_mut() = decor;
+            }
+            None => {
+                package.insert(key, toml_edit::value(new));
+            }
+        }
+    }
+    Ok(document.to_string())
 }
 
 /// the manifest a `package` answer produces: the package and its one target.
@@ -636,6 +739,23 @@ mod tests {
             assert_eq!(parse_language(language.as_str()), Ok(language));
         }
         assert!(parse_language("lua").is_err());
+    }
+
+    #[test]
+    fn a_package_template_gets_the_new_name_and_version_and_keeps_the_rest() {
+        let text = "# from the template\n[package]\nname = \"me/old\" # the scope\n\
+                    version   = \"2.3.0\"\nlicense = \"MIT\"\n\n[scripts]\nbuild = \"rojo build\"\n";
+        assert_eq!(
+            named(text, "acme/rocket").unwrap(),
+            "# from the template\n[package]\nname = \"acme/rocket\" # the scope\n\
+             version   = \"0.1.0\"\nlicense = \"MIT\"\n\n[scripts]\nbuild = \"rojo build\"\n"
+        );
+        // a [package] with no version gets one
+        assert!(
+            named("[package]\nname = \"me/old\"\n", "a/b")
+                .unwrap()
+                .contains("version = \"0.1.0\"")
+        );
     }
 
     #[test]
