@@ -1,0 +1,15 @@
+[target]
+environment = "roblox"
+
+[dependencies]
+rocket = { name = "acme/rocket", version = "^1", index = "local" }
+signal = { name = "acme/signal", version = "^2", index = "local", target = "roblox_server" }
+
+[dev-dependencies]
+spy = { name = "acme/spy", version = "^1", index = "local" }
+
+[overrides]
+"rocket.fuel" = { name = "acme/fuel-fork", version = "^0.3", index = "local" }
+
+[patches]
+"acme/rocket@1.0.0" = "patches/acme_rocket@1.0.0.patch"

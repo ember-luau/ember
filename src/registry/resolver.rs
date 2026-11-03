@@ -3047,6 +3047,18 @@ mod tests {
         write(&base.join("libs/lib"), "ember.toml", &gated(""));
         let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
         assert_eq!(sources(&installs), ["acme/lib path ../libs/lib lib"]);
+
+        // the entry picks the folder's features, as on a registry entry
+        let picked = "[dependencies]
+lib = { path = \"../libs/lib\", features = [\"pretty\"] }\n";
+        let installs = resolve_in(&project, picked, Refresh::Never).unwrap();
+        assert_eq!(installs[0].features, ["pretty"]);
+        assert_eq!(installs[1].name, "acme/util");
+        write(&base.join("libs/lib"), "ember.toml", &gated("\"pretty\""));
+        let off = "[dependencies]
+lib = { path = \"../libs/lib\", default-features = false }\n";
+        let installs = resolve_in(&project, off, Refresh::Never).unwrap();
+        assert_eq!(sources(&installs), ["acme/lib path ../libs/lib lib"]);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -3138,6 +3150,19 @@ mod tests {
         assert!(
             matches!(&installs[0].source, DownloadSource::Git { rev, branch: None, .. } if *rev == first)
         );
+
+        // the entry picks the commit's features, as on a registry entry
+        let featured = remote.commit(&[(
+            "ember.toml",
+            "[package]\nname = \"acme/gitlib\"\nversion = \"1.2.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\n\n[features]\nfast = []\n",
+        )]);
+        let picked = format!(
+            "[dependencies]\nlib = {{ git = \"{}\", rev = \"{featured}\", features = [\"fast\"] }}\n",
+            remote.url
+        );
+        let installs = resolve_in(&project, &picked, Refresh::Force).unwrap();
+        assert_eq!(installs[0].features, ["fast"]);
         let _ = fs::remove_dir_all(&project);
     }
 

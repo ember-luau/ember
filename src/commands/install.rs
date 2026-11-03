@@ -97,8 +97,6 @@ const STATE_FILE: &str = ".state";
 
 /// the per-environment package store inside `packages/`.
 pub(crate) const STORE_DIR: &str = ".ember";
-/// what that store was called before the ember rename. removed on install.
-const LEGACY_STORE_DIR: &str = ".lpm";
 
 /// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
@@ -339,7 +337,11 @@ pub(crate) fn install_project(
     manifest: &Manifest,
     include_global_tools: bool,
 ) -> Result<(), Error> {
-    let previous = Lockfile::load().ok();
+    // an install must not write a newer embr's lock back in the old format
+    let previous = match Lockfile::load() {
+        Err(error @ Error::LockfileNewer(_)) => return Err(error),
+        loaded => loaded.ok(),
+    };
     let resolved = install_steps(args, manifest, include_global_tools)?;
     if let Ok(lock) = Lockfile::load() {
         let previous = previous.as_ref().map_or(&[][..], |lock| &lock.packages[..]);
@@ -664,7 +666,7 @@ fn install_steps(
     if printed {
         println!();
     }
-    if print_changes(&changes, &tools) {
+    if print_changes(manifest, &changes, &tools) {
         println!();
     }
     match (package_count, tool_count) {
@@ -1242,7 +1244,7 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
         progress.phase("tools", count as u64);
         let tools = install_tools(&missing, &progress)?;
         drop(progress);
-        if print_changes(&BTreeMap::new(), &tools) {
+        if print_changes(manifest, &BTreeMap::new(), &tools) {
             println!();
         }
         println!("Installed {count} tool{}", ui::plural(count));
@@ -1251,20 +1253,19 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
 }
 
 /** each old default output folder, see [`Manifest::legacy_packages_outs`].
-`packages/shared` held the roblox packages until the rename, and
-`packages/luau` held the portable packages of a Luwu project until 0.14.
-once installs stop writing there nothing would ever clear the folder: a
+`packages/luau` held the portable packages of a Luwu project up to embr
+0.13. once installs stop writing there nothing would ever clear the folder: a
 stale tree of link files, which editors go on autocompleting and Rojo goes
 on syncing. so the first install after the move takes embr's files away,
 and every install after that finds nothing to do.
 
 three things keep this from touching anything that isn't embr's. the folder
 must still hold the `.ember` store an install put there. no [config] key may
-still point an environment at it: `shared-packages-out` is a supported
-spelling, and a project that aims one at this exact path means it. and only
-the store and the link files that `lock`, the last install, wrote there go.
-any other file stays, and so does the folder that holds it. best-effort: a
-failure to remove costs a stale folder, not an install.
+still point an environment at it: a project that aims one at this exact
+path means it. and only the store and the link files that `lock`, the last
+install, wrote there go. any other file stays, and so does the folder that
+holds it. best-effort: a failure to remove costs a stale folder, not an
+install.
 
 said out loud, not swept quietly. the project's own source and Rojo files
 may spell the old folder in requires and `$path`s that embr cannot rewrite,
@@ -1273,7 +1274,7 @@ returns whether it removed anything. */
 fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
     let mut removed = false;
     for (legacy, environment) in manifest.legacy_packages_outs() {
-        if !legacy.join(STORE_DIR).is_dir() && !legacy.join(LEGACY_STORE_DIR).is_dir() {
+        if !legacy.join(STORE_DIR).is_dir() {
             continue;
         }
         // unresolvable paths can't be compared, so nothing may be removed on them
@@ -1287,7 +1288,6 @@ fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
             continue;
         }
         let _ = fs::remove_dir_all(legacy.join(STORE_DIR));
-        let _ = fs::remove_dir_all(legacy.join(LEGACY_STORE_DIR));
         let links = lock
             .into_iter()
             .flat_map(|lock| &lock.packages)
@@ -1347,10 +1347,6 @@ fn write_state_stamps(
         let dir = out.join(STORE_DIR);
         if fs::create_dir_all(&dir).is_ok() {
             let _ = fs::write(dir.join(STATE_FILE), &hash);
-            /* the store moved with the rename. what it held is regenerated
-            scratch, so the old one goes rather than sitting dead under
-            packages/. best-effort: a failure costs a stale folder. */
-            let _ = fs::remove_dir_all(out.join(LEGACY_STORE_DIR));
         }
     }
 }
@@ -1467,9 +1463,12 @@ fn install_packages(
                         .source
                         .local_label()
                         .map_or(String::new(), |label| format!(" ({label})"));
+                    // the folder under packages/, so a Luwu project shows `luwu/`
                     task.done(&ui::success_line(&format!(
                         "{}@{} → {}/{shown}{source}",
-                        job.name, job.version, job.context
+                        job.name,
+                        job.version,
+                        manifest.packages_dir(job.context)
                     )));
                     /* a local publish can replace a version, so its hash means
                     nothing. a git commit is its own integrity */
@@ -1766,7 +1765,7 @@ fn link_in_place(
     task.done(&ui::success_line(&format!(
         "{} → {}/{shown} ({source})",
         package_id(&job.name, &job.version),
-        job.context
+        manifest.packages_dir(job.context)
     )));
     Ok(LockedPackage {
         name: job.name,
@@ -2284,7 +2283,8 @@ fn package_changes(
     changes
 }
 
-/** prints what changed, one root per heading, after pesde's summary:
+/** prints what changed, one root per heading, after pesde's summary. a
+heading is the root's folder under packages/, as on the install lines:
 
 ```text
 roblox
@@ -2298,7 +2298,11 @@ tools
 the accent for what came, crimson for what went, and a plain arrow for a
 version that moved. a tool lists only when this install downloaded it. returns whether
 anything printed, so the caller can separate it. */
-fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[InstalledTool]) -> bool {
+fn print_changes(
+    manifest: &Manifest,
+    packages: &BTreeMap<Environment, Vec<Change>>,
+    tools: &[InstalledTool],
+) -> bool {
     use crossterm::style::Stylize;
 
     // a path folder has no version in the lock
@@ -2318,7 +2322,7 @@ fn print_changes(packages: &BTreeMap<Environment, Vec<Change>>, tools: &[Install
         if changes.is_empty() {
             continue;
         }
-        println!("{}", environment.to_string().bold());
+        println!("{}", manifest.packages_dir(*environment).bold());
         for change in changes {
             match change {
                 Change::Added {
@@ -3218,86 +3222,71 @@ mod tests {
     that deliberately still points an environment at that path. */
     #[test]
     fn the_legacy_output_folder_goes_only_when_it_is_embr_s() {
-        /* a [package] table neither case cares about, so the fixture stays
-        readable to any embr: what this varies is [config] */
-        const PACKAGE: &str = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+        const LUWU: &str = "[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n";
         let base = std::env::temp_dir().join("embr-test-legacy-out");
-        let plain: Manifest = toml::from_str(PACKAGE).unwrap();
+        let luwu: Manifest = toml::from_str(LUWU).unwrap();
         let claimed: Manifest = toml::from_str(&format!(
-            "{PACKAGE}\n[config]\nshared-packages-out = \"packages/shared\"\n"
+            "{LUWU}\n[config]\nluau-packages-out = \"packages/luau\"\n"
         ))
         .unwrap();
-        let lock = |environment: &str, links: &[&str]| -> Lockfile {
-            let mut text = "version = 2\n".to_string();
-            for link in links {
-                text.push_str(&format!(
-                    "\n[[package]]\nname = \"acme/{link}\"\nversion = \"1.0.0\"\n\
-                     environment = \"{environment}\"\nlink = \"{link}\"\n\
-                     index = \"https://example.com/index\"\ntype = \"zip\"\nurl = \"https://example.com/{link}\"\n"
-                ));
-            }
-            toml::from_str(&text).unwrap()
-        };
-        let roblox = lock("shared", &["Thing", "acme/Scoped"]);
+        let plain: Manifest = toml::from_str("[target]\nenvironment = \"luau\"\n").unwrap();
+        let mut text = "version = 2\n".to_string();
+        for link in ["Thing", "acme/Scoped", "../outside"] {
+            text.push_str(&format!(
+                "\n[[package]]\nname = \"acme/{link}\"\nversion = \"1.0.0\"\n\
+                 environment = \"luau\"\nlink = \"{link}\"\n\
+                 index = \"https://example.com/index\"\ntype = \"zip\"\nurl = \"https://example.com/{link}\"\n"
+            ));
+        }
+        let lock: Lockfile = toml::from_str(&text).unwrap();
+        let old = base.join("packages/luau");
 
-        let setup = |folder: &str, store: bool| {
+        let setup = |store: bool| {
             let _ = fs::remove_dir_all(&base);
-            let legacy = base.join("packages").join(folder);
-            fs::create_dir_all(legacy.join("acme")).unwrap();
+            fs::create_dir_all(old.join("acme")).unwrap();
             if store {
-                fs::create_dir_all(legacy.join(".ember/acme_thing")).unwrap();
+                fs::create_dir_all(old.join(".ember/acme_thing")).unwrap();
             }
-            fs::write(legacy.join("Thing.luau"), "return nil\n").unwrap();
-            fs::write(legacy.join("acme/Scoped.luau"), "return nil\n").unwrap();
+            fs::write(old.join("Thing.luau"), "return nil\n").unwrap();
+            fs::write(old.join("acme/Scoped.luau"), "return nil\n").unwrap();
         };
         // the function reads relative paths, so it has to run from the project
-        let in_base = |manifest: &Manifest, lock: &Lockfile| {
+        let in_base = |manifest: &Manifest| {
             crate::project::workspace::in_dir(&base, || {
-                Ok(remove_legacy_outs(manifest, Some(lock)))
+                Ok(remove_legacy_outs(manifest, Some(&lock)))
             })
             .unwrap()
         };
 
-        // an embr store from before the rename goes, and says so
-        setup("shared", true);
-        assert!(in_base(&plain, &roblox));
-        assert!(!base.join("packages/shared").exists());
-        // ...and a second install finds nothing left to do
-        assert!(!in_base(&plain, &roblox));
-
-        /* a folder of the user's own that merely shares the name is not an
-        install output: no `.ember`, no removal */
-        setup("shared", false);
-        assert!(!in_base(&plain, &roblox));
-        assert!(base.join("packages/shared/Thing.luau").exists());
-
-        // and a project that still aims an environment there keeps it
-        setup("shared", true);
-        assert!(!in_base(&claimed, &roblox));
-        assert!(base.join("packages/shared/.ember").exists());
-
-        /* a Luwu project's packages/luau goes the same way. a file that
-        the lock does not name is the user's, so it and its folder stay */
-        let luwu: Manifest =
-            toml::from_str("[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n").unwrap();
-        let portable = lock("luau", &["Thing", "acme/Scoped", "../outside"]);
-        setup("luau", true);
-        fs::write(base.join("packages/luau/notes.md"), "mine\n").unwrap();
+        /* a Luwu project's packages/luau goes. a file that the lock does
+        not name is the user's, so it and its folder stay */
+        setup(true);
+        fs::write(old.join("notes.md"), "mine\n").unwrap();
         fs::write(base.join("packages/outside.luau"), "mine\n").unwrap();
-        assert!(in_base(&luwu, &portable));
+        assert!(in_base(&luwu));
         // a link that climbs out of the folder names nothing that embr wrote
         assert!(base.join("packages/outside.luau").exists());
-        let old = base.join("packages/luau");
         assert!(!old.join(".ember").exists());
         assert!(!old.join("Thing.luau").exists());
         assert!(!old.join("acme").exists());
         assert!(old.join("notes.md").exists());
         // with only the user's file left, the next install has nothing to do
-        assert!(!in_base(&luwu, &portable));
+        assert!(!in_base(&luwu));
+
+        /* a folder of the user's own that merely shares the name is not an
+        install output: no `.ember`, no removal */
+        setup(false);
+        assert!(!in_base(&luwu));
+        assert!(old.join("Thing.luau").exists());
+
+        // a project that still aims an environment there keeps it
+        setup(true);
+        assert!(!in_base(&claimed));
+        assert!(old.join(".ember").exists());
 
         // a Luau project still installs there, so its folder is no legacy
-        setup("luau", true);
-        assert!(!in_base(&plain, &portable));
+        setup(true);
+        assert!(!in_base(&plain));
         assert!(old.join("Thing.luau").exists());
 
         let _ = fs::remove_dir_all(&base);

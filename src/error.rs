@@ -164,7 +164,7 @@ pub enum Error {
     InheritMissing { field: String, from: String },
 
     #[error(
-        "'{field}' sets workspace = true, so it cannot also set '{key}'; only a dependency can add 'target' or 'entry'"
+        "'{field}' sets workspace = true, so it cannot also set '{key}'; only a dependency can add 'target', 'entry', 'optional', 'features' or 'default-features'"
     )]
     InheritExtraKey { field: String, key: String },
 
@@ -529,6 +529,11 @@ pub enum Error {
         "ember.lock is version {0}, from before self-contained environment roots; run `embr install` once without --locked to regenerate it"
     )]
     LockfileOutdated(u32),
+
+    #[error(
+        "ember.lock is version {0}, which a newer embr wrote and this embr cannot read; update embr with `embr self update`"
+    )]
+    LockfileNewer(i64),
 
     /** a downloaded archive does not have the SHA-256 that its index entry
     or ember.lock records. embr did not extract or cache it. */

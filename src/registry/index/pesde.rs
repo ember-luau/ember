@@ -324,7 +324,7 @@ fn download_source(
 
 /** the dependencies of an entry that install resolves. an ember entry
 keeps its optional ones in `optional-dependencies` and the ones that a
-feature gates in `feature-dependencies`, so an embr before 0.14.0 never
+feature gates in `feature-dependencies`, so an embr before 1.0.0 never
 sees them and cannot fail on them. the resolver reads the entry's
 `features` to know when a gated one installs. its peers are in
 `peer-dependencies`, which install never reads: a peer is never installed. */
@@ -550,7 +550,7 @@ mod tests {
     }
 
     /** an entry keeps the dependencies that a feature gates in
-    `feature-dependencies`, which an embr before 0.14.0 does not read. a
+    `feature-dependencies`, which an embr before 1.0.0 does not read. a
     dependency entry passes the features it turns on through. */
     #[test]
     fn feature_dependencies_come_from_their_table_with_their_features() {

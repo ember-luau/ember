@@ -1,0 +1,11 @@
+[package]
+name = "acme/rocket"
+version = "1.0.0"
+license = "MIT"
+
+[target]
+environment = "roblox"
+main = "src/init.luau"
+
+[dependencies]
+fuel = { name = "acme/fuel", version = "^0.2", index = "local" }

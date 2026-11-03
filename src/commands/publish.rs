@@ -421,6 +421,7 @@ fn convert_workspace_dependencies(
             entry,
             features,
             default_features,
+            ..
         } = dependency
         else {
             continue;
@@ -459,6 +460,7 @@ fn convert_workspace_dependencies(
             // the features it turns on in the member stay on
             features: features.clone(),
             default_features: *default_features,
+            unknown: Default::default(),
         };
     }
     Ok(())
@@ -509,6 +511,11 @@ fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Re
             };
             let (name, index, target, entry) =
                 (name.clone(), index.clone(), target.clone(), entry.clone());
+            // the features it turns on stay on, as for a workspace entry
+            let (features, default_features) = (
+                dependency.features().to_vec(),
+                dependency.default_features(),
+            );
             let name = match name {
                 Some(name) => name,
                 None => own_name(alias, dependency, project_dir)?,
@@ -521,9 +528,9 @@ fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Re
                 entry,
                 key: None,
                 optional: false,
-                // a path or git entry takes no features yet
-                features: Vec::new(),
-                default_features: true,
+                features,
+                default_features,
+                unknown: Default::default(),
             };
         }
         for alias in dropped {
@@ -773,6 +780,7 @@ mod tests {
                 entry: None,
                 features: Vec::new(),
                 default_features: true,
+                unknown: Default::default(),
             },
         );
         assert!(matches!(

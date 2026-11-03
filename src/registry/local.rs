@@ -53,7 +53,7 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
     }
     entry.insert("download".into(), format!("{SCHEME}{file}").into());
     /* the registry's shape: the dependencies that a feature gates and the
-    optional ones in tables of their own, which an embr before 0.14.0 does
+    optional ones in tables of their own, which an embr before 1.0.0 does
     not read, and the peers in another. a gated one that is also optional
     is gated first */
     let gated = features::gated(&manifest.features, &|alias| {
@@ -306,7 +306,7 @@ mod tests {
 
     /** a dependency that a feature gates goes to `feature-dependencies`,
     an optional one too, and the entry keeps `features`. an embr before
-    0.14.0 reads only `dependencies`, so it never installs a gated one. */
+    1.0.0 reads only `dependencies`, so it never installs a gated one. */
     #[test]
     fn a_local_publish_keeps_features_and_gated_dependencies_apart() {
         let root = std::env::temp_dir().join("embr-test-local-registry-features");

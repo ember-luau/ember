@@ -232,14 +232,6 @@ mod tests {
         write(&base, ".alloy/ingots/enamel/enamel", "");
         write(&base, "packages/luau/Core.luau", "");
         write(&base, "Packages/Chief.luau", "");
-        /* the pre-rename roblox output folder. [config] here repoints that
-        environment elsewhere, so nothing else would exclude it, and an
-        install has not necessarily run to clear it */
-        write(
-            &base,
-            "packages/shared/.ember/evaera_promise/lib/init.lua",
-            "",
-        );
 
         let manifest = parse_manifest(
             r#"

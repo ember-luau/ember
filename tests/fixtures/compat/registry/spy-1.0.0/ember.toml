@@ -1,0 +1,8 @@
+[package]
+name = "acme/spy"
+version = "1.0.0"
+license = "MIT"
+
+[target]
+environment = "roblox"
+main = "src/init.luau"
