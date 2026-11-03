@@ -330,8 +330,14 @@ pub fn install_lines(items: &[Vec<Item>], fresh: &BTreeSet<String>) -> Vec<Strin
 }
 
 /** prints the install block for `installed`, the lock that the install
-left, against `previous`, the lock before it. `fetch` as for [`gather`]. */
-pub fn report(previous: &[LockedPackage], installed: &[LockedPackage], fetch: bool) {
+left, against `previous`, the lock before it. `fetch` as for [`gather`].
+`peers` are the peer warnings, which come last. */
+pub fn report(
+    previous: &[LockedPackage],
+    installed: &[LockedPackage],
+    fetch: bool,
+    peers: &[String],
+) {
     let fresh: BTreeSet<String> = installed
         .iter()
         .filter(|package| {
@@ -342,7 +348,12 @@ pub fn report(previous: &[LockedPackage], installed: &[LockedPackage], fetch: bo
         .map(|package| package.name.to_lowercase())
         .collect();
     let items = gather(installed, fetch, &mut Vec::new());
-    let lines = install_lines(&items, &fresh);
+    let mut lines = install_lines(&items, &fresh);
+    lines.extend(
+        peers
+            .iter()
+            .map(|line| ui::printable(line).yellow().to_string()),
+    );
     if !lines.is_empty() {
         println!();
         for line in lines {

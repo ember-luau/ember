@@ -105,6 +105,8 @@ pub struct TransitiveDependency {
     pub index_url: Option<String>,
     /// the alias the parent declared this dependency under. [overrides] paths address edges by it.
     pub alias: String,
+    /// install skips it when it does not resolve, see [`Dependency::optional`](crate::project::manifest::Dependency::optional).
+    pub optional: bool,
 }
 
 /** Everything needed to re-download a resolved package, also stored in

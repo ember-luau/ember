@@ -112,6 +112,7 @@ fn parse_dependency(alias: &str, spec: &str) -> Option<TransitiveDependency> {
         version_req: req.to_string(),
         index_url: None,
         alias: alias.to_string(),
+        optional: false,
     })
 }
 

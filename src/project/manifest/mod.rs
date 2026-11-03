@@ -86,6 +86,17 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub dev_dependencies: BTreeMap<String, Dependency>,
+    /** packages that a project which installs this package must provide
+    itself, so that there is one shared copy. install never installs a
+    peer. it links the peer to the copy that the project has, and warns
+    when there is none or its version does not match. in the project that
+    installs, the table is only documentation: install does not read it. */
+    #[serde(
+        rename = "peer-dependencies",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub peer_dependencies: BTreeMap<String, Dependency>,
     /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
@@ -696,6 +707,10 @@ pub enum Dependency {
         only to the registry API. anyone who reads ember.toml can use it. */
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
+        /** install tries it, and skips it with one line when it does not
+        resolve or download. the package then has no link file for it. */
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        optional: bool,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -762,6 +777,11 @@ impl Dependency {
                 entry.as_deref()
             }
         }
+    }
+
+    /// whether the entry says `optional = true`. a workspace member is always there.
+    pub fn optional(&self) -> bool {
+        matches!(self, Dependency::Registry { optional: true, .. })
     }
 
     /// the package this entry names, whichever shape it takes.
@@ -1106,12 +1126,19 @@ impl Manifest {
         }
         /* an alias names one link file, so it cannot name two entries.
         install would link only one of them */
-        if let Some(alias) = self
-            .dev_dependencies
-            .keys()
-            .find(|alias| self.dependencies.contains_key(*alias))
-        {
-            return Err(Error::AliasInBothTables(alias.clone()));
+        for (table, entries) in [
+            ("dev-dependencies", &self.dev_dependencies),
+            ("peer-dependencies", &self.peer_dependencies),
+        ] {
+            if let Some(alias) = entries
+                .keys()
+                .find(|alias| self.dependencies.contains_key(*alias))
+            {
+                return Err(Error::AliasInBothTables {
+                    alias: alias.clone(),
+                    table,
+                });
+            }
         }
         Ok(())
     }
@@ -2591,6 +2618,40 @@ mod tests {
     }
 
     #[test]
+    fn optional_and_peer_dependencies_parse_and_write_back() {
+        let manifest = validated(
+            r#"
+            [dependencies]
+            signal = { name = "acme/signal", version = "^1.0.0", optional = true, target = "roblox_server", entry = "src" }
+            core = { name = "acme/core", version = "^1.0.0" }
+
+            [peer-dependencies]
+            React = { name = "jsdotlua/react", version = "^17.0.0" }
+            "#,
+        )
+        .unwrap();
+        assert!(manifest.dependencies["signal"].optional());
+        assert_eq!(
+            manifest.dependencies["signal"].target(),
+            Some("roblox_server")
+        );
+        assert!(!manifest.dependencies["core"].optional());
+        assert_eq!(
+            manifest.peer_dependencies["React"].package(),
+            "jsdotlua/react"
+        );
+
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("optional = true"), "{written}");
+        assert!(written.contains("[peer-dependencies"), "{written}");
+        // `optional = false` is the default, so it stays out
+        assert_eq!(written.matches("optional").count(), 1, "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert!(reparsed.dependencies["signal"].optional());
+        assert_eq!(reparsed.peer_dependencies.len(), 1);
+    }
+
+    #[test]
     fn one_alias_in_both_tables_is_refused() {
         let error = validated(
             "[dependencies]\nlest = { name = \"alloy/lest\", version = \"^0.2\" }\n\n\
@@ -2598,8 +2659,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&error, Error::AliasInBothTables(alias) if alias == "lest"),
+            matches!(&error, Error::AliasInBothTables { alias, table: "dev-dependencies" } if alias == "lest"),
             "{error}"
+        );
+        // a peer and a dependency would link one alias twice
+        let error = validated(
+            "[dependencies]\nreact = { name = \"acme/react\", version = \"^1\" }\n\n\
+             [peer-dependencies]\nreact = { name = \"acme/react\", version = \"^1\" }\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "'react' is in [dependencies] and in [peer-dependencies]; an alias goes in one of the two"
+        );
+        // a peer that the tests also install is the usual shape
+        assert!(
+            validated(
+                "[peer-dependencies]\nreact = { name = \"acme/react\", version = \"^1\" }\n\n\
+                 [dev-dependencies]\nreact = { name = \"acme/react\", version = \"^1\" }\n",
+            )
+            .is_ok()
         );
         // the check is on aliases, not on packages
         assert!(

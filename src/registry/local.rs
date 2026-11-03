@@ -52,9 +52,24 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
         entry.insert("description".into(), description.clone().into());
     }
     entry.insert("download".into(), format!("{SCHEME}{file}").into());
-    let dependencies = dependencies(manifest)?;
-    if !dependencies.is_empty() {
-        entry.insert("dependencies".into(), dependencies.into());
+    /* the registry's shape: the optional dependencies in a table of their
+    own, which an embr before 0.14.0 does not read, and the peers in another */
+    let (optional, required): (Vec<_>, Vec<_>) = manifest
+        .dependencies
+        .iter()
+        .partition(|(_, dependency)| dependency.optional());
+    for (key, entries) in [
+        ("dependencies", required),
+        ("optional-dependencies", optional),
+        (
+            "peer-dependencies",
+            manifest.peer_dependencies.iter().collect(),
+        ),
+    ] {
+        let dependencies = dependencies(manifest, &entries)?;
+        if !dependencies.is_empty() {
+            entry.insert(key.into(), dependencies.into());
+        }
     }
 
     let index_path = root.join("index").join(scope).join(name);
@@ -68,12 +83,15 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
     Ok(())
 }
 
-/** the dependencies of an entry. an index key means nothing outside the
-manifest that states it, so each one becomes its URL. a dependency on
+/** one dependency table of an entry. an index key means nothing outside
+the manifest that states it, so each one becomes its URL. a dependency on
 the local index names no index, which the reader takes as this one. */
-fn dependencies(manifest: &Manifest) -> Result<toml::Table, Error> {
+fn dependencies(
+    manifest: &Manifest,
+    entries: &[(&String, &Dependency)],
+) -> Result<toml::Table, Error> {
     let mut table = toml::Table::new();
-    for (alias, dependency) in &manifest.dependencies {
+    for &(alias, dependency) in entries {
         // publish turned each workspace dependency into a registry one
         let Dependency::Registry {
             name,
@@ -90,6 +108,9 @@ fn dependencies(manifest: &Manifest) -> Result<toml::Table, Error> {
         let url = manifest.index_url(index.as_deref())?;
         if url != NAME {
             spec.insert("index".into(), url.into());
+        }
+        if dependency.optional() {
+            spec.insert("optional".into(), true.into());
         }
         table.insert(alias.clone(), spec.into());
     }
@@ -182,7 +203,10 @@ mod tests {
              [dependencies]\n\
              signal = { name = \"acme/signal\", version = \"^1\" }\n\
              util = { name = \"me/util\", version = \"^\", index = \"local\" }\n\
-             promise = { name = \"evaera/promise\", version = \"^4\", index = \"wally\" }\n",
+             promise = { name = \"evaera/promise\", version = \"^4\", index = \"wally\" }\n\
+             trace = { name = \"me/trace\", version = \"^1\", index = \"local\", optional = true }\n\n\
+             [peer-dependencies]\n\
+             React = { name = \"jsdotlua/react\", version = \"^17\" }\n",
         );
         publish_in(&root, &lib, b"first").unwrap();
 
@@ -213,7 +237,7 @@ mod tests {
         let mut dependencies: Vec<_> = package
             .dependencies
             .iter()
-            .map(|dep| (dep.name.as_str(), dep.index_url.as_deref()))
+            .map(|dep| (dep.name.as_str(), dep.index_url.as_deref(), dep.optional))
             .collect();
         dependencies.sort();
         assert_eq!(
@@ -221,14 +245,29 @@ mod tests {
             [
                 (
                     "acme/signal",
-                    Some(crate::project::manifest::DEFAULT_INDEX_URL)
+                    Some(crate::project::manifest::DEFAULT_INDEX_URL),
+                    false
                 ),
                 (
                     "evaera/promise",
-                    Some("https://github.com/UpliftGames/wally-index")
+                    Some("https://github.com/UpliftGames/wally-index"),
+                    false
                 ),
-                ("me/util", None),
+                ("me/trace", None, true),
+                ("me/util", None, false),
             ]
+        );
+        // the entry has the registry's three tables, so the peer never resolves
+        let index_file = index.file("me/lib").unwrap().unwrap();
+        let entry = &index_file["1.0.0 roblox"];
+        assert!(entry["dependencies"].get("trace").is_none());
+        assert_eq!(
+            entry["optional-dependencies"]["trace"]["optional"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            entry["peer-dependencies"]["React"]["name"].as_str(),
+            Some("jsdotlua/react")
         );
 
         // the same version again is the edit loop: the new archive wins

@@ -147,6 +147,7 @@ fn publish_project(
         let args = super::install::InstallArgs {
             locked: false,
             refresh: false,
+            strict_peers: false,
         };
         super::install::install_project(&args, &manifest, false)?;
     }
@@ -392,6 +393,7 @@ fn convert_workspace_dependencies(
 ) -> Result<(), Error> {
     if !manifest
         .all_dependencies()
+        .chain(&manifest.peer_dependencies)
         .any(|(_, dependency)| matches!(dependency, Dependency::Workspace { .. }))
     {
         return Ok(());
@@ -407,6 +409,7 @@ fn convert_workspace_dependencies(
         .dependencies
         .iter_mut()
         .chain(&mut manifest.dev_dependencies)
+        .chain(&mut manifest.peer_dependencies)
     {
         let Dependency::Workspace {
             workspace: name,
@@ -447,6 +450,7 @@ fn convert_workspace_dependencies(
             which is the same module once it publishes */
             entry: entry.clone(),
             key: None,
+            optional: false,
         };
     }
     Ok(())
@@ -458,7 +462,8 @@ alias-form values refer to aliases only this manifest has. [patches] points
 at files in this repo, which the archive doesn't carry. shipping either
 would just mislead readers of the packed manifest. a dependency's link
 key stays home too: in the archive, every reader of the package gets the
-link. [dev-dependencies] ships, so the registry can show it. */
+link. [dev-dependencies] and [peer-dependencies] ship, so the registry
+can show them and a consumer's install can check the peers. */
 fn strip_local_tables(manifest: &mut Manifest) {
     manifest.overrides.clear();
     manifest.patches.clear();
@@ -466,6 +471,7 @@ fn strip_local_tables(manifest: &mut Manifest) {
         .dependencies
         .values_mut()
         .chain(manifest.dev_dependencies.values_mut())
+        .chain(manifest.peer_dependencies.values_mut())
     {
         if let Dependency::Registry { key, .. } = dependency {
             *key = None;

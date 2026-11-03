@@ -117,11 +117,12 @@ sets a key, its own value stays. Lockfiles stay, and `embr install` writes
 
 - **pesde:** the package fields, the `[target]` environment and `lib`,
   `includes`, `workspace_members`, `[indices]` and `[wally_indices]`, pesde,
-  Wally and workspace dependencies, `[overrides]`, and `[scripts]`. pesde
+  Wally and workspace dependencies, `[peer_dependencies]` as
+  `[peer-dependencies]`, `[overrides]`, and `[scripts]`. pesde
   runs a script with Lune, so each one becomes `lune run <file>`, and
   `embr run <name>` passes its arguments through. pesde's `default` indices
   become `pesde` and `wally`, so ember's own default index stays. Git and
-  path dependencies, dev and peer dependencies, `[engines]`, `[patches]`,
+  path dependencies, dev dependencies, `[engines]`, `[patches]`,
   `[place]`, and the `sourcemap_generator` hook stay.
 - **Wally:** the package fields, `realm`, `include`, `exclude`, `registry`,
   `[dependencies]`, and `[server-dependencies]`, which install into the
@@ -187,8 +188,8 @@ embr remove signal         # an alias from ember.toml
 embr rm chief/core lest    # a scope/name, and more than one at a time
 ```
 
-`embr remove` deletes entries from `[dependencies]` and
-`[dev-dependencies]`. Each name is an alias or the `scope/name` of an
+`embr remove` deletes entries from `[dependencies]`, `[dev-dependencies]`
+and `[peer-dependencies]`. Each name is an alias or the `scope/name` of an
 entry. The comments and the format of `ember.toml` stay. If a name matches
 no entry, embr shows the aliases and changes nothing.
 
@@ -355,6 +356,72 @@ lest = { name = "alloy/lest", version = "^0.2.0" }
 - `embr outdated` lists the dev dependencies too.
 - `embr publish` keeps the table in the package, so the registry can show
   it.
+
+## Optional dependencies
+
+An entry with `optional = true` is an optional dependency. It takes the
+same keys as any other entry, `target` and `entry` too:
+
+```toml
+[dependencies]
+signal = { name = "acme/signal", version = "^1.0.0", optional = true }
+```
+
+- `embr install` tries to install it. When it does not resolve, the
+  install skips it with one line and goes on. That happens when no version
+  matches, when it has no target for the environment, when its download
+  fails, or when one of its own dependencies fails.
+- A skipped optional dependency gets no link file. The code checks for it
+  at run time:
+
+  ```luau
+  local ok, Signal = pcall(require, "@packages/signal")
+  if not ok then
+    Signal = nil -- install skipped it, so the feature stays off
+  end
+  ```
+
+- The optional dependencies of a dependency follow the same rule.
+- `ember.lock` holds what was installed. A package that only optional
+  dependencies bring in has `optional = true` there.
+- `embr add --optional <scope/name>` writes the entry.
+
+```
+skipped optional dependency 'signal' (acme/signal): No version of acme/signal matches requirement '^9.0.0'
+```
+
+## Peer dependencies
+
+`[peer-dependencies]` lists the packages that the project which installs
+your package must have. There is then one copy of each, such as one React
+or one Fusion:
+
+```toml
+[peer-dependencies]
+React = { name = "jsdotlua/react", version = "^17.0.0" }
+```
+
+- `embr install` never installs a peer. It links the alias of the peer to
+  the copy in the project, in the same environment root.
+- When the project has no copy, or has a version that the requirement does
+  not take, the install shows one warning line at the end and does not
+  fail. `embr install --strict-peers` makes the install fail.
+- In the project that you install, `[peer-dependencies]` does nothing.
+  Put the same package in `[dev-dependencies]` to use it in your tests.
+- pesde's `peer_dependencies` work the same way, and `embr migrate` moves
+  them to `[peer-dependencies]`.
+- `embr add --peer <scope/name>` writes the entry.
+
+```
+warning: acme/ui@1.0.0: needs the peer jsdotlua/react ^17.0.0, which the project does not have. Run `embr add jsdotlua/react --version "^17.0.0"`
+warning: acme/menu@2.0.0: needs the peer jsdotlua/react ^17.0.0, and the project has 16.4.0
+```
+
+Both need embr 0.14.0, and a registry that keeps the new tables in the
+index entry. The entry keeps an optional dependency in
+`optional-dependencies` and a peer in `peer-dependencies`. An older embr
+reads neither table, so it does not install an optional dependency and
+does not fail on one.
 
 ## Workspace inheritance
 

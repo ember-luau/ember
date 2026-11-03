@@ -61,6 +61,10 @@ pub struct LockedPackage {
     from here without consulting the manifest. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<PatchRecord>,
+    /** only optional dependencies lead here. `--locked` skips it when its
+    download fails, as the install that wrote the lock did. */
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
     #[serde(flatten)]
     pub source: DownloadSource,
 }
@@ -174,6 +178,7 @@ mod tests {
                     "patches/evaera_promise@4.0.0.patch".to_string(),
                     b"--- a/init.lua\n+++ b/init.lua\n",
                 )),
+                optional: false,
                 source: DownloadSource::Zip {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
@@ -189,6 +194,8 @@ mod tests {
                 index: "https://github.com/pesde-pkg/index".to_string(),
                 redirects: Default::default(),
                 patch: None,
+                // only an optional dependency brings it in
+                optional: true,
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },
@@ -231,6 +238,10 @@ mod tests {
         assert_eq!(parsed.packages[1].link, None);
         assert_eq!(text.matches("context").count(), 1);
         assert_eq!(text.matches("link").count(), 1);
+        // `optional` is written only where it holds
+        assert!(!parsed.packages[0].optional);
+        assert!(parsed.packages[1].optional);
+        assert_eq!(text.matches("optional").count(), 1);
     }
 
     #[test]

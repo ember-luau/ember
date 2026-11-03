@@ -401,9 +401,13 @@ pub enum Error {
     DependencyTargetInvalid { alias: String, target: String },
 
     #[error(
-        "'{0}' is in [dependencies] and in [dev-dependencies]; an alias goes in one of the two"
+        "--strict-peers fails the install: {0} peer {what} not met. The warnings above say which",
+        what = if *.0 == 1 { "dependency is" } else { "dependencies are" }
     )]
-    AliasInBothTables(String),
+    PeersUnmet(usize),
+
+    #[error("'{alias}' is in [dependencies] and in [{table}]; an alias goes in one of the two")]
+    AliasInBothTables { alias: String, table: &'static str },
 
     /// `embr remove` got a name that no dependency alias or package name matches.
     #[error("No dependency in ember.toml is named '{name}'; {known}")]

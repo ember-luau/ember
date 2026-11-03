@@ -1058,25 +1058,35 @@ other readers here. ember.toml and lpm.toml read each entry's `name` key, pesde.
 [server-dependencies] count too. the resolver installs them, wally.rs
 chains both tables, and a server-realm package like lyra declares ALL its
 deps there. reading only [dependencies] starved those packages of nested
-links and left their escape requires unrewritten. pesde's
-[peer_dependencies] count for the same reason: the resolver installs a
-peer, and the package requires it through its own packages folder, as
-metamethods/typed does with typed_core. dev tables stay out. missing or
-unparseable manifests read as no dependencies, same stance as
-`toml_string`. */
-pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
+links and left their escape requires unrewritten. a peer counts too,
+ember's [peer-dependencies] and pesde's [peer_dependencies]: install
+never installs one, but it links the copy that the project has, and the
+package requires it through its own packages folder, as metamethods/typed
+does with typed_core. dev tables stay out. missing or unparseable
+manifests read as no dependencies, same stance as `toml_string`. */
+pub fn declared_dependencies(dir: &Path) -> Vec<(String, String, DependencyKind)> {
     /// how one manifest flavor names the package a dependency entry means
     type DependencyName = fn(&toml::Value) -> Option<String>;
+    /// a dependency table, and whether it holds peers
+    type Tables = &'static [(&'static str, bool)];
 
     // how an ember.toml or lpm.toml entry names its package
     let own: DependencyName = |entry| Some(entry.get("name")?.as_str()?.to_string());
 
-    let manifests: [(&str, &[&str], DependencyName); 4] = [
-        (MANIFEST_FILE, &["dependencies"], own),
-        (LEGACY_MANIFEST_FILE, &["dependencies"], own),
+    let manifests: [(&str, Tables, DependencyName); 4] = [
+        (
+            MANIFEST_FILE,
+            &[("dependencies", false), ("peer-dependencies", true)],
+            own,
+        ),
+        (
+            LEGACY_MANIFEST_FILE,
+            &[("dependencies", false), ("peer-dependencies", true)],
+            own,
+        ),
         (
             "pesde.toml",
-            &["dependencies", "peer_dependencies"],
+            &[("dependencies", false), ("peer_dependencies", true)],
             |entry| {
                 let name = entry.get("name").or_else(|| entry.get("wally"))?.as_str()?;
                 // pesde serializes wally package names with a "wally#" prefix
@@ -1085,7 +1095,7 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
         ),
         (
             "wally.toml",
-            &["dependencies", "server-dependencies"],
+            &[("dependencies", false), ("server-dependencies", false)],
             |entry| {
                 let spec = entry.as_str()?;
                 Some(
@@ -1106,17 +1116,20 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
         };
         let found: Vec<_> = tables
             .iter()
-            .filter_map(|table| parsed.get(*table).and_then(toml::Value::as_table))
+            .filter_map(|(table, peer)| {
+                Some((parsed.get(*table).and_then(toml::Value::as_table)?, *peer))
+            })
             .collect();
         if found.is_empty() {
             continue;
         }
         return found
             .into_iter()
-            .flat_map(|table| table.iter())
+            .flat_map(|(table, peer)| table.iter().map(move |entry| (entry, peer)))
             // entries this flavor can't name, like workspace specifiers, are skipped
-            .filter_map(|(alias, entry)| {
-                Some((alias.clone(), dependency_name(entry)?.trim().to_lowercase()))
+            .filter_map(|((alias, entry), peer)| {
+                let name = dependency_name(entry)?.trim().to_lowercase();
+                Some((alias.clone(), name, DependencyKind::of(entry, peer)))
             })
             .collect();
     }
@@ -1136,9 +1149,38 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String)> {
                 .get("alias")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_else(|| crate::registry::index::forest::short_name(name));
-            (alias.to_string(), name.trim().to_lowercase())
+            (
+                alias.to_string(),
+                name.trim().to_lowercase(),
+                DependencyKind::Required,
+            )
         })
         .collect()
+}
+
+/// how a package's manifest declares one dependency, see [`declared_dependencies`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DependencyKind {
+    /// the package needs it.
+    Required,
+    /// `optional = true`: install may have skipped it, and the package checks at runtime.
+    Optional,
+    /// a peer and its version requirement. the project provides it, install never does.
+    Peer(String),
+}
+
+impl DependencyKind {
+    /// the kind of `entry`, a manifest's dependency value. `peer` says the table holds peers.
+    fn of(entry: &toml::Value, peer: bool) -> Self {
+        if peer {
+            let version = entry.get("version").and_then(toml::Value::as_str);
+            DependencyKind::Peer(version.unwrap_or("*").to_string())
+        } else if entry.get("optional").and_then(toml::Value::as_bool) == Some(true) {
+            DependencyKind::Optional
+        } else {
+            DependencyKind::Required
+        }
+    }
 }
 
 /// a package's forest.json, if it ships one that parses.
@@ -1268,6 +1310,14 @@ pub(crate) fn normalize_entry(path: &str) -> String {
 mod tests {
     use super::*;
 
+    /// the (alias, name) pairs of `dir`, for the tests that do not look at the kind.
+    fn names(dir: &Path) -> Vec<(String, String)> {
+        declared_dependencies(dir)
+            .into_iter()
+            .map(|(alias, name, _)| (alias, name))
+            .collect()
+    }
+
     fn write_package(dir: &Path, file: &str, contents: &str) {
         let path = dir.join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1351,7 +1401,7 @@ mod tests {
         assert_eq!(entry_point(&base).as_deref(), Some("out/lpm"));
         assert_eq!(package_name(&base).as_deref(), Some("chief/traits"));
         assert_eq!(
-            declared_dependencies(&base),
+            names(&base),
             vec![("core".to_string(), "chief/core".to_string())]
         );
 
@@ -1377,7 +1427,7 @@ mod tests {
              local = { workspace = \"chief/dev\", version = \"^\" }\n",
         );
         assert_eq!(
-            declared_dependencies(&embr),
+            names(&embr),
             [("core".to_string(), "chief/core".to_string())]
         );
 
@@ -1391,7 +1441,7 @@ mod tests {
             "[dependencies]\nhello = { name = \"pesde/hello\", version = \"^1\" }\n\
              promise = { wally = \"wally#evaera/Promise\", version = \"^4\" }\n",
         );
-        let mut deps = declared_dependencies(&pesde);
+        let mut deps = names(&pesde);
         deps.sort();
         assert_eq!(
             deps,
@@ -1401,7 +1451,7 @@ mod tests {
             ]
         );
 
-        /* a pesde peer links like any other dependency: metamethods/typed
+        /* a pesde peer links to the project's copy: metamethods/typed
         requires `./luau_packages/typed_core`, its peer. dev still doesn't */
         let peer = base.join("pesde-peer");
         write_package(
@@ -1414,8 +1464,46 @@ mod tests {
             declared_dependencies(&peer),
             [(
                 "typed_core".to_string(),
-                "metamethods/typed_core".to_string()
+                "metamethods/typed_core".to_string(),
+                DependencyKind::Peer("^0.1.0".to_string())
             )]
+        );
+
+        /* ember.toml marks an optional dependency, and its peers have a
+        table of their own */
+        let kinds = base.join("embr-kinds");
+        write_package(
+            &kinds,
+            "ember.toml",
+            "[dependencies]
+signal = { name = \"acme/signal\", version = \"^1\", optional = true }
+             core = { name = \"acme/core\", version = \"^1\" }
+
+             [peer-dependencies]
+React = { name = \"jsdotlua/react\", version = \"^17.0.0\" }
+",
+        );
+        let mut deps = declared_dependencies(&kinds);
+        deps.sort();
+        assert_eq!(
+            deps,
+            [
+                (
+                    "React".to_string(),
+                    "jsdotlua/react".to_string(),
+                    DependencyKind::Peer("^17.0.0".to_string())
+                ),
+                (
+                    "core".to_string(),
+                    "acme/core".to_string(),
+                    DependencyKind::Required
+                ),
+                (
+                    "signal".to_string(),
+                    "acme/signal".to_string(),
+                    DependencyKind::Optional
+                ),
+            ]
         );
 
         // wally.toml reads `alias = "scope/name@req"`, req stripped.
@@ -1427,7 +1515,7 @@ mod tests {
              [dev-dependencies]\nTestEZ = \"roblox/testez@^0.4\"\n",
         );
         assert_eq!(
-            declared_dependencies(&wally),
+            names(&wally),
             [("Promise".to_string(), "evaera/promise".to_string())]
         );
 
@@ -1444,7 +1532,7 @@ mod tests {
              GreenTea = \"corecii/greentea@0.4.11\"\n\n\
              [dev-dependencies]\nJest = \"jsdotlua/jest@3.10.0\"\n",
         );
-        let mut server_deps = declared_dependencies(&server);
+        let mut server_deps = names(&server);
         server_deps.sort();
         assert_eq!(
             server_deps,
@@ -1458,7 +1546,7 @@ mod tests {
         // no manifests at all -> no dependencies.
         let none = base.join("none");
         fs::create_dir_all(&none).unwrap();
-        assert!(declared_dependencies(&none).is_empty());
+        assert!(names(&none).is_empty());
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1476,7 +1564,7 @@ mod tests {
         );
         write_package(&base, "wally.toml", "[dependencies]\nOther = \"a/b@^1\"\n");
         assert_eq!(
-            declared_dependencies(&base),
+            names(&base),
             [("core".to_string(), "acme/core".to_string())]
         );
 
@@ -1486,10 +1574,7 @@ mod tests {
             "[package]\nname = \"acme/thing\"\n",
         )
         .unwrap();
-        assert_eq!(
-            declared_dependencies(&base),
-            [("Other".to_string(), "a/b".to_string())]
-        );
+        assert_eq!(names(&base), [("Other".to_string(), "a/b".to_string())]);
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1532,7 +1617,7 @@ mod tests {
         assert_eq!(left, ["init.lua", "wally.toml"]);
         assert_eq!(environment(&base), Some(Environment::Roblox));
         assert_eq!(
-            declared_dependencies(&base),
+            names(&base),
             vec![("Promise".to_string(), "evaera/promise".to_string())]
         );
 
@@ -1562,7 +1647,7 @@ mod tests {
         write_package(&stream.join("src"), "init.luau", "return {}");
         assert_eq!(entry_point(&stream).as_deref(), Some("src"));
         assert_eq!(
-            declared_dependencies(&stream),
+            names(&stream),
             vec![
                 ("Cleaner".to_string(), "stratiz/cleaner".to_string()),
                 ("Signal".to_string(), "stratiz/signal".to_string()),
@@ -1584,7 +1669,7 @@ mod tests {
         write_package(&conch.join("src"), "init.luau", "return {}");
         assert_eq!(entry_point(&conch).as_deref(), Some("src"));
         assert_eq!(
-            declared_dependencies(&conch),
+            names(&conch),
             vec![(
                 "language".to_string(),
                 "bajsucks/conch_language".to_string()

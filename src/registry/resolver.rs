@@ -127,7 +127,15 @@ pub struct ResolvedInstall {
     must travel to the linker and the lockfile or the dependent would link
     the original, or nothing. */
     pub redirects: BTreeMap<String, String>,
+    /** only optional edges reach this package. install skips it, with one
+    line, when its download fails. */
+    pub optional: bool,
 }
+
+/** the nearest optional edge above a queued dependency, or the dependency
+itself: its alias path from the root and its package. a failure below it
+leaves the edge out, see [`resolve_skipping`]. */
+type OptionalEdge = (Vec<String>, String);
 
 /// Where a queued dependency comes from.
 #[derive(Clone)]
@@ -169,6 +177,8 @@ struct QueueEntry {
     context: Option<Environment>,
     /// who wanted this, for conflict diagnostics only.
     required_by: Requirer,
+    /// None when no optional edge leads here.
+    optional: Option<OptionalEdge>,
 }
 
 /** Who asked for a package. Only ever read to name the two sides of a
@@ -206,7 +216,7 @@ pub fn resolve(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let mut ttl_skipped = false;
-    match resolve_once(
+    match resolve_skipping(
         manifest,
         project_dir,
         refresh,
@@ -218,11 +228,13 @@ pub fn resolve(
         /* an index whose pull was skipped by the TTL can be stale, and most
         resolver errors don't say which index they came from, so any
         failure after a skip earns one full forced refresh and a re-run.
-        the second outcome, good or bad, is the one that stands. */
-        Err(_) if refresh == Refresh::Ttl && ttl_skipped => {
+        a skipped optional dependency counts as a failure, since a stale
+        copy can lack the version it needs. the second outcome, good or
+        bad, is the one that stands. */
+        result if refresh == Refresh::Ttl && ttl_skipped && !matches!(result, Ok((_, false))) => {
             let mut ignored = false;
             warnings.clear();
-            resolve_once(
+            resolve_skipping(
                 manifest,
                 project_dir,
                 Refresh::Force,
@@ -231,12 +243,17 @@ pub fn resolve(
                 &mut ignored,
                 warnings,
             )
+            .map(|(installs, _)| installs)
         }
-        result => result,
+        result => result.map(|(installs, _)| installs),
     }
 }
 
-fn resolve_once(
+/** [`resolve_once`] until a run ends with no failure under an optional
+edge. such a failure leaves that edge out, and the next run starts from
+the top, so the optional package goes with all that it alone brought in.
+each skip gives one line. the bool says whether any edge went out. */
+fn resolve_skipping(
     manifest: &Manifest,
     project_dir: &Path,
     refresh: Refresh,
@@ -244,13 +261,63 @@ fn resolve_once(
     allow: Option<&Allow>,
     ttl_skipped: &mut bool,
     warnings: &mut Vec<String>,
+) -> Result<(Vec<ResolvedInstall>, bool), Error> {
+    let mut indices: HashMap<String, Index> = HashMap::new();
+    let mut excluded: HashSet<Vec<String>> = HashSet::new();
+    let mut skips = Vec::new();
+    loop {
+        let mut failing = None;
+        let mut run = Vec::new();
+        let result = resolve_once(
+            manifest,
+            project_dir,
+            refresh,
+            pinned,
+            allow,
+            &mut indices,
+            &excluded,
+            ttl_skipped,
+            &mut failing,
+            &mut run,
+        );
+        match (result, failing) {
+            (Err(error), Some((path, name))) if excluded.insert(path.clone()) => {
+                skips.push(format!(
+                    "skipped optional dependency '{}' ({name}): {error}",
+                    path.join(".")
+                ));
+            }
+            (result, _) => {
+                let skipped = !skips.is_empty();
+                warnings.append(&mut skips);
+                warnings.append(&mut run);
+                return result.map(|installs| (installs, skipped));
+            }
+        }
+    }
+}
+
+/** one resolve of the graph. `excluded` holds the alias paths of the
+optional edges to leave out. on an error, `failing` names the optional
+edge that the error happened under, or stays None. */
+#[allow(clippy::too_many_arguments)]
+fn resolve_once(
+    manifest: &Manifest,
+    project_dir: &Path,
+    refresh: Refresh,
+    pinned: &Pinned,
+    allow: Option<&Allow>,
+    indices: &mut HashMap<String, Index>,
+    excluded: &HashSet<Vec<String>>,
+    ttl_skipped: &mut bool,
+    failing: &mut Option<OptionalEdge>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let prefer_environment = manifest.target().map(|target| target.environment);
     let language = manifest
         .target()
         .map(|target| target.language)
         .unwrap_or_default();
-    let mut indices: HashMap<String, Index> = HashMap::new();
     /* Only walk up looking for a claiming workspace root once a workspace
     dep actually appears. */
     let mut workspace_memo: Option<Option<Workspace>> = None;
@@ -294,12 +361,19 @@ fn resolve_once(
     ] {
         for (alias, dependency) in dependencies {
             let name = dependency_name(dependency).to_lowercase();
-            discovered.insert(vec![alias.clone()], name.clone());
+            let alias_path = vec![alias.clone()];
+            if excluded.contains(&alias_path) {
+                continue;
+            }
+            discovered.insert(alias_path.clone(), name.clone());
             seeds.push_back(QueueEntry {
+                optional: dependency
+                    .optional()
+                    .then(|| (alias_path.clone(), name.clone())),
                 name,
                 ask: request_for(alias, dependency, manifest)?,
                 link: Some(alias.clone()),
-                alias_path: vec![alias.clone()],
+                alias_path,
                 context: None,
                 required_by: Requirer::Manifest(alias.clone()),
             });
@@ -312,11 +386,15 @@ fn resolve_once(
     let mut dev = false;
 
     /* (name, context) -> (what we resolved, the req that won, who asked for
-    it). BTreeMap keeps the install set, and the lockfile written from it, in
-    name order with context breaking ties. one package may appear once per
-    context, every environment root is self-contained, wally-style. */
-    let mut resolved: BTreeMap<(String, Environment), (ResolvedInstall, String, Requirer)> =
-        BTreeMap::new();
+    it, the optional edge it came under). BTreeMap keeps the install set,
+    and the lockfile written from it, in name order with context breaking
+    ties. one package may appear once per context, every environment root
+    is self-contained, wally-style. */
+    let mut resolved: BTreeMap<(String, Environment), Resolved> = BTreeMap::new();
+    /* the edges of the graph and whether each is optional, from the root
+    and from each walked package. what no required edge reaches is optional */
+    let mut root_edges: Vec<(Key, bool)> = Vec::new();
+    let mut edges: HashMap<Key, Vec<(Key, bool)>> = HashMap::new();
 
     loop {
         /* the dev seeds start once every [dependencies] subtree has
@@ -333,10 +411,13 @@ fn resolve_once(
             alias_path,
             context,
             required_by,
+            optional,
         }) = queue.pop_front()
         else {
             break;
         };
+        // an error from here on happened under this entry's optional edge
+        failing.clone_from(&optional);
         let req_text = match &request {
             Request::Registry { req_text, .. } => req_text.clone(),
             Request::Workspace => "*".to_string(),
@@ -347,12 +428,17 @@ fn resolve_once(
         before any network. a seed's context is decided by its own resolve,
         so its gate has to wait until just after, below */
         if let Some(context) = context
-            && let Some((existing, first_req, first_by)) = resolved.get(&(name.clone(), context))
+            && let Some((existing, first_req, first_by, first_optional)) =
+                resolved.get(&(name.clone(), context))
         {
             /* a prerelease here was the latest of a package with no stable
             version, so another `^` takes it too */
             if takes(&req, &existing.version, true) {
                 continue;
+            }
+            // a required edge that conflicts with an optional one leaves the optional one out
+            if failing.is_none() {
+                failing.clone_from(first_optional);
             }
             return Err(Error::DependencyConflict {
                 name,
@@ -388,11 +474,11 @@ fn resolve_once(
         let mut redirects: BTreeMap<String, String> = BTreeMap::new();
         let mut pending_matched: Vec<Vec<String>> = Vec::new();
         let mut pending_discovered: Vec<(Vec<String>, String)> = Vec::new();
-        let mut children: Vec<(String, Ask, Vec<String>, String)> = Vec::new();
+        let mut children: Vec<(String, Ask, Vec<String>, String, bool)> = Vec::new();
 
         let (version, environment, source, index_url) = match request {
             Request::Registry { index_url, .. } => {
-                let index = open_index(&mut indices, &index_url, refresh, ttl_skipped)?;
+                let index = open_index(indices, &index_url, refresh, ttl_skipped)?;
                 /* a multi-target entry picks the target of the tree it
                 installs into. for a seed that tree is still undecided, so its
                 `target`, then the project's own environment, stands in --
@@ -435,6 +521,9 @@ fn resolve_once(
                 for dependency in &package.dependencies {
                     let mut child_path = alias_path.clone();
                     child_path.push(dependency.alias.clone());
+                    if dependency.optional && excluded.contains(&child_path) {
+                        continue;
+                    }
 
                     let (child_name, child_ask) = match overrides.get(&child_path) {
                         Some((child_name, child_ask)) => {
@@ -457,7 +546,13 @@ fn resolve_once(
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((child_name, child_ask, child_path, dependency.alias.clone()));
+                    children.push((
+                        child_name,
+                        child_ask,
+                        child_path,
+                        dependency.alias.clone(),
+                        dependency.optional,
+                    ));
                 }
 
                 (
@@ -491,6 +586,9 @@ fn resolve_once(
                 for (alias, dependency) in &member.manifest.dependencies {
                     let mut child_path = alias_path.clone();
                     child_path.push(alias.clone());
+                    if dependency.optional() && excluded.contains(&child_path) {
+                        continue;
+                    }
 
                     let (child_name, child_ask) = match overrides.get(&child_path) {
                         Some((child_name, child_ask)) => {
@@ -504,7 +602,13 @@ fn resolve_once(
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((child_name, child_ask, child_path, alias.clone()));
+                    children.push((
+                        child_name,
+                        child_ask,
+                        child_path,
+                        alias.clone(),
+                        dependency.optional(),
+                    ));
                 }
 
                 let path =
@@ -529,7 +633,8 @@ fn resolve_once(
             /* recorded even when the gate below dedups, so unmatched-
             override diagnostics can still find this root's tree */
             seed_contexts.insert(alias_path[0].clone(), context);
-            if let Some((existing, first_req, first_by)) =
+            root_edges.push(((name.clone(), context), optional.is_some()));
+            if let Some((existing, first_req, first_by, first_optional)) =
                 resolved.get_mut(&(name.clone(), context))
             {
                 if takes(&req, &existing.version, true) {
@@ -539,6 +644,9 @@ fn resolve_once(
                         existing.link = link;
                     }
                     continue; // this tree already walked the package, children drop
+                }
+                if failing.is_none() {
+                    failing.clone_from(first_optional);
                 }
                 return Err(Error::DependencyConflict {
                     name,
@@ -571,8 +679,14 @@ fn resolve_once(
         overrides_matched.extend(pending_matched);
         discovered.extend(pending_discovered);
         let requirer_id = format!("{name}@{version}");
-        for (child_name, child_ask, child_path, child_alias) in children {
+        let walked = edges.entry((name.clone(), context)).or_default();
+        for (child_name, child_ask, child_path, child_alias, child_optional) in children {
+            walked.push(((child_name.clone(), context), child_optional));
             queue.push_back(QueueEntry {
+                optional: match child_optional {
+                    true => Some((child_path.clone(), child_name.clone())),
+                    false => optional.clone(),
+                },
                 name: child_name,
                 ask: child_ask,
                 link: None,
@@ -597,12 +711,15 @@ fn resolve_once(
                     index_url,
                     link,
                     redirects,
+                    optional: false,
                 },
                 req_text,
                 required_by,
+                optional,
             ),
         );
     }
+    *failing = None;
 
     /* an override that never met its edge would otherwise be silently
     dead. two distinct reasons deserve distinct messages. a path that
@@ -612,6 +729,8 @@ fn resolve_once(
     let mut unmatched: Vec<&Vec<String>> = overrides
         .keys()
         .filter(|path| !overrides_matched.contains(*path))
+        // an override below a skipped optional edge had nothing to meet
+        .filter(|path| !excluded.iter().any(|edge| path.starts_with(edge)))
         .collect();
     unmatched.sort();
     for path in unmatched {
@@ -638,10 +757,45 @@ fn resolve_once(
         });
     }
 
+    let required = required_packages(&root_edges, &edges);
     Ok(resolved
-        .into_values()
-        .map(|(install, ..)| install)
+        .into_iter()
+        .map(|(key, (mut install, ..))| {
+            install.optional = !required.contains(&key);
+            install
+        })
         .collect())
+}
+
+/// a package in one environment root, the key of the install set.
+type Key = (String, Environment);
+
+/// one entry of the install set while it resolves, see `resolved` in [`resolve_once`].
+type Resolved = (ResolvedInstall, String, Requirer, Option<OptionalEdge>);
+
+/** the packages that a path of required edges reaches from the root. an
+optional package that a required one also needs is required. */
+fn required_packages(
+    root_edges: &[(Key, bool)],
+    edges: &HashMap<Key, Vec<(Key, bool)>>,
+) -> HashSet<Key> {
+    let mut required = HashSet::new();
+    let mut stack: Vec<&Key> = root_edges
+        .iter()
+        .filter(|(_, optional)| !optional)
+        .map(|(key, _)| key)
+        .collect();
+    while let Some(key) = stack.pop() {
+        if required.insert(key.clone()) {
+            let children = edges.get(key).into_iter().flatten();
+            stack.extend(
+                children
+                    .filter(|(_, optional)| !optional)
+                    .map(|(child, _)| child),
+            );
+        }
+    }
+    required
 }
 
 /** what an overridden edge asks for instead, the root manifest's own
@@ -1838,6 +1992,250 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a pesde-format git index, as the ember index is, removed on drop.
+    struct PesdeOrigin {
+        url: String,
+        dirs: Vec<std::path::PathBuf>,
+    }
+
+    impl PesdeOrigin {
+        /** `files` holds (path, text) pairs. an entry names its download, so
+        the config needs no api. */
+        fn new(name: &str, files: &[(&str, String)]) -> Self {
+            let origin = std::env::temp_dir().join(format!("embr-test-{name}-origin"));
+            let _ = fs::remove_dir_all(&origin);
+            write(&origin, "config.toml", "");
+            for (path, text) in files {
+                write(&origin, path, text);
+            }
+            for args in [
+                vec!["init"],
+                vec!["add", "."],
+                vec!["commit", "-m", "fixture"],
+            ] {
+                let mut full = vec![
+                    "-C",
+                    origin.to_str().unwrap(),
+                    "-c",
+                    "user.name=embr-test",
+                    "-c",
+                    "user.email=embr-test@localhost",
+                ];
+                full.extend(args);
+                crate::sys::git::run(&full).unwrap();
+            }
+            let url = origin.to_string_lossy().replace('\\', "/");
+            let cache = crate::registry::index::cache_dir(&url).unwrap();
+            let _ = fs::remove_dir_all(&cache);
+            PesdeOrigin {
+                url,
+                dirs: vec![origin, cache],
+            }
+        }
+
+        /// resolves `tables` of a Roblox project against this index, with its rule.
+        fn resolve(&self, tables: &str) -> (Result<Vec<ResolvedInstall>, Error>, Vec<String>) {
+            let manifest: Manifest = toml::from_str(&format!(
+                "[target]\nenvironment = \"roblox\"\n\n[indices]\ndefault = \"{}\"\n\n{tables}",
+                self.url
+            ))
+            .unwrap();
+            let mut warnings = Vec::new();
+            let result = resolve(
+                &manifest,
+                &self.dirs[0],
+                Refresh::Never,
+                &Pinned::new(),
+                Allow::for_project(&manifest).as_ref(),
+                &mut warnings,
+            );
+            (result, warnings)
+        }
+    }
+
+    impl Drop for PesdeOrigin {
+        fn drop(&mut self) {
+            for dir in &self.dirs {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// one entry of an ember index file, with extra `tables` under its key.
+    fn ember_entry(name: &str, version: &str, target: &str, tables: &str) -> String {
+        let key = format!("{version} {target}");
+        let tables = tables.replace("[.", &format!("[\"{key}\"."));
+        format!(
+            "[\"{key}\"]\nname = \"{name}\"\nversion = \"{version}\"\ntarget = \"{target}\"\n\
+             download = \"https://cdn.example/{name}/{version}.tar.gz\"\n{tables}\n"
+        )
+    }
+
+    /// `name@version context link optional` for each install.
+    fn summary(installs: &[ResolvedInstall]) -> Vec<String> {
+        installs
+            .iter()
+            .map(|install| {
+                format!(
+                    "{}@{} {} {}{}",
+                    install.name,
+                    install.version,
+                    install.context.as_str(),
+                    install.link.as_deref().unwrap_or("-"),
+                    if install.optional { " optional" } else { "" }
+                )
+            })
+            .collect()
+    }
+
+    /** an optional dependency installs when it resolves. when it does not,
+    or a dependency of it does not, or the project's rule refuses it, the
+    install skips it with one line and goes on. a peer never installs. */
+    #[test]
+    fn optional_dependencies_install_when_they_resolve_and_skip_when_not() {
+        let origin = PesdeOrigin::new(
+            "optional",
+            &[
+                (
+                    "acme/ui",
+                    ember_entry(
+                        "acme/ui",
+                        "1.0.0",
+                        "roblox",
+                        "[.dependencies.core]\nname = \"acme/core\"\nversion = \"^1.0.0\"\n\
+                         [.optional-dependencies.trace]\nname = \"acme/trace\"\nversion = \"^1.0.0\"\noptional = true\n\
+                         [.optional-dependencies.ghost]\nname = \"acme/ghost\"\nversion = \"^1.0.0\"\noptional = true\n\
+                         [.peer-dependencies.React]\nname = \"jsdotlua/react\"\nversion = \"^17.0.0\"\n",
+                    ),
+                ),
+                ("acme/core", ember_entry("acme/core", "1.0.0", "roblox", "")),
+                (
+                    "acme/trace",
+                    ember_entry("acme/trace", "1.0.0", "roblox", ""),
+                ),
+                (
+                    "acme/broken",
+                    ember_entry(
+                        "acme/broken",
+                        "1.0.0",
+                        "roblox",
+                        "[.dependencies.gone]\nname = \"acme/gone\"\nversion = \"^1.0.0\"\n",
+                    ),
+                ),
+                (
+                    "acme/srv",
+                    ember_entry("acme/srv", "1.0.0", "roblox_server", ""),
+                ),
+                (
+                    "acme/runner",
+                    ember_entry("acme/runner", "1.0.0", "lune", ""),
+                ),
+                (
+                    "jsdotlua/react",
+                    ember_entry("jsdotlua/react", "17.0.2", "roblox", ""),
+                ),
+            ],
+        );
+
+        let (installs, warnings) = origin.resolve(
+            "[dependencies]\n\
+             ui = { name = \"acme/ui\", version = \"^1\" }\n\
+             signal = { name = \"acme/signal\", version = \"^1\", optional = true }\n\
+             broken = { name = \"acme/broken\", version = \"^1\", optional = true }\n\
+             srv = { name = \"acme/srv\", version = \"^1\", optional = true, target = \"roblox_server\" }\n\
+             runner = { name = \"acme/runner\", version = \"^1\", optional = true }\n",
+        );
+        assert_eq!(
+            summary(&installs.unwrap()),
+            [
+                "acme/core@1.0.0 roblox -",
+                "acme/srv@1.0.0 roblox_server srv optional",
+                "acme/trace@1.0.0 roblox - optional",
+                "acme/ui@1.0.0 roblox ui",
+            ]
+        );
+        let skipped: Vec<&str> = warnings
+            .iter()
+            .filter_map(|line| line.strip_prefix("skipped optional dependency "))
+            .collect();
+        assert_eq!(skipped.len(), 4, "{warnings:?}");
+        for (edge, why) in [
+            ("'broken' (acme/broken)", "acme/gone"),
+            ("'runner' (acme/runner)", "a Luau package for lune"),
+            ("'signal' (acme/signal)", "acme/signal was not found"),
+            ("'ui.ghost' (acme/ghost)", "acme/ghost was not found"),
+        ] {
+            assert!(
+                skipped
+                    .iter()
+                    .any(|line| line.starts_with(edge) && line.contains(why)),
+                "{edge}: {warnings:?}"
+            );
+        }
+
+        // an optional package that a required edge also reaches is required
+        let (installs, warnings) = origin.resolve(
+            "[dependencies]\n\
+             ui = { name = \"acme/ui\", version = \"^1\" }\n\
+             trace = { name = \"acme/trace\", version = \"^1\" }\n",
+        );
+        let installs = installs.unwrap();
+        let trace = installs.iter().find(|i| i.name == "acme/trace").unwrap();
+        assert!(!trace.optional);
+        assert_eq!(trace.link.as_deref(), Some("trace"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+        // a required dependency that does not resolve still fails the install
+        let (installs, _) = origin
+            .resolve("[dependencies]\nsignal = { name = \"acme/signal\", version = \"^1\" }\n");
+        assert!(matches!(installs, Err(Error::PackageNotFound { .. })));
+    }
+
+    /** a version conflict between an optional subtree and a required one
+    leaves the optional edge out, whichever side the walk meets first. */
+    #[test]
+    fn an_optional_subtree_that_conflicts_is_left_out() {
+        let lib = |version: &str| ember_entry("acme/lib", version, "roblox", "");
+        let needs = |name: &str, req: &str| {
+            ember_entry(
+                name,
+                "1.0.0",
+                "roblox",
+                &format!("[.dependencies.lib]\nname = \"acme/lib\"\nversion = \"{req}\"\n"),
+            )
+        };
+        let origin = PesdeOrigin::new(
+            "optional-conflict",
+            &[
+                ("acme/lib", lib("1.0.0") + &lib("2.0.0")),
+                ("acme/a", needs("acme/a", "^1.0.0")),
+                ("acme/b", needs("acme/b", "^2.0.0")),
+            ],
+        );
+        for tables in [
+            "[dependencies]\na = { name = \"acme/a\", version = \"^1\" }\n\
+             b = { name = \"acme/b\", version = \"^1\", optional = true }\n",
+            // the optional side first, so the conflict shows on the required edge
+            "[dependencies]\nz = { name = \"acme/a\", version = \"^1\" }\n\
+             b = { name = \"acme/b\", version = \"^1\", optional = true }\n",
+        ] {
+            let (installs, warnings) = origin.resolve(tables);
+            let installs = summary(&installs.unwrap());
+            assert!(
+                installs.contains(&"acme/lib@1.0.0 roblox -".to_string()),
+                "{installs:?}"
+            );
+            assert!(
+                !installs.iter().any(|i| i.starts_with("acme/b")),
+                "{installs:?}"
+            );
+            assert!(
+                warnings[0].starts_with("skipped optional dependency 'b' (acme/b)"),
+                "{warnings:?}"
+            );
+        }
     }
 
     #[test]

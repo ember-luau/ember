@@ -36,6 +36,12 @@ pub struct AddArgs {
     /// Write to [dev-dependencies], for the tests and tools of this project only; any language goes
     #[arg(long)]
     pub dev: bool,
+    /// Write `optional = true`, so install skips the package when it does not resolve
+    #[arg(long, conflicts_with_all = ["dev", "peer"])]
+    pub optional: bool,
+    /// Write to [peer-dependencies], for a package the projects that use this one must provide
+    #[arg(long, conflicts_with = "dev")]
+    pub peer: bool,
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
@@ -137,25 +143,38 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     if let Some(key) = &key {
         entry.insert("key", key.clone().into());
     }
-    let (table, other) = if args.dev {
-        ("dev-dependencies", "dependencies")
-    } else {
-        ("dependencies", "dev-dependencies")
+    if args.optional {
+        entry.insert("optional", true.into());
+    }
+    let table = match (args.dev, args.peer) {
+        (true, _) => "dev-dependencies",
+        (_, true) => "peer-dependencies",
+        _ => "dependencies",
     };
-    // the manifest refuses one alias in both tables, so the edit refuses it first
-    if document
-        .table(other)?
-        .is_some_and(|entries| entries.contains_key(&alias))
-    {
-        return Err(Error::AliasInBothTables(alias));
+    /* the manifest refuses an alias in [dependencies] and in one of the
+    other two tables, so the edit refuses it first */
+    for other in ["dependencies", "dev-dependencies", "peer-dependencies"] {
+        let clash = (table == "dependencies") != (other == "dependencies");
+        if clash
+            && document
+                .table(other)?
+                .is_some_and(|entries| entries.contains_key(&alias))
+        {
+            let table = if table == "dependencies" {
+                other
+            } else {
+                table
+            };
+            return Err(Error::AliasInBothTables { alias, table });
+        }
     }
     let dependencies = document.table_or_create(table)?;
     /* re-adding an alias rewrites its whole entry, which is how a version
-    bump works. `target` and `key` are the keys nothing here can re-ask
-    for. dropping `target` would quietly move that dependency's whole
-    subtree back into another environment root on the next install, and
-    dropping `key` would lose the link. so they are carried over instead.
-    see `Dependency::target` */
+    bump works. `target`, `key` and `optional` are carried over when this
+    run does not set them. dropping `target` would quietly move that
+    dependency's whole subtree back into another environment root on the
+    next install, dropping `key` would lose the link, and a version bump
+    must not make an optional dependency required. see `Dependency::target` */
     if let Some(existing) = dependencies.get(&alias) {
         for carried in ["target", "key"] {
             if !entry.contains_key(carried)
@@ -163,6 +182,9 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
             {
                 entry.insert(carried, value.to_string().into());
             }
+        }
+        if existing.get("optional").and_then(|value| value.as_bool()) == Some(true) {
+            entry.insert("optional", true.into());
         }
     }
     dependencies.insert(&alias, toml_edit::value(entry));

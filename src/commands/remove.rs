@@ -12,8 +12,8 @@ pub struct RemoveArgs {
     pub dependencies: Vec<String>,
 }
 
-/// the two tables a dependency can be in, as ember.toml names them.
-const TABLES: [&str; 2] = ["dependencies", "dev-dependencies"];
+/// the tables a dependency can be in, as ember.toml names them.
+const TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "peer-dependencies"];
 
 pub fn run(args: RemoveArgs) -> Result<(), Error> {
     let manifest = Manifest::load()?;
@@ -32,9 +32,10 @@ pub fn run(args: RemoveArgs) -> Result<(), Error> {
             entries.remove(alias);
         }
     }
-    /* `embr add --dev` makes [dev-dependencies], so it goes with its last
-    entry. `embr init` writes [dependencies], so that header stays */
+    /* `embr add --dev` and `--peer` make their tables, so each goes with
+    its last entry. `embr init` writes [dependencies], so that header stays */
     document.drop_if_empty("dev-dependencies");
+    document.drop_if_empty("peer-dependencies");
     document.save()?;
 
     for (table, alias, name) in &removed {
@@ -57,7 +58,11 @@ fn matches<'manifest>(
 ) -> Result<Vec<(&'static str, &'manifest str, &'manifest str)>, Error> {
     let entries: Vec<_> = TABLES
         .into_iter()
-        .zip([&manifest.dependencies, &manifest.dev_dependencies])
+        .zip([
+            &manifest.dependencies,
+            &manifest.dev_dependencies,
+            &manifest.peer_dependencies,
+        ])
         .flat_map(|(table, entries)| {
             entries
                 .iter()
@@ -138,7 +143,9 @@ mod tests {
         core = { name = \"chief/core\", version = \"^\" }\n\
         signal = { name = \"acme/signal\", version = \"^\" }\n\
         [dev-dependencies]\n\
-        lest = { name = \"alloy/lest\", version = \"^\" }\n";
+        lest = { name = \"alloy/lest\", version = \"^\" }\n\
+        [peer-dependencies]\n\
+        React = { name = \"jsdotlua/react\", version = \"^17\" }\n";
 
     fn names(text: &str, wanted: &[&str]) -> Result<Vec<String>, Error> {
         let manifest = manifest(text);
@@ -154,8 +161,12 @@ mod tests {
     #[test]
     fn a_name_matches_an_alias_or_a_package_name() {
         assert_eq!(
-            names(DEPENDENCIES, &["core", "alloy/lest"]).unwrap(),
-            ["dependencies.core", "dev-dependencies.lest"]
+            names(DEPENDENCIES, &["core", "alloy/lest", "jsdotlua/react"]).unwrap(),
+            [
+                "dependencies.core",
+                "dev-dependencies.lest",
+                "peer-dependencies.React"
+            ]
         );
         // case does not matter in a package name, and a repeat is no error
         assert_eq!(
@@ -169,7 +180,7 @@ mod tests {
         let error = names(DEPENDENCIES, &["core", "promise"]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "No dependency in ember.toml is named 'promise'; the aliases are core, signal, lest"
+            "No dependency in ember.toml is named 'promise'; the aliases are core, signal, lest, React"
         );
         let error = names("", &["core"]).unwrap_err();
         assert!(

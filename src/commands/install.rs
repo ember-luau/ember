@@ -17,7 +17,7 @@ use crate::sys::paths;
 use crate::tools;
 use crate::ui;
 use clap::Args;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -45,6 +45,10 @@ pub struct InstallArgs {
     /// Re-resolve, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
     pub refresh: bool,
+
+    /// Fail when a package needs a peer dependency that is missing or has a version that does not match
+    #[arg(long)]
+    pub strict_peers: bool,
 }
 
 struct Job {
@@ -62,6 +66,8 @@ struct Job {
     redirects: BTreeMap<String, String>,
     /// the [patches] entry this copy gets, when one names it.
     patch: Option<JobPatch>,
+    /// only optional edges lead here, so a failed download skips it.
+    optional: bool,
 }
 
 /** a patch ready to apply, the lockfile record plus the file resolved
@@ -317,7 +323,7 @@ fn section(title: &str, printed: &mut bool) {
 
 /** installs one project from the current directory, then prints its
 notices, warnings and deprecations against the lock from before the
-install, see `registry::notices`. */
+install, see `registry::notices`, and the peer warnings. */
 pub(crate) fn install_project(
     args: &InstallArgs,
     manifest: &Manifest,
@@ -327,10 +333,56 @@ pub(crate) fn install_project(
     let resolved = install_steps(args, manifest, include_global_tools)?;
     if let Ok(lock) = Lockfile::load() {
         let previous = previous.as_ref().map_or(&[][..], |lock| &lock.packages[..]);
+        let peers = peer_warnings(manifest, &lock.packages, Path::new(""));
         // an install that resolved nothing reads the index copies on disk only
-        notices::report(previous, &lock.packages, resolved);
+        notices::report(previous, &lock.packages, resolved, &peers);
+        if args.strict_peers && !peers.is_empty() {
+            return Err(Error::PeersUnmet(peers.len()));
+        }
     }
     Ok(())
+}
+
+/** one line for each peer that an installed package declares and its
+environment root does not have, or has at a version that the requirement
+does not take. the shipped manifests on disk say what each package needs,
+so this works for every install, also one that resolved nothing. a
+workspace member installs its own peers. `project` holds the project. */
+fn peer_warnings(manifest: &Manifest, packages: &[LockedPackage], project: &Path) -> Vec<String> {
+    let mut lines = BTreeSet::new();
+    for package in packages {
+        let (storage, in_place) = stored_at(manifest, package);
+        if in_place {
+            continue;
+        }
+        for (_, name, kind) in package::declared_dependencies(&project.join(storage)) {
+            let package::DependencyKind::Peer(requirement) = kind else {
+                continue;
+            };
+            let id = format!("{}@{}", package.name, package.version);
+            let copy = packages.iter().find(|other| {
+                other.name.eq_ignore_ascii_case(&name) && other.context() == package.context()
+            });
+            let Some(copy) = copy else {
+                lines.insert(format!(
+                    "warning: {id}: needs the peer {name} {requirement}, which the project does not have. Run `embr add {name} --version \"{requirement}\"`"
+                ));
+                continue;
+            };
+            // a requirement that does not parse is the package's mistake, not the project's
+            let takes = manifest::parse_version_req(&requirement)
+                .ok()
+                .zip(semver::Version::parse(&copy.version).ok())
+                .is_none_or(|(req, version)| manifest::takes(&req, &version, true));
+            if !takes {
+                lines.insert(format!(
+                    "warning: {id}: needs the peer {name} {requirement}, and the project has {}",
+                    copy.version
+                ));
+            }
+        }
+    }
+    lines.into_iter().collect()
 }
 
 /** the install itself. returns whether it resolved, which is when the
@@ -401,6 +453,7 @@ fn install_steps(
                     link: package.link,
                     redirects: package.redirects,
                     patch,
+                    optional: package.optional,
                 })
             })
             .collect::<Result<Vec<Job>, Error>>()?
@@ -439,6 +492,7 @@ fn install_steps(
                 link: package.link,
                 redirects: package.redirects,
                 patch: None,
+                optional: package.optional,
             })
             .collect()
     };
@@ -995,6 +1049,7 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                     /* same for a patch, an edited file changes the record's
                     hash, so identical versions still rebuild */
                     && job.patch.as_ref().map(|patch| &patch.record) == locked.patch.as_ref()
+                    && job.optional == locked.optional
                     && job
                         .environment
                         .is_none_or(|environment| environment == locked.environment)
@@ -1224,6 +1279,7 @@ fn install_packages(
     let (sender, receiver) = std::sync::mpsc::channel();
 
     let mut first_error: Option<Error> = None;
+    let mut skipped: HashSet<usize> = HashSet::new();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let sender = sender.clone();
@@ -1249,7 +1305,8 @@ fn install_packages(
                     the link file written on the main thread included */
                     let task = progress.task(format!("{}@{}", job.name, job.version));
                     let result = install_one(manifest, &job, &staging, cache, progress, &task);
-                    if result.is_err() {
+                    // an optional package that fails is skipped, so the others go on
+                    if result.is_err() && !job.optional {
                         failed.store(true, Ordering::Relaxed);
                     }
                     // a closed channel means the run is over, stop quietly
@@ -1294,8 +1351,20 @@ fn install_packages(
                         index: job.index_url,
                         redirects: job.redirects,
                         patch: job.patch.map(|patch| patch.record),
+                        optional: job.optional,
                         source: job.source,
                     });
+                }
+                /* ponytail: only the failed package goes. an optional
+                package whose required dependency failed stays, with no
+                link to it. drop the package's optional subtree if that
+                matters */
+                Err(error) if job.optional => {
+                    progress.warn(&format!(
+                        "skipped optional dependency {}@{}: {error}",
+                        job.name, job.version
+                    ));
+                    skipped.insert(slot);
                 }
                 Err(error) => {
                     if slot < error_slot {
@@ -1314,7 +1383,9 @@ fn install_packages(
     silently writing a shorter lockfile would be far worse than failing */
     slots
         .into_iter()
-        .map(|slot| {
+        .enumerate()
+        .filter(|(slot, _)| !skipped.contains(slot))
+        .map(|(_, slot)| {
             slot.ok_or_else(|| {
                 Error::Io(std::io::Error::other(
                     "an install worker never reported its result; please report this as an embr bug",
@@ -1545,6 +1616,7 @@ fn link_workspace_member(
         redirects: job.redirects,
         // members are the user's own source, attach_patches refused them
         patch: None,
+        optional: job.optional,
         source: job.source,
     })
 }
@@ -1621,7 +1693,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             .entry
             .as_deref()
             .and_then(|entry| package::forest_dependency_dir(&package.storage, entry));
-        for (alias, declared) in package::declared_dependencies(&package.storage) {
+        for (alias, declared, kind) in package::declared_dependencies(&package.storage) {
             /* the shipped manifest declares the ORIGINAL package. an
             [overrides] redirect on this edge means the alias must link to
             the replacement instead */
@@ -1640,10 +1712,14 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                 continue;
             }
             let Some(dep) = by_name.get(&(dependency.as_str(), package.context)) else {
-                warn(format!(
-                    "warning: {} declares dependency {dependency} which is not installed; no nested link generated",
-                    package.name
-                ));
+                /* a skipped optional dependency said so when it was skipped,
+                and a missing peer says so in the block at the end */
+                if kind == package::DependencyKind::Required {
+                    warn(format!(
+                        "warning: {} declares dependency {dependency} which is not installed; no nested link generated",
+                        package.name
+                    ));
+                }
                 continue;
             };
             let Some(entry) = dep.entry.clone() else {
@@ -2137,6 +2213,7 @@ mod tests {
             index: "https://example.com/index".to_string(),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
             source: index::DownloadSource::Zip {
                 url: format!("https://example.com/{name}/{version}"),
             },
@@ -2300,6 +2377,7 @@ mod tests {
             link: None,
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         }
     }
 
@@ -2580,6 +2658,7 @@ mod tests {
             link: Some("thing".to_string()),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         };
         let locked = |context: Option<Environment>| LockedPackage {
             name: "acme/thing".to_string(),
@@ -2590,6 +2669,7 @@ mod tests {
             index: "https://example.com/index".to_string(),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -2685,6 +2765,7 @@ mod tests {
             link: link.map(str::to_string),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         };
         let extracted = |entry: Option<&str>| Extracted {
             environment: Environment::Roblox,
@@ -2739,6 +2820,7 @@ mod tests {
             link: Some(link.to_string()),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         };
         let roblox = |links: &[&str]| -> Vec<Job> {
             links
@@ -2796,6 +2878,7 @@ mod tests {
             link: None,
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         };
 
         // one context, no collision possible, whatever [config] says
@@ -3078,6 +3161,137 @@ mod tests {
             // no manifest, so no [target], and the context decides
             lazy_collections: matches!(context, Environment::Roblox | Environment::Server),
         }
+    }
+
+    /** a peer links to the copy of the project, in the same environment
+    root. a missing peer or optional dependency gets no link and no
+    warning here: the resolver and the end of the install say those. */
+    #[test]
+    fn a_peer_links_to_the_project_copy_and_a_missing_one_stays_quiet() {
+        let base = std::env::temp_dir().join("embr-test-nested-links-peer");
+        let _ = fs::remove_dir_all(&base);
+        let store = base.join("packages/roblox/.ember");
+        let react = store.join("jsdotlua_react");
+        write(&react, "init.luau", "return {}\n");
+        let ui = store.join("acme_ui");
+        write(
+            &ui,
+            "ember.toml",
+            "[package]\nname = \"acme/ui\"\nversion = \"1.0.0\"\n\n\
+             [dependencies]\ntrace = { name = \"acme/trace\", version = \"^1\", optional = true }\n\n\
+             [peer-dependencies]\nReact = { name = \"jsdotlua/react\", version = \"^17.0.0\" }\n\
+             Fusion = { name = \"elttob/fusion\", version = \"^0.3.0\" }\n",
+        );
+        write(&ui, "init.luau", "return {}\n");
+
+        let mut warnings = Vec::new();
+        let packages = [
+            stored("jsdotlua/react", react.clone(), Environment::Roblox),
+            stored("acme/ui", ui.clone(), Environment::Roblox),
+        ];
+        link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+        assert_eq!(warnings, Vec::<String>::new());
+        let link = fs::read_to_string(ui.join("packages/roblox/React.luau")).unwrap();
+        assert!(link.contains("jsdotlua_react"), "{link}");
+        assert!(!ui.join("packages/roblox/Fusion.luau").exists());
+        assert!(!ui.join("packages/roblox/trace.luau").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a download that fails skips an optional package, with one line, and
+    fails the install for any other. */
+    #[test]
+    fn an_optional_package_whose_download_fails_is_skipped() {
+        use crate::net::http::mock;
+        let (cdn, _) = mock::serve(|_| mock::reply("404 Not Found", "gone"));
+        let base = std::env::temp_dir().join("embr-test-optional-download");
+        let _ = fs::remove_dir_all(&base);
+        let manifest: Manifest = toml::from_str(&format!(
+            "[target]\nenvironment = \"roblox\"\n\n[config]\nroblox-packages-out = '{}'\n",
+            base.join("out").display()
+        ))
+        .unwrap();
+        let job = |optional| Job {
+            name: "acme/trace".to_string(),
+            version: "1.0.0".to_string(),
+            environment: Some(Environment::Roblox),
+            context: Environment::Roblox,
+            source: index::DownloadSource::TarGz {
+                url: format!("{cdn}/acme/trace/1.0.0.tar.gz"),
+            },
+            index_url: "https://example.com/index".to_string(),
+            link: Some("trace".to_string()),
+            redirects: BTreeMap::new(),
+            patch: None,
+            optional,
+        };
+        let progress = Progress::hidden();
+        let install = |job| {
+            install_packages(
+                &manifest,
+                vec![job],
+                &base.join("staging"),
+                &progress,
+                index::CachePolicy::Bypass,
+            )
+        };
+        assert!(install(job(true)).unwrap().is_empty());
+        assert!(install(job(false)).is_err());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** the end of an install says each peer that is missing or that does
+    not match, one line each, from the manifests on disk. a peer that two
+    packages share is one copy, and it satisfies both. */
+    #[test]
+    fn peer_warnings_name_a_missing_peer_and_a_version_that_does_not_match() {
+        let base = std::env::temp_dir().join("embr-test-peer-warnings");
+        let _ = fs::remove_dir_all(&base);
+        let manifest: Manifest = toml::from_str("[target]\nenvironment = \"roblox\"\n").unwrap();
+        let peer =
+            "[peer-dependencies]\nReact = { name = \"jsdotlua/react\", version = \"^17.0.0\" }\n";
+        for folder in [
+            "roblox/.ember/acme_ui",
+            "roblox/.ember/acme_menu",
+            "server/.ember/acme_ui",
+        ] {
+            write(&base.join("packages").join(folder), "ember.toml", peer);
+        }
+        let ui = direct("acme/ui", "1.0.0", Some("ui"), Environment::Roblox);
+        let menu = direct("acme/menu", "2.0.0", Some("menu"), Environment::Roblox);
+        let react = |version: &str, context| direct("jsdotlua/react", version, None, context);
+
+        // one copy that matches serves both packages, a diamond
+        let packages = [ui, menu, react("17.0.2", Environment::Roblox)];
+        assert_eq!(
+            peer_warnings(&manifest, &packages, &base),
+            Vec::<String>::new()
+        );
+
+        let [ui, menu, _] = packages;
+        let packages = [ui, menu, react("16.4.0", Environment::Roblox)];
+        assert_eq!(
+            peer_warnings(&manifest, &packages, &base),
+            [
+                "warning: acme/menu@2.0.0: needs the peer jsdotlua/react ^17.0.0, and the project has 16.4.0",
+                "warning: acme/ui@1.0.0: needs the peer jsdotlua/react ^17.0.0, and the project has 16.4.0",
+            ]
+        );
+
+        /* a copy in another environment root is no copy. the package in
+        the server root and the one in the roblox root give one line */
+        let [ui, _, _] = packages;
+        let server_ui = direct("acme/ui", "1.0.0", None, Environment::Server);
+        let packages = [ui, server_ui, react("17.0.2", Environment::Server)];
+        assert_eq!(
+            peer_warnings(&manifest, &packages, &base),
+            [
+                "warning: acme/ui@1.0.0: needs the peer jsdotlua/react ^17.0.0, which the project does not have. Run `embr add jsdotlua/react --version \"^17.0.0\"`"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     /** a pesde package requires its dependencies from `<target>_packages`
@@ -3718,6 +3932,7 @@ mod tests {
             link: Some("geometry".to_string()),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
         };
         let extracted = Extracted {
             environment: Environment::Luau,
