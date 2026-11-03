@@ -107,6 +107,8 @@ the archive it downloads from. */
 struct Located {
     version: String,
     source: DownloadSource,
+    /// the archive's SHA-256 from the lock or the index entry
+    sha256: Option<String>,
 }
 
 /** finds the package in this project, the lockfile when there is one, no
@@ -123,6 +125,7 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
             .map(|package| Located {
                 version: package.version,
                 source: package.source,
+                sha256: package.sha256,
             })
             .collect()
     } else {
@@ -147,6 +150,7 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
             .map(|package| Located {
                 version: package.version.to_string(),
                 source: package.source,
+                sha256: package.sha256,
             })
             .collect()
     };
@@ -248,7 +252,13 @@ fn start(spec: &str, force: bool) -> Result<(), Error> {
 
     /* published bytes plus flatten, exactly the tree install_one patches,
     and the archive cache usually makes this free */
-    index::download(&located.source, &dir, CachePolicy::Use)?;
+    let expect = located.sha256.as_deref().map(|sha256| index::Expect {
+        name: &name,
+        version: &located.version,
+        sha256,
+        in_lock: crate::project::lockfile::lockfile_path().exists(),
+    });
+    index::download(&located.source, &dir, CachePolicy::Use, expect.as_ref())?;
     package::flatten_single_dir(&dir)?;
 
     /* its own git repo with the published state as the baseline commit.

@@ -8,7 +8,7 @@ use crate::net::{http, registry};
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language};
 use crate::registry::local;
 use crate::sys::git;
-use crate::sys::hash::{fnv1a, fnv1a_parts};
+use crate::sys::hash::{fnv1a, fnv1a_parts, sha256_hex};
 use crate::sys::paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -96,6 +96,9 @@ pub struct ResolvedPackage {
     pub package_deprecated: Option<String>,
     pub dependencies: Vec<TransitiveDependency>,
     pub source: DownloadSource,
+    /** lowercase hex SHA-256 of the archive, from the entry's `sha256` or
+    Forest's `integrity`. None when the index records no hash. */
+    pub sha256: Option<String>,
 }
 
 pub struct TransitiveDependency {
@@ -244,12 +247,29 @@ impl Index {
     }
 }
 
-/** Downloads and extracts a resolved package into `dest`. Downloads are
-anonymous, except from ember's API host, which serves private and unlisted
-packages. That host alone gets the Ember token and the link key, so an
-arbitrary registry url in an index entry can't harvest them. */
-pub fn download(source: &DownloadSource, dest: &Path, cache: CachePolicy) -> Result<(), Error> {
-    download_with(source, dest, cache, &mut |_, _| {})
+/** the SHA-256 that a download must have, and the package a mismatch
+names. */
+pub struct Expect<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub sha256: &'a str,
+    /// the hash comes from ember.lock, not from the index entry
+    pub in_lock: bool,
+}
+
+/** Downloads and extracts a resolved package into `dest`, and returns the
+archive's SHA-256. With `expect`, an archive with another hash is an error
+before anything is extracted or cached. Downloads are anonymous, except
+from ember's API host, which serves private and unlisted packages. That
+host alone gets the Ember token and the link key, so an arbitrary registry
+url in an index entry can't harvest them. */
+pub fn download(
+    source: &DownloadSource,
+    dest: &Path,
+    cache: CachePolicy,
+    expect: Option<&Expect>,
+) -> Result<String, Error> {
+    download_with(source, dest, cache, expect, &mut |_, _| {})
 }
 
 /** [`download`], and `on_bytes` hears the archive arrive: bytes so far and
@@ -258,8 +278,25 @@ pub fn download_with(
     source: &DownloadSource,
     dest: &Path,
     cache: CachePolicy,
+    expect: Option<&Expect>,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<(), Error> {
+) -> Result<String, Error> {
+    let entry = match source {
+        DownloadSource::Zip { url } | DownloadSource::TarGz { url } => archive_entry(url),
+        DownloadSource::Workspace { .. } => None,
+    };
+    download_at(entry.as_deref(), source, dest, cache, expect, on_bytes)
+}
+
+/// [`download_with`] with the archive cache entry `entry`.
+fn download_at(
+    entry: Option<&Path>,
+    source: &DownloadSource,
+    dest: &Path,
+    cache: CachePolicy,
+    expect: Option<&Expect>,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<String, Error> {
     let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
         // Workspace members are linked in place, install never gets here.
         return Err(Error::IndexFetch {
@@ -273,19 +310,23 @@ pub fn download_with(
         headers.push(("Wally-Version", wally::VERSION_HEADER));
     }
 
+    // after the fetch, so a refused archive leaves nothing on disk
+    let (bytes, sha256, from_cache) = fetch_archive(entry, url, &headers, cache, expect, on_bytes)?;
     std::fs::create_dir_all(dest)?;
-    let (bytes, from_cache) = fetch_archive(url, &headers, cache, on_bytes)?;
     match extract(source, &bytes, dest) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(sha256),
         /* cached bytes that no longer extract are poison, bitrot the
         integrity record missed or a bad write. drop the entry, fetch
         fresh once, and try again on a clean dest */
         Err(_) if from_cache => {
-            evict_archive(url);
+            if let Some(entry) = entry {
+                evict_entry(entry);
+            }
             fs::remove_dir_all(dest)?;
             fs::create_dir_all(dest)?;
-            let (bytes, _) = fetch_archive(url, &headers, CachePolicy::Bypass, on_bytes)?;
-            extract(source, &bytes, dest)
+            let (bytes, sha256, _) =
+                fetch_archive(entry, url, &headers, CachePolicy::Bypass, expect, on_bytes)?;
+            extract(source, &bytes, dest).map(|()| sha256)
         }
         Err(error) => Err(error),
     }
@@ -340,33 +381,44 @@ fn remove_links(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/** the archive's bytes, from the cache when allowed and present. published
-registry versions are immutable by policy, registries reject duplicate
-publishes, which is what makes caching by URL sound. `--refresh` is the
-escape hatch for the exceptions like takedowns or republished storage, and
-`embr cache clean` drops everything. the bool is "these came from the
-cache", which decides whether an extract failure warrants a refetch. */
+/** the archive's bytes and their SHA-256, from the cache when allowed and
+present. published registry versions are immutable by policy, registries
+reject duplicate publishes, which is what makes caching by URL sound.
+`expect` checks that: a cached archive with another hash is evicted and
+downloaded again, and a download with another hash is an error and never
+cached. `--refresh` is the escape hatch for the exceptions like takedowns
+or republished storage, and `embr cache clean` drops everything. the bool
+is "these came from the cache", which decides whether an extract failure
+warrants a refetch. */
 fn fetch_archive(
+    entry: Option<&Path>,
     url: &str,
     headers: &[(&str, &str)],
     cache: CachePolicy,
+    expect: Option<&Expect>,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<(Vec<u8>, bool), Error> {
+) -> Result<(Vec<u8>, String, bool), Error> {
     if let Some(bytes) = local::read_archive(url) {
         let bytes = bytes?;
+        let sha256 = checked(&bytes, url, expect)?;
         let size = bytes.len() as u64;
         on_bytes(size, Some(size));
-        return Ok((bytes, false));
+        return Ok((bytes, sha256, false));
     }
-    let entry = archive_entry(url);
 
     if cache == CachePolicy::Use
-        && let Some(entry) = &entry
+        && let Some(entry) = entry
         && let Some(bytes) = load_archive(entry, url)
     {
-        let size = bytes.len() as u64;
-        on_bytes(size, Some(size));
-        return Ok((bytes, true));
+        let sha256 = sha256_hex(&bytes);
+        if expect.is_none_or(|expect| expect.sha256 == sha256) {
+            let size = bytes.len() as u64;
+            on_bytes(size, Some(size));
+            return Ok((bytes, sha256, true));
+        }
+        /* the FNV record only catches bitrot. a cached archive with
+        another hash was changed on disk, so the registry's copy decides */
+        evict_entry(entry);
     }
 
     /* the cache keeps the URL as written, so an archive cached from an old
@@ -379,16 +431,34 @@ fn fetch_archive(
         http::get_bytes_with(&from, headers, on_bytes)?
     };
     crate::ui::timing(&format!("download {from}"), started);
+    let sha256 = checked(&bytes, &from, expect)?;
 
     /* caching is best-effort, a full disk or permission problem must not
     fail an install that already has the bytes in hand. no size budget or
     eviction yet, `embr cache clean` is the release valve. an
     extracted-file store shared across projects, pesde-style, is the
     natural next step if this ever needs more */
-    if let Some(entry) = &entry {
+    if let Some(entry) = entry {
         let _ = store_archive(entry, &bytes, url);
     }
-    Ok((bytes, false))
+    Ok((bytes, sha256, false))
+}
+
+/** the SHA-256 of `bytes`, or the mismatch error when `expect` records
+another hash. */
+fn checked(bytes: &[u8], url: &str, expect: Option<&Expect>) -> Result<String, Error> {
+    let sha256 = sha256_hex(bytes);
+    match expect {
+        Some(expect) if expect.sha256 != sha256 => Err(Error::IntegrityMismatch {
+            name: expect.name.to_string(),
+            version: expect.version.to_string(),
+            url: url.to_string(),
+            expected: expect.sha256.to_string(),
+            received: sha256,
+            in_lock: expect.in_lock,
+        }),
+        _ => Ok(sha256),
+    }
 }
 
 /** where `url`'s archive lives in the cache, None when there's no home
@@ -464,7 +534,7 @@ fn replace_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     })
 }
 
-fn evict_archive(url: &str) {
+pub(crate) fn evict_archive(url: &str) {
     if let Some(entry) = archive_entry(url) {
         evict_entry(&entry);
     }
@@ -654,6 +724,155 @@ mod tests {
         // payload without a sidecar is not an entry
         fs::write(&entry, b"orphan").unwrap();
         assert_eq!(load_archive(&entry, url), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /** a plain tar with one file. extract takes a raw tar too, and its
+    bytes are text, so the mock server can serve them. */
+    fn tar_of(contents: &str) -> String {
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "init.luau", contents.as_bytes())
+            .unwrap();
+        String::from_utf8(tar.into_inner().unwrap()).unwrap()
+    }
+
+    /// a server that answers each request with `body`, and a scratch dir.
+    fn archive_host(name: &str, body: String) -> (String, crate::net::http::mock::Log, PathBuf) {
+        let (base, log) =
+            crate::net::http::mock::serve(move |_| crate::net::http::mock::reply("200 OK", &body));
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        (format!("{base}/acme/thing/1.0.0.tar.gz"), log, dir)
+    }
+
+    fn expect(sha256: &str, in_lock: bool) -> Expect<'_> {
+        Expect {
+            name: "acme/thing",
+            version: "1.0.0",
+            sha256,
+            in_lock,
+        }
+    }
+
+    #[test]
+    fn a_download_must_match_its_hash() {
+        let body = tar_of("return 1\n");
+        let good = crate::sys::hash::sha256_hex(body.as_bytes());
+        let (url, log, dir) = archive_host("embr-test-download-hash", body);
+        let source = DownloadSource::TarGz { url: url.clone() };
+        let entry = dir.join("entry");
+        let none = &mut |_, _| {};
+
+        // the hash matches: extracted, cached, and the hash comes back
+        let dest = dir.join("good");
+        let expected = expect(&good, false);
+        let got = download_at(
+            Some(&entry),
+            &source,
+            &dest,
+            CachePolicy::Use,
+            Some(&expected),
+            none,
+        );
+        assert_eq!(got.unwrap(), good);
+        assert!(dest.join("init.luau").is_file());
+        assert!(entry.is_file());
+
+        // no hash to match: the first lock takes the one computed here
+        let dest = dir.join("first");
+        let got = download_at(
+            Some(&entry),
+            &source,
+            &dest,
+            CachePolicy::Bypass,
+            None,
+            none,
+        );
+        assert_eq!(got.unwrap(), good);
+
+        /* another hash: an error that names both, and the download is
+        neither extracted nor cached */
+        let bad = crate::sys::hash::sha256_hex(b"something else");
+        let entry = dir.join("refused");
+        let dest = dir.join("bad");
+        let expected = expect(&bad, true);
+        let error = download_at(
+            Some(&entry),
+            &source,
+            &dest,
+            CachePolicy::Use,
+            Some(&expected),
+            none,
+        )
+        .unwrap_err();
+        let Error::IntegrityMismatch {
+            expected, received, ..
+        } = &error
+        else {
+            panic!("{error}");
+        };
+        assert_eq!((expected, received), (&bad, &good));
+        let text = error.to_string();
+        for part in ["acme/thing@1.0.0", "ember.lock", &bad, &good, &url] {
+            assert!(text.contains(part), "{part} not in {text}");
+        }
+        assert!(text.contains("embr install --update acme/thing"), "{text}");
+        assert!(!dest.exists());
+        assert!(!entry.exists());
+        assert!(!meta_path(&entry).exists());
+        assert_eq!(log.lock().unwrap().len(), 3);
+
+        // against the index entry, --update cannot help, so it is not offered
+        let expected = expect(&bad, false);
+        let error = download_at(
+            Some(&entry),
+            &source,
+            &dest,
+            CachePolicy::Use,
+            Some(&expected),
+            none,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("its index entry"), "{error}");
+        assert!(!error.to_string().contains("--update"), "{error}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /** the FNV record passes a cache entry that was rewritten whole. the
+    hash does not, so the registry's copy replaces it. */
+    #[test]
+    fn a_changed_cache_entry_is_downloaded_again() {
+        let body = tar_of("return 1\n");
+        let good = crate::sys::hash::sha256_hex(body.as_bytes());
+        let (url, log, dir) = archive_host("embr-test-download-cache", body.clone());
+        let source = DownloadSource::TarGz { url: url.clone() };
+        let entry = dir.join("entry");
+        store_archive(&entry, tar_of("return 2\n").as_bytes(), &url).unwrap();
+
+        let dest = dir.join("dest");
+        let expected = expect(&good, true);
+        let got = download_at(
+            Some(&entry),
+            &source,
+            &dest,
+            CachePolicy::Use,
+            Some(&expected),
+            &mut |_, _| {},
+        );
+        assert_eq!(got.unwrap(), good);
+        assert_eq!(log.lock().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(dest.join("init.luau")).unwrap(),
+            "return 1\n"
+        );
+        assert_eq!(load_archive(&entry, &url), Some(body.into_bytes()));
 
         let _ = fs::remove_dir_all(&dir);
     }

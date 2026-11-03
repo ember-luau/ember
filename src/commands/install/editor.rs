@@ -642,6 +642,7 @@ mod tests {
             source: DownloadSource::Zip {
                 url: format!("https://example.com/{name}"),
             },
+            sha256: None,
         }
     }
 

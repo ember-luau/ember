@@ -340,6 +340,7 @@ dependencies = [
  "jsonc-parser",
  "libc",
  "lzma-rs",
+ "ring",
  "self-replace",
  "semver",
  "serde",

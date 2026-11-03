@@ -469,6 +469,51 @@ pub enum Error {
     )]
     LockfileOutdated(u32),
 
+    /** a downloaded archive does not have the SHA-256 that its index entry
+    or ember.lock records. embr did not extract or cache it. */
+    #[error(
+        "The archive of {name}@{version} does not match {}\n  expected sha256 {expected}\n  received sha256 {received}\n  from {url}\nembr deleted the download. {}",
+        if *.in_lock { "ember.lock" } else { "its index entry" },
+        if *.in_lock {
+            format!("If the package owner changed the archive on purpose, run `embr install --update {name}` to lock the new hash")
+        } else {
+            "The archive changed after it was published. Do not use it, and tell the package owner".to_string()
+        }
+    )]
+    IntegrityMismatch {
+        name: String,
+        version: String,
+        url: String,
+        expected: String,
+        received: String,
+        /// the expected hash comes from ember.lock, not from the index entry
+        in_lock: bool,
+    },
+
+    /** the index entry and ember.lock record different SHA-256 hashes for
+    one version. a published version does not change, so this is an error,
+    not an update. */
+    #[error(
+        "The archive hash of {name}@{version} changed\n  ember.lock records sha256 {locked}\n  the index entry records sha256 {entry}\n  for {url}\nA published version must not change. If the change is deliberate, run `embr install --update {name}` to lock the new hash"
+    )]
+    IntegrityChanged {
+        name: String,
+        version: String,
+        url: String,
+        locked: String,
+        entry: String,
+    },
+
+    /// an index entry has a `sha256` that is not 64 lowercase hex characters.
+    #[error(
+        "The index entry of {name}@{version} has a bad sha256 '{value}'; it must be 64 lowercase hex characters"
+    )]
+    IntegrityInvalid {
+        name: String,
+        version: String,
+        value: String,
+    },
+
     #[error("Invalid ember.toml: {0}")]
     ManifestInvalid(String),
 

@@ -148,6 +148,7 @@ fn publish_project(
             locked: false,
             refresh: false,
             strict_peers: false,
+            update: Vec::new(),
         };
         super::install::install_project(&args, &manifest, false)?;
     }

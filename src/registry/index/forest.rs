@@ -174,6 +174,7 @@ fn resolved(
         source: DownloadSource::TarGz {
             url: format!("{CDN_URL}/{integrity}.tgz"),
         },
+        sha256: Some(integrity),
     })
 }
 
@@ -234,6 +235,11 @@ mod tests {
             DownloadSource::TarGz {
                 url: "https://registry.forest.dev/public/7999efe9356b4f0db3951c555cd36b2bafaf33328352d7417e2c771e4dc5a94e.tgz".to_string()
             }
+        );
+        // the archive's name is its SHA-256, and install checks it
+        assert_eq!(
+            package.sha256.as_deref(),
+            Some("7999efe9356b4f0db3951c555cd36b2bafaf33328352d7417e2c771e4dc5a94e")
         );
         let edges: Vec<_> = package
             .dependencies
