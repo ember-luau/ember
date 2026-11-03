@@ -498,7 +498,8 @@ impl Environment {
 
     /** the folder under packages/ that this environment's packages install
     to. it differs from [`Environment::as_str`] only for `roblox_server`,
-    whose folder stays `server` so existing Rojo project paths keep working. */
+    whose folder stays `server` so existing Rojo project paths keep working.
+    a project reads its own folder names from [`Manifest::packages_dir`]. */
     pub fn dir_name(self) -> &'static str {
         match self {
             Environment::Roblox => "roblox",
@@ -1121,6 +1122,37 @@ impl Manifest {
         self.dependencies.iter().chain(&self.dev_dependencies)
     }
 
+    /** the folder under packages/ that this project installs `environment`
+    to, which also names its require alias. a Luwu project puts the portable
+    tree in `luwu`, because its packages are Luwu code that no plain Luau
+    runtime runs. the index and the lockfile still say `luau`. */
+    pub fn packages_dir(&self, environment: Environment) -> &'static str {
+        match environment {
+            Environment::Luau
+                if self
+                    .target()
+                    .is_some_and(|target| target.language == Language::Luwu) =>
+            {
+                "luwu"
+            }
+            _ => environment.dir_name(),
+        }
+    }
+
+    /** the default folders that an older embr installed to and this one
+    does not, each with the environment that moved out. `packages/shared`
+    held the roblox packages before the rename, and `packages/luau` held the
+    portable packages of a Luwu project before 0.14. */
+    pub fn legacy_packages_outs(&self) -> Vec<(std::path::PathBuf, Environment)> {
+        let packages = std::path::Path::new("packages");
+        let mut legacy = vec![(packages.join("shared"), Environment::Roblox)];
+        let luau = Environment::Luau.dir_name();
+        if self.packages_dir(Environment::Luau) != luau {
+            legacy.push((packages.join(luau), Environment::Luau));
+        }
+        legacy
+    }
+
     /// folder an environment's packages (and their link files) install to.
     pub fn packages_out(&self, environment: Environment) -> std::path::PathBuf {
         let configured = match environment {
@@ -1134,7 +1166,7 @@ impl Manifest {
         };
         match configured {
             Some(dir) => std::path::PathBuf::from(dir),
-            None => std::path::Path::new("packages").join(environment.dir_name()),
+            None => std::path::Path::new("packages").join(self.packages_dir(environment)),
         }
     }
 
@@ -1563,6 +1595,37 @@ mod tests {
         let serialized = toml::to_string(&legacy).unwrap();
         assert!(serialized.contains("roblox-packages-out"), "{serialized}");
         assert!(!serialized.contains("shared-packages-out"), "{serialized}");
+    }
+
+    /** a Luwu project installs the portable tree to `packages/luwu`, and
+    `packages/luau` becomes a legacy folder for it. a Luau project and a
+    Luwu project on another runtime keep their other folders. */
+    #[test]
+    fn a_luwu_project_installs_the_portable_tree_to_luwu() {
+        let project = |target: &str| -> Manifest { toml::from_str(target).unwrap() };
+        let luau = project("[target]\nenvironment = \"luau\"\n");
+        let luwu = project("[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n");
+        let seal = project("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n");
+        let packages = std::path::Path::new("packages");
+
+        assert_eq!(luau.packages_dir(Environment::Luau), "luau");
+        assert_eq!(luau.packages_out(Environment::Luau), packages.join("luau"));
+        assert_eq!(luwu.packages_out(Environment::Luau), packages.join("luwu"));
+        assert_eq!(seal.packages_out(Environment::Luau), packages.join("luwu"));
+        assert_eq!(seal.packages_out(Environment::Seal), packages.join("seal"));
+
+        let legacy = |manifest: &Manifest| -> Vec<std::path::PathBuf> {
+            manifest
+                .legacy_packages_outs()
+                .into_iter()
+                .map(|(dir, _)| dir)
+                .collect()
+        };
+        assert_eq!(legacy(&luau), [packages.join("shared")]);
+        assert_eq!(
+            legacy(&luwu),
+            [packages.join("shared"), packages.join("luau")]
+        );
     }
 
     #[test]

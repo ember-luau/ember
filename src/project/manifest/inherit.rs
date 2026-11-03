@@ -253,4 +253,41 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let _ = fs::remove_dir_all(&outside);
     }
+    /** a mixed workspace: each member names its portable folder by its own
+    language, inherited or not. the Luau root keeps `packages/luau`. */
+    #[test]
+    fn each_member_names_its_portable_folder_by_its_language() {
+        use crate::project::manifest::Environment;
+        let base = std::env::temp_dir().join("embr-test-inherit-luwu");
+        let _ = fs::remove_dir_all(&base);
+        write(
+            &base,
+            "[target]\nenvironment = \"luau\"\nworkspace = [\"members/*\"]\n\n\
+             [workspace.target]\nlanguage = \"luwu\"\n",
+        );
+        let member = |name: &str, language: &str| {
+            write(
+                &base.join("members").join(name),
+                &format!("[target]\nenvironment = \"luau\"\n{language}"),
+            );
+            Manifest::load_from(&base.join("members").join(name).join("ember.toml"))
+                .unwrap()
+                .packages_out(Environment::Luau)
+        };
+        let packages = Path::new("packages");
+
+        let root = Manifest::load_from(&base.join("ember.toml")).unwrap();
+        assert_eq!(root.packages_out(Environment::Luau), packages.join("luau"));
+        assert_eq!(member("plain", ""), packages.join("luau"));
+        assert_eq!(
+            member("own", "language = \"luwu\"\n"),
+            packages.join("luwu")
+        );
+        assert_eq!(
+            member("inherited", "language = { workspace = true }\n"),
+            packages.join("luwu")
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

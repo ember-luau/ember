@@ -28,11 +28,16 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
         .into_iter()
         .map(|environment| manifest.packages_out(environment))
         .collect();
-    /* the pre-rename roblox output folder, see `Environment::Roblox`. only
-    `embr install` clears it, so a publish that happens first would otherwise
-    walk straight into a whole vendored `.ember` store and ship somebody
-    else's packages inside this archive */
-    out_dirs.push(Path::new("packages").join("shared"));
+    /* the old output folders, see `Manifest::legacy_packages_outs`. only
+    `embr install` clears them, so a publish that happens first would
+    otherwise walk straight into a whole vendored `.ember` store and ship
+    somebody else's packages inside this archive */
+    out_dirs.extend(
+        manifest
+            .legacy_packages_outs()
+            .into_iter()
+            .map(|(dir, _)| dir),
+    );
     /* Azul mirrors the packages that embr pushed into Studio back to disk.
     those copies are somebody else's packages too */
     if azul::sync_tool(manifest, root) == SyncTool::Azul {
