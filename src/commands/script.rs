@@ -23,7 +23,7 @@ pub enum ScriptCommand {
         command: Vec<String>,
 
         /// Add to the global manifest, so the script runs in any directory
-        #[arg(short, long, alias = "g")]
+        #[arg(short, long)]
         global: bool,
     },
 
@@ -34,14 +34,14 @@ pub enum ScriptCommand {
         name: String,
 
         /// Remove from the global manifest instead of this project
-        #[arg(short, long, alias = "g")]
+        #[arg(short, long)]
         global: bool,
     },
 
     /// Open ember.toml, or the global manifest with --global, in your editor
     Edit {
         /// Open the global manifest, and create it when it is missing
-        #[arg(short, long, alias = "g")]
+        #[arg(short, long)]
         global: bool,
     },
 }

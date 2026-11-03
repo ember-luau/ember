@@ -26,7 +26,7 @@ pub enum ToolCommand {
         version: Option<String>,
 
         /// Add to the global tools file, usable anywhere
-        #[arg(short, long, alias = "g")]
+        #[arg(short, long)]
         global: bool,
     },
 
@@ -36,7 +36,7 @@ pub enum ToolCommand {
         name: String,
 
         /// Remove from the global tools file instead of this project
-        #[arg(short, long, alias = "g")]
+        #[arg(short, long)]
         global: bool,
     },
 

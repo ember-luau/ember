@@ -276,6 +276,25 @@ mod tests {
         assert!(Cli::try_parse_from(["embr", "run", "lint"]).is_ok());
     }
 
+    /// `-g` and `--global` take the global manifest. `--g` is no flag.
+    #[test]
+    fn global_is_dash_g_or_dash_dash_global() {
+        for words in [
+            &["embr", "script", "add", "x", "echo"][..],
+            &["embr", "script", "remove", "x"],
+            &["embr", "script", "edit"],
+            &["embr", "tool", "add", "rojo-rbx/rojo"],
+            &["embr", "tool", "remove", "rojo"],
+        ] {
+            for flag in ["-g", "--global"] {
+                let args = [words, &[flag]].concat();
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+            }
+            let args = [words, &["--g"]].concat();
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
     #[test]
     fn a_shortcut_and_a_colon_run_that_script() {
         let parse = |words: &[&str]| {
