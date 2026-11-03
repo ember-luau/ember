@@ -202,11 +202,14 @@ fn locate(name: &str, version: Option<&semver::Version>) -> Result<Located, Erro
             DownloadSource::Zip { url } | DownloadSource::TarGz { url } => {
                 urls.insert(url.clone());
             }
-            DownloadSource::Workspace { .. } => {
+            DownloadSource::Git { url, rev, .. } => {
+                urls.insert(format!("{url}#{rev}"));
+            }
+            DownloadSource::Workspace { .. } | DownloadSource::Path { .. } => {
                 return Err(Error::PatchSpecInvalid {
                     spec: name.to_string(),
                     reason: format!(
-                        "{name} is a workspace member; edit its source directly instead of patching"
+                        "{name} is a workspace member or a path dependency; edit its source directly instead of patching"
                     ),
                 });
             }

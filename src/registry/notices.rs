@@ -309,7 +309,10 @@ pub fn gather(
         .iter()
         .map(|package| {
             let download = match &package.source {
-                DownloadSource::Workspace { .. } => return Vec::new(),
+                // a member, a folder and a commit have no registry to post notices
+                DownloadSource::Workspace { .. }
+                | DownloadSource::Path { .. }
+                | DownloadSource::Git { .. } => return Vec::new(),
                 DownloadSource::Zip { url } | DownloadSource::TarGz { url } => url.as_str(),
             };
             let Ok(version) = semver::Version::parse(&package.version) else {

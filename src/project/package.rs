@@ -1070,8 +1070,13 @@ pub fn declared_dependencies(dir: &Path) -> Vec<(String, String, DependencyKind)
     /// a dependency table, and whether it holds peers
     type Tables = &'static [(&'static str, bool)];
 
-    // how an ember.toml or lpm.toml entry names its package
-    let own: DependencyName = |entry| Some(entry.get("name")?.as_str()?.to_string());
+    /* how an ember.toml or lpm.toml entry names its package. a path or git
+    entry without `name` names it in its own manifest: it reads as "", and
+    the redirect that the resolver records gives the name */
+    let own: DependencyName = |entry| match entry.get("name") {
+        Some(name) => Some(name.as_str()?.to_string()),
+        None => (entry.get("git").is_some() || entry.get("path").is_some()).then(String::new),
+    };
 
     let manifests: [(&str, Tables, DependencyName); 4] = [
         (

@@ -224,6 +224,8 @@ embr info chief/core --version "^0.2"
   deprecation, and the 10 newest versions. A pesde entry also gives the license and the authors.
   `--index` reads another index, such as `pesde`. A private or unlisted
   package comes from the registry API, with your login or its link key.
+  A path or git dependency of the project shows its source and its
+  dependencies from its own `ember.toml`.
 
 ## `embr tree` and `embr why`: see what is installed
 
@@ -239,7 +241,8 @@ with dependencies that shows a second time gets `(*)`, and its
 dependencies do not show again. A package with enabled features shows them
 in brackets, as in `acme/ui@1.2.0 [icons]`. When the direct dependencies install in
 more than one environment, such as `roblox` and `roblox_server`, each
-environment gets a heading.
+environment gets a heading. A path or git package shows its source, such
+as `(path ../my-lib)`.
 
 ## `embr notices`: what the owners say
 
@@ -541,6 +544,64 @@ installs no gated dependency, also not one that a `default` feature turns
 on, and it never fails on one. The package then runs as with every feature
 off.
 
+## Path and git dependencies
+
+A path dependency is a folder on this computer. A git dependency is a
+commit of a git repository:
+
+```toml
+[dependencies]
+lib = { path = "../my-lib" }
+ui = { git = "https://github.com/acme/ui", tag = "v1.2.0" }
+signal = { git = "git@github.com:acme/signal.git", branch = "main" }
+core = { git = "https://github.com/acme/core", rev = "4f2a9c1" }
+```
+
+- The folder or the commit must have an `ember.toml`. Its `[package]
+  name` is the name of the package. An entry can also say `name`, which
+  must be the same.
+- Install links a path dependency in place, as it links a workspace
+  member. An edit in the folder shows at once, and a change to its
+  `ember.toml` shows on the next `embr install`. Its own path
+  dependencies are relative to its folder. Its code requires its own
+  dependencies through its own packages folder, so run `embr install` in
+  the folder too.
+- A git URL is `https://`, `ssh://` or `user@host:path`. Install refuses
+  other URLs. Give one of `rev`, `tag` or `branch`, or none for the
+  default branch. embr keeps one bare clone of each repository in
+  `~/.ember/git-cache`, reads `ember.toml` at the commit, and installs the
+  files of that commit as it installs an archive. No hook of the
+  repository runs, and submodules stay out.
+- `ember.lock` keeps the path of a path dependency and no version. It
+  keeps the full commit of a git dependency, so a branch or a tag stays at
+  that commit until `embr install --update <scope/name>` moves that
+  package, or `embr install --refresh` moves all of them.
+- `target` and `entry` work as on other entries. `features` and
+  `default-features` do not work on a path or git entry yet, so the
+  `default` features of the package are on.
+- `embr tree`, `embr why` and `embr info` show the source: the path, or
+  the URL and the commit.
+
+```
+✓ me/lib → roblox/lib (path ../my-lib)
+✓ acme/ui@1.2.0 → roblox/ui (git https://github.com/acme/ui 9b1d3e0)
+```
+
+`embr publish` refuses a path or git dependency, because a project that
+installs your package cannot get it. The entry can also have a registry
+`version`, with `name` and `index` when they are needed. Publish then
+writes that registry part in place of the path or the URL, as Cargo does:
+
+```toml
+lib = { path = "../my-lib", version = "^0.3.0" }
+```
+
+A dev dependency without a `version` drops out of the published
+manifest, since only your own tests use it.
+
+Path and git dependencies need embr 0.14.0. An older embr cannot read a
+manifest or an `ember.lock` that has one.
+
 ## Workspace inheritance
 
 The root of a workspace can hold shared values in a `[workspace]` table. A
@@ -690,7 +751,9 @@ extracts it. `ember.lock` keeps the hash of each package as `sha256`.
 - `embr install --locked` checks against `ember.lock`.
 - A lockfile from before embr 0.14.0 gets the hashes on the next
   `embr install`. An older embr ignores them.
-- Local packages and workspace members have no hash.
+- Local packages, workspace members and path dependencies have no hash.
+  A git dependency has none either: its commit in `ember.lock` is its
+  integrity.
 
 ## Sign in
 

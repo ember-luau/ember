@@ -99,6 +99,11 @@ pub(crate) fn brought_in_by(
     Some(by)
 }
 
+/// the `--json` version of a package, null for a path package, which has none.
+fn version_json(package: &LockedPackage) -> Option<&str> {
+    (!package.version.is_empty()).then_some(package.version.as_str())
+}
+
 /// one manifest entry, and the installed package it became.
 struct Root {
     alias: String,
@@ -139,16 +144,24 @@ impl<'lock> Graph<'lock> {
             (true, &manifest.dev_dependencies),
         ] {
             for (alias, dependency) in entries {
+                /* a path or git entry without `name` names its package in
+                its own manifest, so its link alone finds it */
                 let name = dependency.package();
                 let direct = |package: &&LockedPackage| {
-                    package.link.is_some() && package.name.eq_ignore_ascii_case(name)
+                    package.link.is_some()
+                        && (name.is_empty() || package.name.eq_ignore_ascii_case(name))
                 };
                 /* the link is the alias. a second alias for a package that
                 the first one brought in gets no link, so the name decides */
                 let node = packages
                     .iter()
                     .position(|package| direct(&package) && package.link.as_deref() == Some(alias))
-                    .or_else(|| packages.iter().position(|package| direct(&package)));
+                    .or_else(|| {
+                        let named = !name.is_empty();
+                        packages
+                            .iter()
+                            .position(|package| named && direct(&package))
+                    });
                 let node = match node {
                     Some(node) => node,
                     // install skipped it, which is what optional allows
@@ -236,15 +249,18 @@ impl<'lock> Graph<'lock> {
 
     /** `scope/name@version`, then its enabled features in brackets. the
     alias follows when it is not the short name, because the alias names
-    the link file. */
+    the link file, and then a path or git source. */
     fn label(&self, node: usize, alias: &str) -> String {
         let package = &self.packages[node];
-        let mut label = format!("{}@{}", package.name, package.version);
+        let mut label = package.id();
         if !package.features.is_empty() {
             label.push_str(&format!(" [{}]", package.features.join(", ")));
         }
         if package.name.rsplit('/').next() != Some(alias) {
             label.push_str(&format!(" as '{alias}'").dark_grey().to_string());
+        }
+        if let Some(source) = package.source.local_label() {
+            label.push_str(&format!(" ({source})").dark_grey().to_string());
         }
         label
     }
@@ -378,7 +394,8 @@ impl<'lock> Graph<'lock> {
         json!({
             "alias": alias,
             "name": package.name,
-            "version": package.version,
+            "version": version_json(package),
+            "source": package.source.local_json(),
             "environment": package.context().as_str(),
             "features": package.features,
             "optional": matches!(kind, DependencyKind::Optional),
@@ -452,7 +469,7 @@ impl<'lock> Graph<'lock> {
                                 json!({
                                     "alias": alias,
                                     "name": package.name,
-                                    "version": package.version,
+                                    "version": version_json(package),
                                 })
                             })
                             .collect();
@@ -461,7 +478,8 @@ impl<'lock> Graph<'lock> {
                     .collect();
                 json!({
                     "name": package.name,
-                    "version": package.version,
+                    "version": version_json(package),
+                    "source": package.source.local_json(),
                     "environment": package.context().as_str(),
                     "paths": paths,
                 })
@@ -484,7 +502,10 @@ impl<'lock> Graph<'lock> {
         let mut out = String::new();
         for target in targets {
             let package = &self.packages[target];
-            let mut head = format!("{}@{}", package.name, package.version);
+            let mut head = package.id();
+            if let Some(source) = package.source.local_label() {
+                head.push_str(&format!(" ({source})"));
+            }
             if grouped {
                 head.push_str(&format!(" in {}", package.context()));
             }
@@ -793,6 +814,7 @@ mod tests {
                 "alias": alias,
                 "name": name,
                 "version": version,
+                "source": null,
                 "environment": environment,
                 "features": [],
                 "optional": false,
@@ -863,6 +885,7 @@ mod tests {
                 "matches": [{
                     "name": "chief/helper",
                     "version": "1.0.0",
+                    "source": null,
                     "environment": "roblox",
                     "paths": [
                         {
@@ -925,6 +948,62 @@ mod tests {
         assert_eq!(ui["features"], json!(["dark"]));
         assert_eq!(ui["dependencies"][0]["name"], "acme/theme");
         assert_eq!(ui["dependencies"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a path package shows its folder and no version, a git package its
+    URL and commit. an entry without `name` finds its package by the link. */
+    #[test]
+    fn path_and_git_packages_show_their_source() {
+        let base = std::env::temp_dir().join("embr-test-tree-path-git");
+        let _ = fs::remove_dir_all(&base);
+        let project = base.join("game");
+        write(
+            &base.join("lib"),
+            "ember.toml",
+            "[package]\nname = \"acme/lib\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            &project.join("packages/roblox/.ember/acme_ui"),
+            "init.luau",
+            "",
+        );
+        let manifest: Manifest = toml::from_str(
+            "[target]\nenvironment = \"roblox\"\n[dependencies]\n\
+             lib = { path = \"../lib\" }\n\
+             ui = { git = \"https://github.com/acme/ui\", branch = \"main\" }\n",
+        )
+        .unwrap();
+        let lock: Lockfile = toml::from_str(
+            "version = 2\n\
+             [[package]]\nname = \"acme/lib\"\nenvironment = \"roblox\"\nlink = \"lib\"\n\
+             index = \"path\"\ntype = \"path\"\npath = \"../lib\"\n\
+             [[package]]\nname = \"acme/ui\"\nversion = \"2.0.0\"\nenvironment = \"roblox\"\nlink = \"ui\"\n\
+             index = \"git\"\ntype = \"git\"\nurl = \"https://github.com/acme/ui\"\n\
+             rev = \"0123456789abcdef0123456789abcdef01234567\"\nbranch = \"main\"\n",
+        )
+        .unwrap();
+        let graph = Graph::read(&manifest, &lock, &project).unwrap();
+        assert_eq!(
+            plain(&graph.tree(None)),
+            "acme/lib (path ../lib)\n\
+             acme/ui@2.0.0 (git https://github.com/acme/ui 0123456)\n"
+        );
+        assert_eq!(
+            plain(&graph.why(&graph.paths_to("acme/ui"))),
+            "acme/ui@2.0.0 (git https://github.com/acme/ui 0123456)\n  \
+             ember.toml > acme/ui@2.0.0 (git https://github.com/acme/ui 0123456)\n"
+        );
+        // --json gives the source as data, and null for the version of a path package
+        let json = graph.tree_json(None);
+        let (lib, ui) = (&json["dependencies"][0], &json["dependencies"][1]);
+        assert_eq!(lib["version"], json!(null));
+        assert_eq!(lib["source"], json!({ "type": "path", "path": "../lib" }));
+        assert_eq!(
+            ui["source"]["rev"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(ui["source"]["branch"], "main");
         let _ = fs::remove_dir_all(&base);
     }
 

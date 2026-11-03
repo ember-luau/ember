@@ -206,6 +206,26 @@ pub fn relative_path(from: &Path, to: &Path) -> String {
     }
 }
 
+/** `path` with each `.` dropped and each `..` folded into the part before
+it, by the text alone. one folder that two manifests spell in two ways is
+then one path. */
+pub fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out
+}
+
 /// `std::path::absolute` with our error type. never canonicalize, symlink targets would break the lexical path math above.
 fn absolute(path: &Path) -> Result<PathBuf, Error> {
     Ok(std::path::absolute(path)?)

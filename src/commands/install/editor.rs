@@ -468,8 +468,11 @@ fn sync_definitions(
 ) -> Result<(), String> {
     let mut wanted = BTreeMap::new();
     for package in packages {
-        // a workspace member is source the user edits, not a store
-        if matches!(package.source, DownloadSource::Workspace { .. }) {
+        // a workspace member or a path folder is source the user edits, not a store
+        if matches!(
+            package.source,
+            DownloadSource::Workspace { .. } | DownloadSource::Path { .. }
+        ) {
             continue;
         }
         let store = manifest

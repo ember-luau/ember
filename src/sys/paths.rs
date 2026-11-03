@@ -81,6 +81,11 @@ pub fn index_cache_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("index-cache"))
 }
 
+/// ~/.ember/git-cache, one bare clone per git dependency.
+pub fn git_cache_dir() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("git-cache"))
+}
+
 /// ~/.ember/templates, one folder per template that `embr template save` keeps.
 pub fn templates_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("templates"))
