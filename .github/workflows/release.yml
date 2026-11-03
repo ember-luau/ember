@@ -5,7 +5,9 @@ on:
     tags: ["v*"]
   # A dry run builds and stages every asset and stops there. It makes no
   # release, publishes nothing to crates.io and pushes nothing to the AUR,
-  # so the matrix is provable before a tag starts the one-way half.
+  # so the matrix is provable before a tag starts the one-way half. The
+  # channel jobs (Homebrew, Scoop, winget) write and test their files for
+  # the latest release and push nothing. The Nix job builds the flake.
   workflow_dispatch:
 
 permissions:
@@ -199,3 +201,185 @@ jobs:
     with:
       version: ${{ github.ref_name }}
     secrets: inherit
+
+  # One SHA256SUMS file for all release assets, in the format of sha256sum.
+  # Each channel below reads its sums from it. A dry run has no release of
+  # its own, so it sums the assets of the latest release and uploads
+  # nothing to it.
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.sum.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Sum the release assets
+        id: sum
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$(gh release view -R "$REPO" --json tagName -q .tagName)"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          mkdir assets
+          cd assets
+          # embr-* leaves out a SHA256SUMS of an earlier run of this job.
+          gh release download "$tag" -R "$REPO" --pattern 'embr-*'
+          sha256sum embr-* > SHA256SUMS
+          cat SHA256SUMS
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: Upload SHA256SUMS to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS -R "$REPO" --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: assets/SHA256SUMS
+
+  # The channel jobs write their files with packaging/render.sh and test
+  # them. They push only for a stable tag, and only when the token of the
+  # channel is set. Without the token they stop with a notice, as the AUR
+  # job does. After a failed push, run the failed job again.
+  #
+  # Homebrew: the formula goes to Formula/embr.rb in ember-luau/homebrew-tap,
+  # so `brew install ember-luau/tap/embr` finds it. HOMEBREW_TAP_TOKEN is a
+  # fine-grained token with Contents read and write on that repo only.
+  homebrew:
+    name: Homebrew
+    needs: checksums
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.checksums.outputs.version }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SHA256SUMS
+      - name: Write and test the formula
+        run: |
+          set -euo pipefail
+          packaging/render.sh "$VERSION" SHA256SUMS out
+          # The Linux runner image has Homebrew. A local tap holds the
+          # formula for the audit, the install and the test.
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew tap-new --no-git ember-luau/tap
+          cp out/embr.rb "$(brew --repository ember-luau/tap)/Formula/embr.rb"
+          brew audit --strict --online --formula ember-luau/tap/embr
+          brew install --formula ember-luau/tap/embr
+          brew test ember-luau/tap/embr
+      - name: Push to the tap
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: packaging/push.sh ember-luau/homebrew-tap Formula/embr.rb out/embr.rb
+
+  # Scoop: the manifest goes to bucket/embr.json in ember-luau/scoop-bucket.
+  # SCOOP_BUCKET_TOKEN is a fine-grained token with Contents read and write
+  # on that repo only. The job installs the manifest with Scoop first.
+  scoop:
+    name: Scoop
+    needs: checksums
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.checksums.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SHA256SUMS
+      - name: Write the manifest
+        shell: bash
+        run: packaging/render.sh "$VERSION" SHA256SUMS out
+      - name: Install it with Scoop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-RestMethod https://get.scoop.sh -OutFile install-scoop.ps1
+          .\install-scoop.ps1 -RunAsAdmin
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop install .\out\embr.json
+          if ($LASTEXITCODE) { exit 1 }
+          $out = embr --version
+          $out
+          if ($out -notmatch [regex]::Escape($env:VERSION)) { throw "expected $env:VERSION in the --version output" }
+      - name: Push to the bucket
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: packaging/push.sh ember-luau/scoop-bucket bucket/embr.json out/embr.json
+
+  # winget: wingetcreate opens a pull request with the three manifests on
+  # microsoft/winget-pkgs, from a fork in the account of WINGET_TOKEN. That
+  # is a classic token with the public_repo scope. The first pull request
+  # adds the package, the later ones add a version. A moderator merges each.
+  winget:
+    name: winget
+    needs: checksums
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.checksums.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SHA256SUMS
+      - name: Write the manifests
+        shell: bash
+        run: packaging/render.sh "$VERSION" SHA256SUMS out
+      - name: Check the manifests
+        shell: pwsh
+        run: |
+          if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget validate --manifest out\winget
+            if ($LASTEXITCODE) { exit 1 }
+          } else {
+            "::notice::winget is not on this runner, so only wingetcreate checks the manifests, when it submits them."
+          }
+      - name: Submit to winget-pkgs
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:WINGET_TOKEN) {
+            "::notice::WINGET_TOKEN is not set, so the winget manifests for $env:VERSION were written but not submitted."
+            exit 0
+          }
+          # Pinned to one release, and checked against its published SHA-256.
+          $url = 'https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe'
+          Invoke-WebRequest $url -OutFile wingetcreate.exe
+          $hash = (Get-FileHash wingetcreate.exe -Algorithm SHA256).Hash
+          if ($hash -ne '24042BD37915805615E6CF969AC57C6439124C3FE85823327F5F3FB24BD9FFEA') {
+            throw "wingetcreate.exe has the SHA-256 $hash, not the pinned one"
+          }
+          .\wingetcreate.exe submit --token $env:WINGET_TOKEN --prtitle "New version: ember-luau.embr version $env:VERSION" out\winget
+          if ($LASTEXITCODE) { exit 1 }
+
+  # The flake builds embr from the tagged source. This job only checks that
+  # it still builds, so a broken flake shows on the release. Nothing waits
+  # for it: crates.io and the channels publish without it.
+  nix:
+    name: Nix (${{ matrix.os }})
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: Check the flake
+        run: nix flake check --print-build-logs
+      - name: Build and run embr
+        run: |
+          nix build --print-build-logs
+          ./result/bin/embr --version
