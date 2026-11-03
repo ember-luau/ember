@@ -36,9 +36,14 @@
           preCheck = ''
             export HOME=$(mktemp -d)
           '';
-          # embr clones package indices and applies patches with git.
+          # embr clones package indices and applies patches with git, so
+          # bin/embr puts git on PATH. The binary itself moves to libexec and
+          # keeps its name: under any other file name, embr runs as a tool shim.
           postInstall = ''
-            wrapProgram $out/bin/embr --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git ]}
+            mkdir -p $out/libexec/embr
+            mv $out/bin/embr $out/libexec/embr/embr
+            makeWrapper $out/libexec/embr/embr $out/bin/embr \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git ]}
           '';
 
           meta = {
