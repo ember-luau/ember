@@ -14,6 +14,7 @@ pub mod patch;
 pub mod publish;
 pub mod remove;
 pub mod run;
+pub mod script;
 pub mod search;
 pub mod self_cmd;
 pub mod studio;

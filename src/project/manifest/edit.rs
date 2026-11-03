@@ -55,7 +55,11 @@ impl ManifestDoc {
     `ManifestMissing` error rather than a raw io one, these commands get run
     outside projects all the time. */
     pub fn open(scope: Scope) -> Result<Self, Error> {
-        let path = scope.path()?;
+        Self::open_at(scope.path()?)
+    }
+
+    /// opens the manifest at `path`, with the same missing-file error as `open`.
+    pub fn open_at(path: PathBuf) -> Result<Self, Error> {
         if !path.exists() {
             return Err(Error::ManifestMissing);
         }
@@ -96,6 +100,18 @@ impl ManifestDoc {
 
     /// the table named `name`, appended to the file when it's missing.
     pub fn table_or_create(&mut self, name: &str) -> Result<&mut Table, Error> {
+        /* toml_edit keeps the comments of a file with no table yet after the
+        last table. the first table takes them as its prefix instead, so a
+        header comment stays at the top */
+        if self.document.is_empty() {
+            let comments = self.document.trailing().as_str().unwrap_or("").to_string();
+            let mut table = Table::new();
+            if !comments.trim().is_empty() {
+                table.decor_mut().set_prefix(format!("{comments}\n"));
+            }
+            self.document.set_trailing("");
+            self.document.insert(name, Item::Table(table));
+        }
         self.document
             .entry(name)
             .or_insert(Item::Table(Table::new()))
@@ -175,6 +191,16 @@ mod tests {
         let written = manifest.document.to_string();
         assert!(written.starts_with("# keep me\n[package]"));
         assert!(written.contains("[tools]\nrojo = \"rojo-rbx/rojo@7.4.4\""));
+    }
+
+    #[test]
+    fn a_header_comment_stays_above_the_first_table() {
+        let mut manifest = doc("# header\n# more\n");
+        manifest.table_or_create("scripts").unwrap()["lint"] = toml_edit::value("selene");
+        assert_eq!(
+            manifest.document.to_string(),
+            "# header\n# more\n\n[scripts]\nlint = \"selene\"\n"
+        );
     }
 
     #[test]

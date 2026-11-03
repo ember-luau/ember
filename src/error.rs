@@ -469,6 +469,17 @@ pub enum Error {
     #[error("Script '{hook}' failed with exit code {code}")]
     HookFailed { hook: String, code: i32 },
 
+    #[error("No script named '{0}' under [scripts] in the global manifest, ~/.ember/tools.toml")]
+    GlobalScriptMissing(String),
+
+    #[error(
+        "Script '{0}' in the global manifest is an empty list; give it at least one command to run"
+    )]
+    GlobalScriptEmpty(String),
+
+    #[error("`{command}` exited with code {code}; set VISUAL or EDITOR to the editor you use")]
+    EditorFailed { command: String, code: i32 },
+
     #[error(
         "[overrides] key '{0}' must be a dot-separated path like 'parent.child' (commas separate multiple paths)"
     )]

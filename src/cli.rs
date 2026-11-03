@@ -20,8 +20,12 @@ pub enum Commands {
     /// Create an ember.toml manifest in the current directory
     Init(commands::init::InitArgs),
 
-    /// Runs a script from ember.toml, or lists them all when given no name
+    /// Runs a script from ember.toml or the global manifest, or lists them all
     Run(commands::run::RunArgs),
+
+    /// Add or remove a script, or open the manifest in your editor
+    #[command(subcommand)]
+    Script(commands::script::ScriptCommand),
 
     /* the [scripts] names that double as subcommands, npm's
     test/start/stop/restart idea. real variants rather than a fallback for
@@ -190,6 +194,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Tool(command) => done(commands::tool::run(command)),
         Commands::Studio { command } => done(commands::studio::run(command)),
         Commands::Run(args) => done(commands::run::run(args)),
+        Commands::Script(command) => done(commands::script::run(command)),
         Commands::Build(args) => done(commands::run::shortcut(&["build"], args)),
         Commands::Test(args) => done(commands::run::shortcut(&["test"], args)),
         Commands::Start(args) => done(commands::run::shortcut(&["start"], args)),
