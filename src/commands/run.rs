@@ -2,12 +2,15 @@ use crate::{
     error::Error,
     project::{
         hooks::{self, Lifecycle},
-        manifest::Manifest,
+        manifest::{Manifest, Script},
     },
-    sys::process,
+    sys::{paths, process},
     ui,
 };
 use clap::Args;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 /** The `[scripts]` names that are also subcommands, so `embr build` works
 without `run`. npm's idea, and deliberately npm's scale: a handful of verbs
@@ -55,6 +58,10 @@ subcommands too; and Hooks, the pre/post entries embr runs by itself.\n\n\
 A script hooks its own name: `embr run build` runs `prebuild`, then `build`, \
 then `postbuild`, using whichever of the three [scripts] defines. Hooks do \
 not nest, so `prebuild` is run as-is and no `preprebuild` is looked for.\n\n\
+A name that ember.toml does not define comes from the [scripts] of the global \
+manifest, ~/.ember/tools.toml, so a global script runs in any directory, also \
+outside a project. It runs in the current directory, and no hook runs around \
+it. `embr script add --global` adds one.\n\n\
 Anything after the script name is appended to its command line, shell-quoted, \
 with an optional `--` separator: `embr run build -- --watch` and `embr build \
 --watch` reach the script identically.\n\n\
@@ -62,7 +69,7 @@ build, test, start, serve, dev and fmt are also subcommands, so `run` is \
 optional for those six. It is optional too for a name that starts with one of \
 them and a colon, such as `embr dev:gameplay`. Every other script needs it.")]
 pub struct RunArgs {
-    /// Name of the script under [scripts] in ember.toml; omit to list them all
+    /// Name of the script under [scripts] in ember.toml or the global manifest; omit to list them all
     pub name: Option<String>,
 
     /// Extra arguments appended to the script's command line
@@ -84,24 +91,90 @@ pub struct ShortcutArgs {
 first one the manifest actually defines wins, and the first overall is what
 the "no script named" error names when it defines none of them. */
 pub fn shortcut(names: &[&str], args: ShortcutArgs) -> Result<(), Error> {
-    let manifest = Manifest::load()?;
+    let manifest = project()?;
+    let global = global_scripts()?;
+    // the project's spellings first, as `find` puts the project first
     let name = names
         .iter()
-        .find(|name| manifest.scripts.contains_key(**name))
+        .find(|name| {
+            manifest
+                .as_ref()
+                .is_some_and(|m| m.scripts.contains_key(**name))
+        })
+        .or_else(|| names.iter().find(|name| global.contains_key(**name)))
         .unwrap_or(&names[0]);
 
-    script(&manifest, name, &args.args)
+    script(manifest.as_ref(), &global, name, &args.args)
 }
 
 pub fn run(args: RunArgs) -> Result<(), Error> {
-    let manifest = Manifest::load()?;
+    let manifest = project()?;
+    let global = global_scripts()?;
     match &args.name {
-        Some(name) => script(&manifest, name, &args.args),
+        Some(name) => script(manifest.as_ref(), &global, name, &args.args),
         // bare `embr run` is a question, not a mistake. npm answers it the same way
-        None => {
-            list(&manifest);
-            Ok(())
+        None => list(manifest.as_ref(), &global),
+    }
+}
+
+/** the manifest in the current directory, None outside a project. a
+manifest that is there and fails to load is still an error: it can hold a
+project script that would shadow the global one. */
+fn project() -> Result<Option<Manifest>, Error> {
+    match Manifest::load() {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(Error::ManifestMissing) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// the [scripts] of the global manifest, ~/.ember/tools.toml. empty when the file does not exist.
+pub fn global_scripts() -> Result<BTreeMap<String, Script>, Error> {
+    global_scripts_in(&paths::global_tools_file()?)
+}
+
+fn global_scripts_in(path: &Path) -> Result<BTreeMap<String, Script>, Error> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    parse_global(&std::fs::read_to_string(path)?)
+}
+
+fn parse_global(text: &str) -> Result<BTreeMap<String, Script>, Error> {
+    // the file also holds [tools], which the shims read on their own
+    #[derive(Deserialize)]
+    struct Global {
+        #[serde(default)]
+        scripts: BTreeMap<String, Script>,
+    }
+    Ok(toml::from_str::<Global>(text)?.scripts)
+}
+
+/// where `embr run <name>` found the script.
+#[derive(Debug)]
+enum Found<'a> {
+    /// the project's [scripts], which always wins.
+    Project(&'a Manifest),
+    /// the global manifest's [scripts], when the project has no such name.
+    Global(&'a Script),
+}
+
+/** finds `name`: the project first, then the global manifest. a name that
+neither has keeps the error `embr run` gave before global scripts, which
+outside a project is the missing ember.toml. */
+fn find<'a>(
+    manifest: Option<&'a Manifest>,
+    global: &'a BTreeMap<String, Script>,
+    name: &str,
+) -> Result<Found<'a>, Error> {
+    match (manifest, global.get(name)) {
+        (Some(manifest), _) if manifest.scripts.contains_key(name) => Ok(Found::Project(manifest)),
+        (_, Some(script)) if script.commands().is_empty() => {
+            Err(Error::GlobalScriptEmpty(name.to_string()))
         }
+        (_, Some(script)) => Ok(Found::Global(script)),
+        (Some(_), None) => Err(Error::ScriptMissing(name.to_string())),
+        (None, None) => Err(Error::ManifestMissing),
     }
 }
 
@@ -145,14 +218,52 @@ fn kind(manifest: &Manifest, name: &str) -> Kind {
     }
 }
 
-/// prints every `[scripts]` entry, grouped by how it is reached.
-fn list(manifest: &Manifest) {
-    if manifest.scripts.is_empty() {
-        println!("No scripts in ember.toml. Add some under [scripts]:");
-        ui::print_script_entry("build", &["rojo build -o game.rbxl".to_string()]);
-        return;
+/** prints the project's scripts, then the global ones. outside a project
+with no global scripts, this is the missing ember.toml, as before. */
+fn list(manifest: Option<&Manifest>, global: &BTreeMap<String, Script>) -> Result<(), Error> {
+    match manifest {
+        None if global.is_empty() => return Err(Error::ManifestMissing),
+        Some(manifest) if manifest.scripts.is_empty() && global.is_empty() => {
+            println!("No scripts in ember.toml. Add some under [scripts]:");
+            ui::print_script_entry("build", &["rojo build -o game.rbxl".to_string()]);
+            return Ok(());
+        }
+        Some(manifest) if !manifest.scripts.is_empty() => list_project(manifest),
+        _ => {}
     }
 
+    if !global.is_empty() {
+        ui::print_heading("Global Scripts", "embr run <name>, in any directory");
+        for (name, script, shadowed) in global_entries(manifest, global) {
+            if shadowed {
+                ui::print_script_entry(
+                    &format!("{name} (shadowed by ember.toml)"),
+                    script.commands(),
+                );
+            } else {
+                ui::print_script_entry(name, script.commands());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// each global script, and whether a project script of the same name shadows it.
+fn global_entries<'a>(
+    manifest: Option<&Manifest>,
+    global: &'a BTreeMap<String, Script>,
+) -> Vec<(&'a str, &'a Script, bool)> {
+    global
+        .iter()
+        .map(|(name, script)| {
+            let shadowed = manifest.is_some_and(|manifest| manifest.scripts.contains_key(name));
+            (name.as_str(), script, shadowed)
+        })
+        .collect()
+}
+
+/// prints every project `[scripts]` entry, grouped by how it is reached.
+fn list_project(manifest: &Manifest) {
     match manifest.id() {
         Some(id) => println!("Scripts in {id}"),
         // a consuming-only project has no [package] to name
@@ -189,25 +300,40 @@ fn list(manifest: &Manifest) {
     }
 }
 
-/// runs `name` with its hooks around it, the one path every entry point takes.
-fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error> {
+/** runs `name`, the one path every entry point takes. a project script
+gets its hooks around it. a global script runs alone, as hooks stay with
+the project. */
+fn script(
+    manifest: Option<&Manifest>,
+    global: &BTreeMap<String, Script>,
+    name: &str,
+    extra: &[String],
+) -> Result<(), Error> {
     /* resolved before anything runs, so a typo'd name never fires `pre<name>`.
-    extra arguments go on every command of a parallel script: dropping them
+    the banner names the package as well as the script. in a workspace the
+    same script name means different things in different directories, and
+    the output below it is otherwise unattributable */
+    let (banner, found, lifecycle) = match find(manifest, global, name)? {
+        Found::Project(manifest) => (
+            manifest.id(),
+            manifest.script(name)?,
+            Some(Lifecycle::of(manifest, name)),
+        ),
+        Found::Global(script) => (Some("global".to_string()), script, None),
+    };
+    /* extra arguments go on every command of a parallel script: dropping them
     silently would be worse, and there is no way to tell which one they meant */
-    let commands: Vec<String> = manifest
-        .script(name)?
+    let commands: Vec<String> = found
         .commands()
         .iter()
         .map(|command| append_args(command, extra))
         .collect();
-    let lifecycle = Lifecycle::of(manifest, name);
 
-    lifecycle.before()?;
+    if let Some(lifecycle) = &lifecycle {
+        lifecycle.before()?;
+    }
 
-    /* the banner names the package as well as the script. in a workspace
-    the same script name means different things in different directories,
-    and the output below it is otherwise unattributable */
-    ui::print_script_notice(manifest.id().as_deref(), name, &commands);
+    ui::print_script_notice(banner.as_deref(), name, &commands);
 
     /* wait rather than exec. a failing script should exit with its own
     code since CI reads it, and a successful one still gets embr's "Done
@@ -217,7 +343,9 @@ fn script(manifest: &Manifest, name: &str, extra: &[String]) -> Result<(), Error
         std::process::exit(code);
     }
 
-    lifecycle.after()?;
+    if let Some(lifecycle) = &lifecycle {
+        lifecycle.after()?;
+    }
     Ok(())
 }
 
@@ -228,7 +356,7 @@ and the bare `embr build --watch` produce the same command line. Each argument
 is quoted for the platform shell: they arrive as one word each no matter what
 whitespace or shell syntax they contain, which is the whole point of having
 passed them as separate arguments. */
-fn append_args(script: &str, args: &[String]) -> String {
+pub(crate) fn append_args(script: &str, args: &[String]) -> String {
     let args = match args.split_first() {
         Some((first, rest)) if first == "--" => rest,
         _ => args,
@@ -314,7 +442,10 @@ fn quote(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Manifest, append_args, kind};
+    use super::{
+        BTreeMap, Error, Found, Kind, Manifest, Script, append_args, find, global_entries,
+        global_scripts_in, kind, parse_global,
+    };
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()
@@ -387,6 +518,88 @@ mod tests {
         for name in ["lint:fix", "build:", "builder"] {
             assert_eq!(kind(&manifest, name), Kind::Script, "{name}");
         }
+    }
+
+    /// a global [scripts] table, parsed the way the global manifest is.
+    fn globals(scripts: &str) -> BTreeMap<String, Script> {
+        // [tools] sits beside [scripts] in the real file and must not get in the way
+        parse_global(&format!(
+            "[tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\n\n[scripts]\n{scripts}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_missing_global_manifest_has_no_scripts() {
+        let path = std::env::temp_dir().join("embr-test-no-global/tools.toml");
+        assert!(global_scripts_in(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_project_script_wins_and_the_global_one_fills_in() {
+        let project = manifest("build = \"rojo build\"\n");
+        let global = globals("build = \"global build\"\nlint = \"selene src\"\n");
+
+        assert!(matches!(
+            find(Some(&project), &global, "build"),
+            Ok(Found::Project(_))
+        ));
+        assert!(matches!(
+            find(Some(&project), &global, "lint"),
+            Ok(Found::Global(script)) if script.commands() == ["selene src"]
+        ));
+        // outside a project, every global script runs
+        assert!(matches!(
+            find(None, &global, "build"),
+            Ok(Found::Global(script)) if script.commands() == ["global build"]
+        ));
+    }
+
+    #[test]
+    fn a_name_that_nobody_defines_keeps_the_old_error() {
+        let global = globals("lint = \"selene src\"\n");
+        assert!(matches!(
+            find(Some(&manifest("build = \"a\"\n")), &global, "test"),
+            Err(Error::ScriptMissing(name)) if name == "test"
+        ));
+        assert!(matches!(
+            find(None, &global, "test"),
+            Err(Error::ManifestMissing)
+        ));
+    }
+
+    #[test]
+    fn an_empty_global_script_is_refused() {
+        let global = globals("lint = []\n");
+        assert!(matches!(
+            find(None, &global, "lint"),
+            Err(Error::GlobalScriptEmpty(name)) if name == "lint"
+        ));
+        // an empty project script still shadows, and `Manifest::script` refuses it
+        let project = manifest("lint = []\n");
+        assert!(matches!(
+            find(Some(&project), &globals("lint = \"a\"\n"), "lint"),
+            Ok(Found::Project(_))
+        ));
+    }
+
+    #[test]
+    fn listing_marks_the_global_scripts_a_project_shadows() {
+        let global = globals("build = \"a\"\nlint = \"b\"\n");
+        let project = manifest("build = \"c\"\n");
+
+        let entries: Vec<(&str, bool)> = global_entries(Some(&project), &global)
+            .into_iter()
+            .map(|(name, _, shadowed)| (name, shadowed))
+            .collect();
+        assert_eq!(entries, [("build", true), ("lint", false)]);
+
+        // outside a project nothing shadows
+        assert!(
+            global_entries(None, &global)
+                .iter()
+                .all(|(_, _, shadowed)| !shadowed)
+        );
     }
 
     #[test]
