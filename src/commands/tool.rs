@@ -44,7 +44,11 @@ pub enum ToolCommand {
     Update,
 
     /// List installed and pinned tools
-    List,
+    List {
+        /// Print the list as one JSON document on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Delete a tool's binaries from your system, its manifest pins remain
     Delete {
@@ -77,7 +81,7 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
         ToolCommand::Remove { name, global } => remove(name, global),
         ToolCommand::Update => update(),
         ToolCommand::Delete { name, version } => delete(name, version),
-        ToolCommand::List => list(),
+        ToolCommand::List { json } => list(json),
         ToolCommand::Cache(ToolCacheCommand::Clean) => cache_clean(),
     }
 }
@@ -339,7 +343,7 @@ fn update() -> Result<(), Error> {
     Ok(())
 }
 
-fn list() -> Result<(), Error> {
+fn list(json: bool) -> Result<(), Error> {
     /* everything known about one version of a tool, whether its binaries
     are stored and which manifests pin it. pins without storage still show
     up as "not installed" so a fresh `tool add` never looks like a ghost */
@@ -417,14 +421,7 @@ fn list() -> Result<(), Error> {
         }
     }
 
-    if seen.is_empty() {
-        println!("No tools installed or pinned");
-        return Ok(());
-    }
-
-    /* one accent check line, "name@version", per tool, matching install's
-    output. multiple versions share the line, each annotated with its scopes */
-    for (name, versions) in seen.into_values() {
+    let tools = seen.into_values().map(|(name, versions)| {
         let mut versions: Vec<_> = versions.into_iter().collect();
         // order versions semver-aware where possible
         versions.sort_by(
@@ -433,7 +430,41 @@ fn list() -> Result<(), Error> {
                 _ => a.cmp(b),
             },
         );
+        (name, versions)
+    });
 
+    if json {
+        let tools: Vec<serde_json::Value> = tools
+            .map(|(name, versions)| {
+                let versions: Vec<serde_json::Value> = versions
+                    .into_iter()
+                    .map(|(version, state)| {
+                        serde_json::json!({
+                            "version": version,
+                            "installed": state.installed,
+                            "project": state.project,
+                            "global": state.global,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "name": name, "versions": versions })
+            })
+            .collect();
+        return ui::print_json(&serde_json::json!({
+            "version": ui::JSON_VERSION,
+            "tools": tools,
+        }));
+    }
+
+    let mut tools = tools.peekable();
+    if tools.peek().is_none() {
+        println!("No tools installed or pinned");
+        return Ok(());
+    }
+
+    /* one accent check line, "name@version", per tool, matching install's
+    output. multiple versions share the line, each annotated with its scopes */
+    for (name, versions) in tools {
         let versions = versions
             .into_iter()
             .map(|(version, state)| {

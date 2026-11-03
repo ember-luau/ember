@@ -22,11 +22,17 @@ pub struct SearchArgs {
     /// Also search Wally, pesde, and Forest
     #[arg(long)]
     pub all: bool,
+    /// Print the results as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /** the same answer that the `embr mcp` search tools give, painted for a
 terminal. one answer for both keeps them from drifting apart. */
 pub fn run(args: SearchArgs) -> Result<(), Error> {
+    if args.json {
+        return crate::ui::print_json(&document(args)?);
+    }
     let text = if args.all {
         let args = mcp::SearchAllArgs {
             query: args.query,
@@ -53,6 +59,32 @@ pub fn run(args: SearchArgs) -> Result<(), Error> {
         println!("{}", paint(row, line));
     }
     Ok(())
+}
+
+/** the `--json` answer: the same registries and packages as the text,
+from the same requests. without `--all` it holds the ember registry only. */
+fn document(args: SearchArgs) -> Result<serde_json::Value, Error> {
+    if args.all {
+        let args = mcp::SearchAllArgs {
+            query: args.query,
+            registries: None,
+            limit: args.limit,
+        };
+        let answers = mcp::ask_registries(&args, mcp::fetch, mcp::REGISTRY_TIMEOUT);
+        return Ok(mcp::search_document(answers, mcp::all_limit(&args)));
+    }
+    let page = mcp::ember_search(
+        &registry::api_url(),
+        &args.query,
+        args.environment,
+        args.language,
+    )?;
+    let limit = args
+        .limit
+        .unwrap_or(mcp::DEFAULT_LIMIT)
+        .clamp(1, mcp::MAX_LIMIT);
+    let answers = vec![(mcp::Registry::Ember, Ok((page.hits(), page.total)))];
+    Ok(mcp::search_document(answers, limit))
 }
 
 /** one line of a search answer, styled the way `embr outdated` styles its

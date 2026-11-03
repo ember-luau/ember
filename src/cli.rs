@@ -177,9 +177,20 @@ pub enum Outcome {
 /// runs one parsed command.
 pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
     let done = |result: Result<(), Error>| result.map(|()| Outcome::Done);
+    /* a --json run prints one document on stdout, so no "Done in" line
+    may follow it */
+    let shown = |json: bool, result: Result<(), Error>| {
+        result.map(|()| if json { Outcome::Quiet } else { Outcome::Done })
+    };
     match command {
         Commands::Init(args) => done(commands::init::run(args)),
-        Commands::Template(command) => done(commands::template::run(command)),
+        Commands::Template(command) => {
+            let json = matches!(
+                command,
+                commands::template::TemplateCommand::List { json: true }
+            );
+            shown(json, commands::template::run(command))
+        }
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),
@@ -190,21 +201,24 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Install(args) => done(commands::install::run(args)),
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),
-        Commands::Outdated(args) => done(commands::outdated::run(args)),
-        Commands::Tree(args) => done(commands::tree::tree(args)),
-        Commands::Why(args) => done(commands::tree::why(args)),
-        Commands::Search(args) => done(commands::search::run(args)),
-        Commands::Info(args) => done(commands::info::run(args)),
+        Commands::Outdated(args) => shown(args.json, commands::outdated::run(args)),
+        Commands::Tree(args) => shown(args.json, commands::tree::tree(args)),
+        Commands::Why(args) => shown(args.json, commands::tree::why(args)),
+        Commands::Search(args) => shown(args.json, commands::search::run(args)),
+        Commands::Info(args) => shown(args.json, commands::info::run(args)),
         Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
-        Commands::Notices(args) => done(commands::notices::run(args)),
-        Commands::Audit(args) => done(commands::audit::run(args)),
+        Commands::Notices(args) => shown(args.json, commands::notices::run(args)),
+        Commands::Audit(args) => shown(args.json, commands::audit::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
         Commands::Cache(command) => done(commands::cache::run(command)),
         Commands::SelfManage(command) => done(commands::self_cmd::run(command)),
-        Commands::Tool(command) => done(commands::tool::run(command)),
+        Commands::Tool(command) => {
+            let json = matches!(command, commands::tool::ToolCommand::List { json: true });
+            shown(json, commands::tool::run(command))
+        }
         Commands::Studio { command } => done(commands::studio::run(command)),
         Commands::Run(args) => done(commands::run::run(args)),
         Commands::Script(command) => done(commands::script::run(command)),
