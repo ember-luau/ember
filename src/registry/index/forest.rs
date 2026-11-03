@@ -150,6 +150,7 @@ fn resolved(
                 version_req,
                 index_url: None,
                 alias,
+                optional: false,
             }
         })
         .collect();

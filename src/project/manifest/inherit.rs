@@ -1,7 +1,8 @@
 /*! workspace inheritance, Cargo-style. a value written as `{ workspace = true }`
 takes the value at the same path under the root's [workspace] table, so
-`package.version` reads `workspace.package.version`. [dev-dependencies] reads
-`workspace.dependencies`, the one shared table, as in Cargo. it works on the
+`package.version` reads `workspace.package.version`. [dev-dependencies] and
+[peer-dependencies] read `workspace.dependencies`, the one shared table, as
+in Cargo. it works on the
 plain TOML before serde, so every field and every whole table can inherit. */
 
 use crate::error::Error;
@@ -78,8 +79,9 @@ fn resolve(value: &mut Value, path: &mut Vec<String>, root: Option<&Table>) -> R
 }
 
 /** the value that the marker at `path` inherits from `root`, the root's
-whole manifest. a dependency can add `target` and `entry`: they are the
-consumer's choice, as Cargo lets a member add `features`. any other key
+whole manifest. a dependency can add `target`, `entry` and `optional`:
+they are the consumer's choice, as Cargo lets a member add `features` and
+`optional`. any other key
 beside `workspace = true` is an error, so nothing overrides a shared
 value without a sign. */
 fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Value, Error> {
@@ -87,7 +89,7 @@ fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Va
     let root = root.ok_or_else(|| Error::InheritOutsideWorkspace(field.clone()))?;
     let from: Vec<&str> = std::iter::once("workspace")
         .chain(path.iter().enumerate().map(|(depth, key)| {
-            if depth == 0 && key == "dev-dependencies" {
+            if depth == 0 && matches!(key.as_str(), "dev-dependencies" | "peer-dependencies") {
                 "dependencies"
             } else {
                 key.as_str()
@@ -103,12 +105,15 @@ fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Va
         from: from.join("."),
     })?;
 
-    let dependency =
-        path.len() == 2 && matches!(path[0].as_str(), "dependencies" | "dev-dependencies");
+    let dependency = path.len() == 2
+        && matches!(
+            path[0].as_str(),
+            "dependencies" | "dev-dependencies" | "peer-dependencies"
+        );
     for (key, item) in marker {
         match (&mut value, key.as_str()) {
             (_, "workspace") => {}
-            (Value::Table(table), "target" | "entry") if dependency => {
+            (Value::Table(table), "target" | "entry" | "optional") if dependency => {
                 table.insert(key.clone(), item.clone());
             }
             _ => {
@@ -166,9 +171,10 @@ mod tests {
              authors = { workspace = true }\n\n\
              [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\
              language = { workspace = true }\n\n\
-             [dependencies]\nsignal = { workspace = true }\ncore = { workspace = true }\n\n\
+             [dependencies]\nsignal = { workspace = true, optional = true }\ncore = { workspace = true }\n\n\
              [dev-dependencies]\nspy = { name = \"acme/spy\", version = \"^1\" }\n\
              server = { workspace = true, target = \"server\" }\n\n\
+             [peer-dependencies]\nserver = { workspace = true }\n\n\
              [tools]\nrojo = { workspace = true }\n",
         );
         // dev-dependencies read workspace.dependencies, so give it the entry
@@ -193,6 +199,9 @@ mod tests {
             &lobby.dependencies["core"],
             Dependency::Workspace { workspace, version, .. } if workspace == "acme/core" && version == "~"
         ));
+        // the member adds its own `optional`, and a peer reads the shared table too
+        assert!(lobby.dependencies["signal"].optional());
+        assert_eq!(lobby.peer_dependencies["server"].package(), "acme/server");
         // the member adds its own `target` to the shared entry
         let server = &lobby.dev_dependencies["server"];
         assert_eq!(server.package(), "acme/server");

@@ -638,6 +638,7 @@ mod tests {
             index: "https://example.com/index".to_string(),
             redirects: BTreeMap::new(),
             patch: None,
+            optional: false,
             source: DownloadSource::Zip {
                 url: format!("https://example.com/{name}"),
             },

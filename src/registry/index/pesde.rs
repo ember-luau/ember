@@ -294,16 +294,25 @@ fn download_source(
     Ok(DownloadSource::TarGz { url })
 }
 
+/** the dependencies of an entry that install resolves. an ember entry
+keeps its optional ones in `optional-dependencies`, so an embr before
+0.14.0 never sees them and cannot fail on them. its peers are in
+`peer-dependencies`, which install never reads: a peer is never installed. */
 pub fn parse_dependencies(
     entry: &Value,
     index_url: &str,
 ) -> Result<Vec<TransitiveDependency>, Error> {
-    let Some(Value::Table(dependencies)) = entry.get("dependencies") else {
-        return Ok(Vec::new());
-    };
+    let tables = ["dependencies", "optional-dependencies"]
+        .into_iter()
+        .filter_map(|table| match entry.get(table) {
+            Some(Value::Table(dependencies)) => Some((table, dependencies)),
+            _ => None,
+        });
 
     let mut parsed = Vec::new();
-    for (alias, spec) in dependencies {
+    for (table, alias, spec) in
+        tables.flat_map(|(table, entries)| entries.iter().map(move |(a, s)| (table, a, s)))
+    {
         /* Specs are either the specifier table itself or a [specifier, kind]
         pair, kind being "standard", "peer", or "dev". */
         let (spec, kind) = match spec {
@@ -314,10 +323,13 @@ pub fn parse_dependencies(
             other => (other, None),
         };
 
-        // Dev dependencies of upstream packages are not ours to install.
-        if kind == Some("dev") {
+        /* Dev dependencies of upstream packages are not ours to install, and
+        a pesde peer is one that the consumer provides. */
+        if matches!(kind, Some("dev" | "peer")) {
             continue;
         }
+        let optional = table == "optional-dependencies"
+            || spec.get("optional").and_then(Value::as_bool) == Some(true);
         // Workspace/git specifiers can't be resolved from an index clone.
         if spec.get("workspace").is_some() || spec.get("repo").is_some() {
             continue;
@@ -364,6 +376,7 @@ pub fn parse_dependencies(
             version_req,
             index_url: dep_index_url,
             alias: alias.clone(),
+            optional,
         });
     }
 
@@ -464,6 +477,33 @@ mod tests {
             bar.index_url.as_deref(),
             Some("https://github.com/acme/index")
         );
+        assert!(deps.iter().all(|d| !d.optional));
+    }
+
+    /** a pesde peer is the consumer's to provide, so install never resolves
+    it. an ember entry keeps its optional dependencies in a table of their
+    own, which an older embr does not read, and its peers in another. */
+    #[test]
+    fn peers_stay_out_and_optional_dependencies_come_from_their_table() {
+        let entry = parse_entries(
+            r#"
+            [dependencies]
+            core = [{ name = "metamethods/typed_core", version = "^0.1.0" }, "peer"]
+            foo = { name = "acme/foo", version = "^1.0.0" }
+
+            [optional-dependencies]
+            signal = { name = "acme/signal", version = "^2.0.0", optional = true }
+
+            [peer-dependencies]
+            React = { name = "jsdotlua/react", version = "^17.0.0" }
+            "#,
+        );
+        let deps = parse_dependencies(&entry, "https://example.com/index").unwrap();
+        let names: Vec<(&str, bool)> = deps
+            .iter()
+            .map(|d| (d.alias.as_str(), d.optional))
+            .collect();
+        assert_eq!(names, [("foo", false), ("signal", true)]);
     }
 
     #[test]

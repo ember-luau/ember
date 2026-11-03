@@ -425,11 +425,14 @@ fn plan_pesde(text: &str) -> Result<Plan, String> {
     let indices = pesde_indices(&mut document, &mut writes);
     let mut used_default = (false, false);
 
-    // [dependencies]
-    if let Some(table) = document
-        .get_mut("dependencies")
-        .and_then(Item::as_table_like_mut)
-    {
+    // [dependencies], and [peer_dependencies] as ember's [peer-dependencies]
+    for (from, to) in [
+        ("dependencies", "dependencies"),
+        ("peer_dependencies", "peer-dependencies"),
+    ] {
+        let Some(table) = document.get_mut(from).and_then(Item::as_table_like_mut) else {
+            continue;
+        };
         let aliases: Vec<String> = table.iter().map(|(alias, _)| alias.to_string()).collect();
         for alias in aliases {
             let Some(entry) = table.get(&alias).and_then(Item::as_table_like) else {
@@ -437,7 +440,7 @@ fn plan_pesde(text: &str) -> Result<Plan, String> {
             };
             if let Some(item) = pesde_dependency(entry, &indices, &mut used_default) {
                 table.remove(&alias);
-                writes.push(Write::new("dependencies", alias, item));
+                writes.push(Write::new(to, alias, item));
             }
         }
     }
@@ -513,6 +516,7 @@ fn plan_pesde(text: &str) -> Result<Plan, String> {
             "indices",
             "wally_indices",
             "dependencies",
+            "peer_dependencies",
             "overrides",
             "scripts",
         ],
@@ -1232,6 +1236,9 @@ signal = { name = "acme/signal", version = "^2.0.0" }
 promise = { wally = "wally#evaera/Promise", version = "^4.0.0" }
 local = { path = "../local" }
 
+[peer_dependencies]
+typed_core = { name = "metamethods/typed_core", version = "^0.1.0" }
+
 [dev_dependencies]
 testez = { wally = "roblox/testez", version = "^0.4.0" }
 
@@ -1276,6 +1283,12 @@ lune = "^0.8.9"
         assert!(promise.contains("name = \"evaera/promise\""), "{promise}");
         assert!(promise.contains("index = \"wally\""), "{promise}");
 
+        // a pesde peer is an ember peer
+        let peer = written(&plan, "peer-dependencies", "typed_core").unwrap();
+        assert!(peer.contains("name = \"metamethods/typed_core\""), "{peer}");
+        assert!(peer.contains("version = \"^0.1.0\""), "{peer}");
+        assert!(written(&plan, "dependencies", "typed_core").is_none());
+
         // what ember has no place for stays in pesde.toml
         assert!(written(&plan, "dependencies", "local").is_none());
         let rest = plan.rest.unwrap();
@@ -1289,6 +1302,7 @@ lune = "^0.8.9"
             assert!(rest.contains(kept), "{kept} left pesde.toml:\n{rest}");
         }
         assert!(!rest.contains("acme/signal"), "{rest}");
+        assert!(!rest.contains("peer_dependencies"), "{rest}");
         assert!(!rest.contains("[indices]"), "{rest}");
     }
 

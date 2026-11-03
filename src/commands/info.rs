@@ -313,12 +313,17 @@ fn target(entry: &Candidate) -> String {
 type Spec = (String, String);
 
 /** the (alias, `name requirement`) pairs of an entry's dependencies and
-dev dependencies, from the raw entry. an ember entry keeps its dev
-dependencies in a table of their own, and a pesde entry marks one `dev`
-in a [spec, kind] pair. */
+dev dependencies, from the raw entry. an ember entry keeps its optional,
+peer and dev dependencies in tables of their own, and a pesde entry marks
+one `peer` or `dev` in a [spec, kind] pair. */
 fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
     let (mut runtime, mut dev) = (Vec::new(), Vec::new());
-    for (table, in_dev) in [("dependencies", false), ("dev-dependencies", true)] {
+    for (table, in_dev) in [
+        ("dependencies", false),
+        ("optional-dependencies", false),
+        ("peer-dependencies", false),
+        ("dev-dependencies", true),
+    ] {
         for (alias, spec) in entry
             .get(table)
             .and_then(Value::as_table)
@@ -343,7 +348,11 @@ fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
             if let Some(index) = field("index") {
                 text.push_str(&format!(" (index {index})"));
             }
-            if kind == Some("peer") {
+            let optional = spec.get("optional").and_then(Value::as_bool) == Some(true);
+            if table == "optional-dependencies" || optional {
+                text.push_str(" (optional)");
+            }
+            if table == "peer-dependencies" || kind == Some("peer") {
                 text.push_str(" (peer)");
             }
             if in_dev || kind == Some("dev") {
@@ -425,6 +434,15 @@ name = "ukendio/jecs"
 version = "^0.11.0"
 index = "wally"
 
+["1.1.0 lune-alloy".optional-dependencies.trace]
+name = "acme/trace"
+version = "^2.0.0"
+optional = true
+
+["1.1.0 lune-alloy".peer-dependencies.React]
+name = "jsdotlua/react"
+version = "^17.0.0"
+
 ["1.1.0 lune-alloy".dev-dependencies.testkit]
 name = "evaera/testkit"
 version = "^1.0.0"
@@ -474,7 +492,9 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
              \n\
              Dependencies\n  \
                Signal  acme/signal ^1.0.0\n  \
-               jecs    ukendio/jecs ^0.11.0 (index wally)\n\
+               jecs    ukendio/jecs ^0.11.0 (index wally)\n  \
+               trace   acme/trace ^2.0.0 (optional)\n  \
+               React   jsdotlua/react ^17.0.0 (peer)\n\
              \n\
              Dev dependencies\n  \
                testkit  evaera/testkit ^1.0.0\n\

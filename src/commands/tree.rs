@@ -6,7 +6,7 @@ use crate::commands::install::stored_at;
 use crate::error::Error;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, manifest_in};
-use crate::project::package;
+use crate::project::package::{self, DependencyKind};
 use clap::Args;
 use crossterm::style::Stylize;
 use std::path::Path;
@@ -78,7 +78,8 @@ pub(crate) fn brought_in_by(
             if !by[node].contains(&root.alias) {
                 by[node].push(root.alias.clone());
             }
-            stack.extend(graph.children[node].iter().map(|(_, child)| *child));
+            // a peer is the project's own copy, so no package brings it in
+            stack.extend(graph.children[node].iter().filter_map(installs));
         }
     }
     Some(by)
@@ -89,17 +90,26 @@ struct Root {
     alias: String,
     node: usize,
     dev: bool,
+    optional: bool,
 }
 
 /// one hop of a path: the alias the parent gives the package, and the package.
 type Hop<'graph> = (&'graph str, usize);
 
+/// one edge of a package: the alias it gives the child, the child, and how it declares it.
+type Edge = (String, usize, DependencyKind);
+
+/// the child of `edge` when the edge installs it, which a peer edge never does.
+fn installs((_, child, kind): &Edge) -> Option<usize> {
+    (!matches!(kind, DependencyKind::Peer(_))).then_some(*child)
+}
+
 /** the installed graph. a node is an index into `packages`, and
-`children[node]` holds the edges of that package as (alias, node). */
+`children[node]` holds the edges of that package. */
 struct Graph<'lock> {
     packages: &'lock [LockedPackage],
     roots: Vec<Root>,
-    children: Vec<Vec<(String, usize)>>,
+    children: Vec<Vec<Edge>>,
 }
 
 impl<'lock> Graph<'lock> {
@@ -124,14 +134,22 @@ impl<'lock> Graph<'lock> {
                 let node = packages
                     .iter()
                     .position(|package| direct(&package) && package.link.as_deref() == Some(alias))
-                    .or_else(|| packages.iter().position(|package| direct(&package)))
-                    .ok_or_else(|| {
-                        Error::NotInstalledYet(format!("ember.lock has no {name} for '{alias}'"))
-                    })?;
+                    .or_else(|| packages.iter().position(|package| direct(&package)));
+                let node = match node {
+                    Some(node) => node,
+                    // install skipped it, which is what optional allows
+                    None if dependency.optional() => continue,
+                    None => {
+                        return Err(Error::NotInstalledYet(format!(
+                            "ember.lock has no {name} for '{alias}'"
+                        )));
+                    }
+                };
                 roots.push(Root {
                     alias: alias.clone(),
                     node,
                     dev,
+                    optional: dependency.optional(),
                 });
             }
         }
@@ -154,21 +172,27 @@ impl<'lock> Graph<'lock> {
                 Manifest::load_from(&manifest_in(&storage))?
                     .dependencies
                     .iter()
-                    .map(|(alias, dependency)| (alias.clone(), dependency.package().to_lowercase()))
+                    .map(|(alias, dependency)| {
+                        let kind = match dependency.optional() {
+                            true => DependencyKind::Optional,
+                            false => DependencyKind::Required,
+                        };
+                        (alias.clone(), dependency.package().to_lowercase(), kind)
+                    })
                     .collect()
             } else {
                 package::declared_dependencies(&storage)
             };
             let edges = declared
                 .into_iter()
-                .filter_map(|(alias, declared)| {
+                .filter_map(|(alias, declared, kind)| {
                     // an [overrides] redirect on this edge installed the replacement
                     let name = package.redirects.get(&alias).unwrap_or(&declared);
                     let child = packages.iter().position(|child| {
                         child.name.eq_ignore_ascii_case(name)
                             && child.context() == package.context()
                     })?;
-                    Some((alias, child))
+                    Some((alias, child, kind))
                 })
                 .collect();
             children.push(edges);
@@ -226,6 +250,9 @@ impl<'lock> Graph<'lock> {
                 if root.dev {
                     label.push_str(&" (dev)".dark_grey().to_string());
                 }
+                if root.optional {
+                    label.push_str(&" (optional)".dark_grey().to_string());
+                }
                 let at = grouped.then_some(("", index + 1 == roots.len()));
                 self.branch(&mut out, at, root.node, label, depth, &mut shown);
             }
@@ -259,10 +286,22 @@ impl<'lock> Graph<'lock> {
         }
         shown[node] = true;
         let prefix = format!("{prefix}{below}");
-        for (index, (alias, child)) in children.iter().enumerate() {
-            let label = self.label(*child, alias);
+        for (index, (alias, child, kind)) in children.iter().enumerate() {
+            let mut label = self.label(*child, alias);
             let at = Some((prefix.as_str(), index + 1 == children.len()));
-            let depth = depth.map(|depth| depth - 1);
+            let mut depth = depth.map(|depth| depth - 1);
+            match kind {
+                DependencyKind::Required => {}
+                DependencyKind::Optional => {
+                    label.push_str(&" (optional)".dark_grey().to_string());
+                }
+                /* a peer is the project's own copy. its levels show where
+                the project lists it, so the line here stops */
+                DependencyKind::Peer(_) => {
+                    label.push_str(&" (peer)".dark_grey().to_string());
+                    depth = Some(0);
+                }
+            }
             self.branch(out, at, *child, label, depth, shown);
         }
     }
@@ -290,7 +329,11 @@ impl<'lock> Graph<'lock> {
             found(path.clone());
             return;
         }
-        for (alias, child) in &self.children[node] {
+        // a peer edge installs nothing, so it explains no package
+        for (alias, child, _) in self.children[node]
+            .iter()
+            .filter(|edge| installs(edge).is_some())
+        {
             // a cycle would walk for ever
             if path.iter().any(|&(_, node)| node == *child) {
                 continue;
@@ -527,6 +570,80 @@ mod tests {
         assert!(!util.contains("roblox_server"), "{util}");
         assert_eq!(graph.paths_to("util").len(), 1);
         assert!(graph.paths_to("acme/missing").is_empty());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** an optional dependency that install skipped is no root, and one it
+    installed says (optional). a peer edge points at the project's copy:
+    the tree marks it and stops there, and it explains no package. */
+    #[test]
+    fn optional_and_peer_edges_are_marked() {
+        let base = std::env::temp_dir().join("embr-test-tree-optional-peer");
+        let _ = fs::remove_dir_all(&base);
+        let store = base.join("packages/roblox/.ember");
+        write(
+            &store.join("acme_ui"),
+            "ember.toml",
+            "[dependencies]\nextra = { name = \"acme/trace\", version = \"^1\", optional = true }\n\
+             [peer-dependencies]\nReact = { name = \"jsdotlua/react\", version = \"^17.0.0\" }\n",
+        );
+        write(
+            &store.join("jsdotlua_react"),
+            "ember.toml",
+            "[dependencies]\nshared = { name = \"jsdotlua/shared\", version = \"^17\" }\n",
+        );
+        write(&store.join("jsdotlua_shared"), "init.luau", "");
+        write(&store.join("acme_trace"), "init.luau", "");
+        let manifest: Manifest = toml::from_str(
+            "[target]\nenvironment = \"roblox\"\n[dependencies]\n\
+             ui = { name = \"acme/ui\", version = \"^1\" }\n\
+             React = { name = \"jsdotlua/react\", version = \"^17\" }\n\
+             signal = { name = \"acme/signal\", version = \"^1\", optional = true }\n\
+             trace = { name = \"acme/trace\", version = \"^1\", optional = true }\n",
+        )
+        .unwrap();
+        let package = |name: &str, version: &str, link: Option<&str>| {
+            let link = link.map_or(String::new(), |link| format!("link = \"{link}\"\n"));
+            format!(
+                "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nenvironment = \"roblox\"\n\
+                 {link}index = \"i\"\ntype = \"tar-gz\"\nurl = \"u\"\n"
+            )
+        };
+        let lock: Lockfile = toml::from_str(&format!(
+            "version = 2\n{}{}{}{}optional = true\n",
+            package("acme/ui", "1.0.0", Some("ui")),
+            package("jsdotlua/react", "17.0.2", Some("React")),
+            package("jsdotlua/shared", "17.0.2", None),
+            package("acme/trace", "1.0.0", Some("trace")),
+        ))
+        .unwrap();
+        let graph = Graph::read(&manifest, &lock, &base).unwrap();
+
+        assert_eq!(
+            plain(&graph.tree(None)),
+            "jsdotlua/react@17.0.2 as 'React'\n\
+             └── jsdotlua/shared@17.0.2\n\
+             acme/trace@1.0.0 (optional)\n\
+             acme/ui@1.0.0\n\
+             ├── acme/trace@1.0.0 as 'extra' (optional)\n\
+             └── jsdotlua/react@17.0.2 as 'React' (peer) (*)\n"
+        );
+        assert_eq!(
+            plain(&graph.why(&graph.paths_to("jsdotlua/react"))),
+            "jsdotlua/react@17.0.2\n  ember.toml > jsdotlua/react@17.0.2 as 'React'\n"
+        );
+        assert_eq!(
+            plain(&graph.why(&graph.paths_to("acme/trace"))),
+            "acme/trace@1.0.0\n  \
+             ember.toml > acme/trace@1.0.0\n  \
+             ember.toml > acme/ui@1.0.0 > acme/trace@1.0.0 as 'extra'\n"
+        );
+        assert!(graph.paths_to("acme/signal").is_empty());
+        // the peer's own tree brings it in, not the package that needs it
+        let by = brought_in_by(&manifest, &lock, &base).unwrap();
+        assert_eq!(by[1], ["React"]);
+        assert_eq!(by[2], ["React"]);
 
         let _ = fs::remove_dir_all(&base);
     }
