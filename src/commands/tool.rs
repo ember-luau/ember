@@ -228,7 +228,7 @@ fn remove(name: String, global: bool) -> Result<(), Error> {
     or full "owner/repo" falls back to matching table values by repository */
     let mut removed = table.remove(&name).is_some();
     if !removed {
-        let repository = tools::shorthand_repository(&name).unwrap_or(&name);
+        let repository = tools::shorthand_repository(&name).unwrap_or_else(|| name.clone());
         let prefix = format!("{repository}@");
 
         // github repo names are case-insensitive, so match ignoring case
