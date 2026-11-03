@@ -65,6 +65,12 @@ pub struct LockedPackage {
     download fails, as the install that wrote the lock did. */
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub optional: bool,
+    /** its enabled features: the union over its dependents in this
+    environment root, with the features those turn on. absent with none.
+    the nested-link pass reads it to leave the gated dependencies that no
+    enabled feature lists without a link. */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
     #[serde(flatten)]
     pub source: DownloadSource,
     /** lowercase hex SHA-256 of the archive: the index entry's, else the
@@ -186,6 +192,7 @@ mod tests {
                     b"--- a/init.lua\n+++ b/init.lua\n",
                 )),
                 optional: false,
+                features: Vec::new(),
                 source: DownloadSource::Zip {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
@@ -204,6 +211,7 @@ mod tests {
                 patch: None,
                 // only an optional dependency brings it in
                 optional: true,
+                features: vec!["icons".to_string()],
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },
@@ -251,6 +259,10 @@ mod tests {
         assert!(!parsed.packages[0].optional);
         assert!(parsed.packages[1].optional);
         assert_eq!(text.matches("optional").count(), 1);
+        // so is `features`
+        assert!(parsed.packages[0].features.is_empty());
+        assert_eq!(parsed.packages[1].features, ["icons"]);
+        assert_eq!(text.matches("features").count(), 1);
 
         // the hash round-trips beside the url, and stays absent otherwise
         assert_eq!(

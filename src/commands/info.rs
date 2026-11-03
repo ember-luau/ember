@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::project::manifest::{
-    DEFAULT_INDEX_URL, Language, Manifest, parse_version_req, split_package_name, takes,
+    DEFAULT_INDEX_URL, Language, Manifest, features, parse_version_req, split_package_name, takes,
 };
 use crate::registry::index::pesde::{self, Candidate};
 use crate::registry::index::{Index, Refresh, hidden};
@@ -248,6 +248,7 @@ fn describe(
     let (dependencies, dev_dependencies) = dependencies(entry);
     for (title, list) in [
         ("Dependencies", dependencies),
+        ("Features", features(entry)),
         ("Dev dependencies", dev_dependencies),
     ] {
         if list.is_empty() {
@@ -417,6 +418,7 @@ fn document(
             "targets": same_version.iter().map(|entry| target(entry)).collect::<Vec<_>>(),
             "requires": requires,
             "dependencies": dependencies,
+            "features": feature_table(&shown.entry),
             "dev_dependencies": dev_dependencies,
         },
         "versions": versions,
@@ -424,12 +426,15 @@ fn document(
 }
 
 /** the dependencies and dev dependencies of an entry for `--json`, read
-as [`dependencies`] reads them: `{alias, name, version, index, optional, peer}`. */
+as [`dependencies`] reads them: `{alias, name, version, index, features,
+default_features, optional, peer}`. the `features` of the entry say which
+features gate a dependency. */
 fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let (mut runtime, mut dev) = (Vec::new(), Vec::new());
     for (table, in_dev) in [
         ("dependencies", false),
         ("optional-dependencies", false),
+        ("feature-dependencies", false),
         ("peer-dependencies", false),
         ("dev-dependencies", true),
     ] {
@@ -451,11 +456,21 @@ fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::
                 .into_iter()
                 .find_map(field)
                 .unwrap_or("?");
+            let asked: Vec<&str> = spec
+                .get("features")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
             let dependency = json!({
                 "alias": alias,
                 "name": name.strip_prefix("wally#").unwrap_or(name),
                 "version": field("version").unwrap_or("*"),
                 "index": field("index"),
+                "features": asked,
+                "default_features": spec.get("default-features").and_then(Value::as_bool)
+                    != Some(false),
                 "optional": table == "optional-dependencies"
                     || spec.get("optional").and_then(Value::as_bool) == Some(true),
                 "peer": table == "peer-dependencies" || kind == Some("peer"),
@@ -486,15 +501,49 @@ fn target(entry: &Candidate) -> String {
 /// one dependency as info shows it: the alias, then the package and its requirement.
 type Spec = (String, String);
 
+/** the entry's `[features]` table, read as one: an index entry and a
+shipped ember.toml spell it the same. */
+fn feature_table(entry: &Value) -> features::Features {
+    entry
+        .get("features")
+        .cloned()
+        .and_then(|table| table.try_into().ok())
+        .unwrap_or_default()
+}
+
+/** the (feature, what it turns on) pairs of an entry. a default feature
+says so. */
+fn features(entry: &Value) -> Vec<Spec> {
+    let table = feature_table(entry);
+    let defaults = table.get(features::DEFAULT);
+    table
+        .iter()
+        .filter(|(name, _)| *name != features::DEFAULT)
+        .map(|(name, items)| {
+            let mut text = match items.as_slice() {
+                [] => "-".to_string(),
+                items => items.join(", "),
+            };
+            if defaults.is_some_and(|defaults| defaults.contains(name)) {
+                text.push_str(&" (default)".dark_grey().to_string());
+            }
+            (name.clone(), text)
+        })
+        .collect()
+}
+
 /** the (alias, `name requirement`) pairs of an entry's dependencies and
 dev dependencies, from the raw entry. an ember entry keeps its optional,
-peer and dev dependencies in tables of their own, and a pesde entry marks
-one `peer` or `dev` in a [spec, kind] pair. */
+gated, peer and dev dependencies in tables of their own, and a pesde entry
+marks one `peer` or `dev` in a [spec, kind] pair. a gated one names the
+features that turn it on. */
 fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
+    let feature_table = feature_table(entry);
     let (mut runtime, mut dev) = (Vec::new(), Vec::new());
     for (table, in_dev) in [
         ("dependencies", false),
         ("optional-dependencies", false),
+        ("feature-dependencies", false),
         ("peer-dependencies", false),
         ("dev-dependencies", true),
     ] {
@@ -521,6 +570,28 @@ fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
             let mut text = format!("{name} {}", field("version").unwrap_or("*"));
             if let Some(index) = field("index") {
                 text.push_str(&format!(" (index {index})"));
+            }
+            let asked: Vec<&str> = spec
+                .get("features")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !asked.is_empty() {
+                text.push_str(&format!(" [{}]", asked.join(", ")));
+            }
+            if spec.get("default-features").and_then(Value::as_bool) == Some(false) {
+                text.push_str(" (no default features)");
+            }
+            // the features that list this alias turn it on
+            let turned_on_by: Vec<&str> = feature_table
+                .iter()
+                .filter(|(name, items)| *name != features::DEFAULT && items.contains(alias))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !turned_on_by.is_empty() {
+                text.push_str(&format!(" (feature {})", turned_on_by.join(", ")));
             }
             let optional = spec.get("optional").and_then(Value::as_bool) == Some(true);
             if table == "optional-dependencies" || optional {
@@ -602,6 +673,8 @@ deprecated = "use 2.0"
 ["1.1.0 lune-alloy".dependencies.Signal]
 name = "acme/signal"
 version = "^1.0.0"
+features = ["fast"]
+default-features = false
 
 ["1.1.0 lune-alloy".dependencies.jecs]
 name = "ukendio/jecs"
@@ -612,6 +685,15 @@ index = "wally"
 name = "acme/trace"
 version = "^2.0.0"
 optional = true
+
+["1.1.0 lune-alloy".feature-dependencies.icons]
+name = "acme/icons"
+version = "^1.0.0"
+
+["1.1.0 lune-alloy".features]
+default = ["pretty"]
+pretty = ["icons", "Signal/fast"]
+plain = []
 
 ["1.1.0 lune-alloy".peer-dependencies.React]
 name = "jsdotlua/react"
@@ -665,10 +747,15 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
              Requires    alloy ^0.4.0, lune >=0.9.0\n\
              \n\
              Dependencies\n  \
-               Signal  acme/signal ^1.0.0\n  \
+               Signal  acme/signal ^1.0.0 [fast] (no default features)\n  \
                jecs    ukendio/jecs ^0.11.0 (index wally)\n  \
                trace   acme/trace ^2.0.0 (optional)\n  \
+               icons   acme/icons ^1.0.0 (feature pretty)\n  \
                React   jsdotlua/react ^17.0.0 (peer)\n\
+             \n\
+             Features\n  \
+               plain   -\n  \
+               pretty  icons, Signal/fast (default)\n\
              \n\
              Dev dependencies\n  \
                testkit  evaera/testkit ^1.0.0\n\
@@ -775,6 +862,25 @@ versions = "=1.0.0"
         let (entries, meta) = entries(&file);
         let shown = entries.iter().find(|entry| !entry.yanked).unwrap();
         let target = |environment: &str, language: &str| json!({ "environment": environment, "language": language });
+        let dependency = |alias: &str, name: &str, version: &str, index: Option<&str>| {
+            json!({
+                "alias": alias,
+                "name": name,
+                "version": version,
+                "index": index,
+                "features": [],
+                "default_features": true,
+                "optional": false,
+                "peer": false,
+            })
+        };
+        let mut signal = dependency("Signal", "acme/signal", "^1.0.0", None);
+        signal["features"] = json!(["fast"]);
+        signal["default_features"] = json!(false);
+        let mut trace = dependency("trace", "acme/trace", "^2.0.0", None);
+        trace["optional"] = json!(true);
+        let mut react = dependency("React", "jsdotlua/react", "^17.0.0", None);
+        react["peer"] = json!(true);
         let flagged =
             |environment: &str, language: &str, yanked: bool, deprecated: Option<&str>| {
                 json!({
@@ -813,13 +919,19 @@ versions = "=1.0.0"
                     "targets": [target("lune", "alloy"), target("roblox", "luau")],
                     "requires": { "alloy": "^0.4.0", "lune": ">=0.9.0" },
                     "dependencies": [
-                        { "alias": "Signal", "name": "acme/signal", "version": "^1.0.0", "index": null, "optional": false, "peer": false },
-                        { "alias": "jecs", "name": "ukendio/jecs", "version": "^0.11.0", "index": "wally", "optional": false, "peer": false },
-                        { "alias": "trace", "name": "acme/trace", "version": "^2.0.0", "index": null, "optional": true, "peer": false },
-                        { "alias": "React", "name": "jsdotlua/react", "version": "^17.0.0", "index": null, "optional": false, "peer": true },
+                        signal,
+                        dependency("jecs", "ukendio/jecs", "^0.11.0", Some("wally")),
+                        trace,
+                        dependency("icons", "acme/icons", "^1.0.0", None),
+                        react,
                     ],
+                    "features": {
+                        "default": ["pretty"],
+                        "plain": [],
+                        "pretty": ["icons", "Signal/fast"],
+                    },
                     "dev_dependencies": [
-                        { "alias": "testkit", "name": "evaera/testkit", "version": "^1.0.0", "index": null, "optional": false, "peer": false },
+                        dependency("testkit", "evaera/testkit", "^1.0.0", None),
                     ],
                 },
                 "versions": [

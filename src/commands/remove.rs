@@ -36,10 +36,19 @@ pub fn run(args: RemoveArgs) -> Result<(), Error> {
     its last entry. `embr init` writes [dependencies], so that header stays */
     document.drop_if_empty("dev-dependencies");
     document.drop_if_empty("peer-dependencies");
+    let gone: Vec<&str> = removed
+        .iter()
+        .filter(|(table, ..)| *table == "dependencies")
+        .map(|(_, alias, _)| *alias)
+        .collect();
+    let unlisted = drop_from_features(&mut document, &gone)?;
     document.save()?;
 
     for (table, alias, name) in &removed {
         ui::print_success(&format!("Removed {name} as '{alias}' from [{table}]"));
+    }
+    for (feature, item) in &unlisted {
+        ui::print_success(&format!("Removed '{item}' from feature '{feature}'"));
     }
     for warning in leftovers(&manifest, &removed) {
         eprintln!("{warning}");
@@ -96,6 +105,49 @@ fn matches<'manifest>(
         }
     }
     Ok(found)
+}
+
+/** takes each item that names a removed alias, as `alias` or as
+`alias/feature`, out of the lists of [features]. the manifest check refuses
+an item that names no dependency, so the next command would fail on it, and
+`cargo remove` does the same. returns the (feature, item) pairs. */
+fn drop_from_features(
+    document: &mut ManifestDoc,
+    gone: &[&str],
+) -> Result<Vec<(String, String)>, Error> {
+    let mut unlisted = Vec::new();
+    if gone.is_empty() {
+        return Ok(unlisted);
+    }
+    let Some(features) = document.table("features")? else {
+        return Ok(unlisted);
+    };
+    let names = |item: &str| {
+        gone.iter().any(|alias| {
+            item == *alias
+                || item
+                    .strip_prefix(*alias)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    };
+    for (feature, items) in features.iter_mut() {
+        let Some(items) = items.as_array_mut() else {
+            continue;
+        };
+        let before = unlisted.len();
+        items.retain(|item| match item.as_str() {
+            Some(item) if names(item) => {
+                unlisted.push((feature.get().to_string(), item.to_string()));
+                false
+            }
+            _ => true,
+        });
+        // the first item that stays would keep the space after a removed one
+        if unlisted.len() > before {
+            items.fmt();
+        }
+    }
+    Ok(unlisted)
 }
 
 /** warnings for the [patches] and [overrides] entries that still name a
@@ -156,6 +208,34 @@ mod tests {
                 .map(|(table, alias, _)| format!("{table}.{alias}"))
                 .collect()
         })
+    }
+
+    /// a removed dependency leaves [features] too, as alias and as `alias/feature`.
+    #[test]
+    fn a_removed_dependency_leaves_the_feature_lists() {
+        let dir = std::env::temp_dir().join("embr-test-remove-features");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ember.toml");
+        std::fs::write(
+            &path,
+            "[dependencies]\nicons = { name = \"acme/icons\", version = \"^1\" }\n\n\
+             [features]\n# the look\npretty = [\"icons\", \"icons/svg\", \"fast\"]\nfast = []\n",
+        )
+        .unwrap();
+        let mut document = ManifestDoc::open_at(path.clone()).unwrap();
+        let unlisted = drop_from_features(&mut document, &["icons"]).unwrap();
+        document.save().unwrap();
+        assert_eq!(
+            unlisted,
+            [
+                ("pretty".to_string(), "icons".to_string()),
+                ("pretty".to_string(), "icons/svg".to_string())
+            ]
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# the look\npretty = [\"fast\"]"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

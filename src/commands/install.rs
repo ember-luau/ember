@@ -76,6 +76,8 @@ struct Job {
     patch: Option<JobPatch>,
     /// only optional edges lead here, so a failed download skips it.
     optional: bool,
+    /// its enabled features, recorded in ember.lock.
+    features: Vec<String>,
 }
 
 /** a patch ready to apply, the lockfile record plus the file resolved
@@ -464,6 +466,7 @@ fn install_steps(
                     redirects: package.redirects,
                     patch,
                     optional: package.optional,
+                    features: package.features,
                 })
             })
             .collect::<Result<Vec<Job>, Error>>()?
@@ -505,6 +508,7 @@ fn install_steps(
                 redirects: package.redirects,
                 patch: None,
                 optional: package.optional,
+                features: package.features,
             })
             .collect()
     };
@@ -599,6 +603,7 @@ fn install_steps(
                 redirects: package.redirects.clone(),
                 requires: manifest.require_style(package.context()),
                 lazy_collections: lazy_collections(manifest, package.context()),
+                features: package.features.clone(),
             }
         })
         .collect();
@@ -1121,6 +1126,8 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                     hash, so identical versions still rebuild */
                     && job.patch.as_ref().map(|patch| &patch.record) == locked.patch.as_ref()
                     && job.optional == locked.optional
+                    // features gate links, so a change rebuilds
+                    && job.features == locked.features
                     && job
                         .environment
                         .is_none_or(|environment| environment == locked.environment)
@@ -1459,6 +1466,7 @@ fn install_packages(
                         redirects: job.redirects,
                         patch: job.patch.map(|patch| patch.record),
                         optional: job.optional,
+                        features: job.features,
                         source: job.source,
                         sha256,
                     });
@@ -1746,6 +1754,7 @@ fn link_workspace_member(
         // members are the user's own source, attach_patches refused them
         patch: None,
         optional: job.optional,
+        features: job.features,
         source: job.source,
         sha256: None,
     })
@@ -1788,6 +1797,8 @@ struct StoredPackage {
     requires: RequireStyle,
     /// how its nested links to a collection load the members, see [`lazy_collections`]
     lazy_collections: bool,
+    /// its enabled features, from the lock. a gated dependency that they leave off gets no link
+    features: Vec<String>,
 }
 
 /** link files inside a stored package for its own declared dependencies,
@@ -1823,7 +1834,15 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             .entry
             .as_deref()
             .and_then(|entry| package::forest_dependency_dir(&package.storage, entry));
+        let off = package::features_off(&package.storage, &package.features);
         for (alias, declared, kind) in package::declared_dependencies(&package.storage) {
+            /* a gated dependency that no enabled feature lists did not
+            install for this package. another package may have the same one
+            in this root, so a link to it would make the package's
+            `pcall(require, ...)` find a feature that is off */
+            if off.contains(&alias) {
+                continue;
+            }
             /* the shipped manifest declares the ORIGINAL package. an
             [overrides] redirect on this edge means the alias must link to
             the replacement instead */
@@ -2344,6 +2363,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
             source: index::DownloadSource::Zip {
                 url: format!("https://example.com/{name}/{version}"),
             },
@@ -2511,6 +2531,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         }
     }
 
@@ -2794,6 +2815,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
         let locked = |context: Option<Environment>| LockedPackage {
             name: "acme/thing".to_string(),
@@ -2805,6 +2827,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -2899,6 +2922,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
         let lock = |sha256: Option<&str>| {
             Lockfile::new(vec![LockedPackage {
@@ -2911,6 +2935,7 @@ mod tests {
                 redirects: BTreeMap::new(),
                 patch: None,
                 optional: false,
+                features: Vec::new(),
                 source: index::DownloadSource::TarGz {
                     url: url.to_string(),
                 },
@@ -3006,6 +3031,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
         let extracted = |entry: Option<&str>| Extracted {
             environment: Environment::Roblox,
@@ -3064,6 +3090,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
         let roblox = |links: &[&str]| -> Vec<Job> {
             links
@@ -3124,6 +3151,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
 
         // one context, no collision possible, whatever [config] says
@@ -3446,7 +3474,45 @@ mod tests {
             requires: RequireStyle::String,
             // no manifest, so no [target], and the context decides
             lazy_collections: matches!(context, Environment::Roblox | Environment::Server),
+            features: Vec::new(),
         }
+    }
+
+    /** a gated dependency that the package's enabled features leave off
+    gets no link and no warning, also when the project has the same
+    package. one that a feature turns on links as usual. */
+    #[test]
+    fn a_gated_dependency_links_only_when_a_feature_is_on() {
+        let base = std::env::temp_dir().join("embr-test-nested-links-features");
+        let _ = fs::remove_dir_all(&base);
+        let store = base.join("packages/roblox/.ember");
+        let icons = store.join("acme_icons");
+        write(&icons, "init.luau", "return {}\n");
+        let ui = store.join("acme_ui");
+        write(
+            &ui,
+            "ember.toml",
+            "[package]\nname = \"acme/ui\"\nversion = \"1.0.0\"\n\n\
+             [dependencies]\nicons = { name = \"acme/icons\", version = \"^1\" }\n\n\
+             [features]\npretty = [\"icons\"]\n",
+        );
+        write(&ui, "init.luau", "return {}\n");
+
+        for (features, linked) in [(Vec::new(), false), (vec!["pretty".to_string()], true)] {
+            let _ = fs::remove_dir_all(ui.join("packages"));
+            let mut warnings = Vec::new();
+            let mut with_features = stored("acme/ui", ui.clone(), Environment::Roblox);
+            with_features.features = features;
+            let packages = [
+                stored("acme/icons", icons.clone(), Environment::Roblox),
+                with_features,
+            ];
+            link_nested_dependencies(&packages, &mut |message| warnings.push(message));
+            assert_eq!(warnings, Vec::<String>::new());
+            assert_eq!(ui.join("packages/roblox/icons.luau").exists(), linked);
+        }
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     /** a peer links to the copy of the project, in the same environment
@@ -3522,6 +3588,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional,
+            features: Vec::new(),
         };
         let progress = Progress::hidden();
         let install = |job| {
@@ -4152,6 +4219,7 @@ mod tests {
                 redirects: BTreeMap::new(),
                 requires: RequireStyle::String,
                 lazy_collections: true,
+                features: Vec::new(),
             },
             stored("acme/extras", consumer.clone(), Environment::Roblox),
         ];
@@ -4252,6 +4320,7 @@ mod tests {
             redirects: BTreeMap::new(),
             patch: None,
             optional: false,
+            features: Vec::new(),
         };
         let extracted = Extracted {
             environment: Environment::Luau,

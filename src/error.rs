@@ -409,6 +409,18 @@ pub enum Error {
     #[error("'{alias}' is in [dependencies] and in [{table}]; an alias goes in one of the two")]
     AliasInBothTables { alias: String, table: &'static str },
 
+    #[error("Invalid features in ember.toml: {0}")]
+    FeaturesInvalid(String),
+
+    /// a dependent asks a package for a feature that its [features] does not have.
+    #[error("{package} has no feature '{feature}', which {by} asks for; {known}")]
+    FeatureUnknown {
+        package: String,
+        feature: String,
+        by: String,
+        known: String,
+    },
+
     /// `embr remove` got a name that no dependency alias or package name matches.
     #[error("No dependency in ember.toml is named '{name}'; {known}")]
     DependencyMissing { name: String, known: String },

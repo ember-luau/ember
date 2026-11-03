@@ -4,7 +4,7 @@ network. its index has the format of ember's own index, so the pesde reader
 resolves it with no change. the archives sit beside the index. */
 
 use crate::error::Error;
-use crate::project::manifest::{Dependency, Language, Manifest, split_package_name};
+use crate::project::manifest::{Dependency, Language, Manifest, features, split_package_name};
 use crate::sys::paths;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -52,15 +52,24 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
         entry.insert("description".into(), description.clone().into());
     }
     entry.insert("download".into(), format!("{SCHEME}{file}").into());
-    /* the registry's shape: the optional dependencies in a table of their
-    own, which an embr before 0.14.0 does not read, and the peers in another */
-    let (optional, required): (Vec<_>, Vec<_>) = manifest
+    /* the registry's shape: the dependencies that a feature gates and the
+    optional ones in tables of their own, which an embr before 0.14.0 does
+    not read, and the peers in another. a gated one that is also optional
+    is gated first */
+    let gated = features::gated(&manifest.features, &|alias| {
+        manifest.dependencies.contains_key(alias)
+    });
+    let (gated, rest): (Vec<_>, Vec<_>) = manifest
         .dependencies
         .iter()
+        .partition(|(alias, _)| gated.contains(*alias));
+    let (optional, required): (Vec<_>, Vec<_>) = rest
+        .into_iter()
         .partition(|(_, dependency)| dependency.optional());
     for (key, entries) in [
         ("dependencies", required),
         ("optional-dependencies", optional),
+        ("feature-dependencies", gated),
         (
             "peer-dependencies",
             manifest.peer_dependencies.iter().collect(),
@@ -70,6 +79,12 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
         if !dependencies.is_empty() {
             entry.insert(key.into(), dependencies.into());
         }
+    }
+    if !manifest.features.is_empty() {
+        entry.insert(
+            "features".into(),
+            toml::Value::try_from(&manifest.features)?,
+        );
     }
 
     let index_path = root.join("index").join(scope).join(name);
@@ -111,6 +126,12 @@ fn dependencies(
         }
         if dependency.optional() {
             spec.insert("optional".into(), true.into());
+        }
+        if !dependency.features().is_empty() {
+            spec.insert("features".into(), dependency.features().to_vec().into());
+        }
+        if !dependency.default_features() {
+            spec.insert("default-features".into(), false.into());
         }
         table.insert(alias.clone(), spec.into());
     }
@@ -280,6 +301,70 @@ mod tests {
         assert_eq!(candidates.len(), 1);
 
         assert!(read_in(&root.join("archives"), "local:../x", "../x").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /** a dependency that a feature gates goes to `feature-dependencies`,
+    an optional one too, and the entry keeps `features`. an embr before
+    0.14.0 reads only `dependencies`, so it never installs a gated one. */
+    #[test]
+    fn a_local_publish_keeps_features_and_gated_dependencies_apart() {
+        let root = std::env::temp_dir().join("embr-test-local-registry-features");
+        let _ = fs::remove_dir_all(&root);
+        let ui = manifest(
+            "[package]\nname = \"me/ui\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\n\
+             [dependencies]\n\
+             core = { name = \"me/core\", version = \"^1\", index = \"local\", features = [\"fast\"], default-features = false }\n\
+             icons = { name = \"me/icons\", version = \"^1\", index = \"local\" }\n\
+             trace = { name = \"me/trace\", version = \"^1\", index = \"local\", optional = true }\n\n\
+             [features]\ndefault = [\"pretty\"]\npretty = [\"icons\", \"trace\", \"core/dark\"]\n",
+        );
+        publish_in(&root, &ui, b"ui").unwrap();
+
+        let index = Index::local_at(root.join("index"));
+        let file = index.file("me/ui").unwrap().unwrap();
+        let entry = &file["1.0.0 roblox"];
+        let keys = |table: &str| -> Vec<&str> {
+            entry[table]
+                .as_table()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect()
+        };
+        // what an older embr reads holds the required dependency alone
+        assert_eq!(keys("dependencies"), ["core"]);
+        assert_eq!(keys("feature-dependencies"), ["icons", "trace"]);
+        assert!(entry.get("optional-dependencies").is_none());
+        assert_eq!(
+            entry["feature-dependencies"]["trace"]["optional"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            entry["dependencies"]["core"]["features"]
+                .as_array()
+                .unwrap()[0]
+                .as_str(),
+            Some("fast")
+        );
+        assert_eq!(
+            entry["dependencies"]["core"]["default-features"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(keys("features"), ["default", "pretty"]);
+
+        // this embr reads it back, the features and the gated ones too
+        let any = semver::VersionReq::parse("*").unwrap();
+        let package = index.resolve("me/ui", &any, None, &[]).unwrap();
+        assert_eq!(package.features["pretty"].len(), 3);
+        let mut aliases: Vec<_> = package
+            .dependencies
+            .iter()
+            .map(|dep| dep.alias.as_str())
+            .collect();
+        aliases.sort();
+        assert_eq!(aliases, ["core", "icons", "trace"]);
         let _ = fs::remove_dir_all(&root);
     }
 
