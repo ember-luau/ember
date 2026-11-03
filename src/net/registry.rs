@@ -266,53 +266,108 @@ pub fn yank(
     undo: bool,
 ) -> Result<(), Error> {
     let path = format!("/v1/packages/{name}/{version}/yank");
-    owner_call(token, "yank", &path, target, (!undo).then_some(None))
+    let method = if undo { "DELETE" } else { "PUT" };
+    owner_call(&api_url(), token, "yank", method, &path, target, None).map(drop)
 }
 
 /** sets or clears a deprecation through `PUT`/`DELETE` on
 `/v1/packages/{scope}/{name}/deprecate`, or on `.../{version}/deprecate` for
 one version. `reason` None clears it. the package's reason is pesde's
-`[meta] deprecated`, a version's is `deprecated` on its entries. */
+`[meta] deprecated`, a version's is `deprecated` on its entries.
+`replacement` is the package to use instead, `[meta] replacement`, for the
+whole package only. */
 pub fn deprecate(
     token: &str,
     name: &str,
     version: Option<&semver::Version>,
     target: Option<&str>,
     reason: Option<&str>,
+    replacement: Option<&str>,
 ) -> Result<(), Error> {
     let path = match version {
         Some(version) => format!("/v1/packages/{name}/{version}/deprecate"),
         None => format!("/v1/packages/{name}/deprecate"),
     };
-    let body = reason.map(|reason| Some(serde_json::json!({ "reason": reason })));
-    owner_call(token, "deprecation", &path, target, body)
+    let api = api_url();
+    let call = |method, body| owner_call(&api, token, "deprecation", method, &path, target, body);
+    match reason {
+        Some(reason) => call(
+            "PUT",
+            Some(serde_json::json!({ "reason": reason, "replacement": replacement })),
+        ),
+        None => call("DELETE", None),
+    }
+    .map(drop)
 }
 
-/** one call an owner makes. `body` None sends a DELETE, Some a PUT with
-that JSON, or with no body at all. */
+/** posts a notice on `name`, or on the versions that the semver range
+`versions` takes, through `POST /v1/packages/{scope}/{name}/notices`.
+`level` is `notice` or `warning`. returns the notice's id. */
+pub fn post_notice(
+    token: &str,
+    name: &str,
+    level: &str,
+    message: &str,
+    versions: Option<&str>,
+) -> Result<String, Error> {
+    post_notice_at(&api_url(), token, name, level, message, versions)
+}
+
+fn post_notice_at(
+    api: &str,
+    token: &str,
+    name: &str,
+    level: &str,
+    message: &str,
+    versions: Option<&str>,
+) -> Result<String, Error> {
+    #[derive(Deserialize)]
+    struct Answer {
+        notice: Posted,
+    }
+    #[derive(Deserialize)]
+    struct Posted {
+        id: String,
+    }
+    let body = serde_json::json!({ "level": level, "message": message, "versions": versions });
+    let path = format!("/v1/packages/{name}/notices");
+    let answer = owner_call(api, token, "notice", "POST", &path, None, Some(body))?;
+    let answer: Answer = serde_json::from_str(&answer).map_err(HttpError::from)?;
+    Ok(answer.notice.id)
+}
+
+/// removes notice `id` from `name`, `DELETE /v1/packages/{scope}/{name}/notices/{id}`.
+pub fn remove_notice(token: &str, name: &str, id: &str) -> Result<(), Error> {
+    let path = format!("/v1/packages/{name}/notices/{id}");
+    owner_call(&api_url(), token, "removal", "DELETE", &path, None, None).map(drop)
+}
+
+/** one call an owner makes, with `body` as JSON or with no body. returns
+the answer's body. */
 fn owner_call(
+    api: &str,
     token: &str,
     action: &'static str,
+    method: &str,
     path: &str,
     target: Option<&str>,
-    body: Option<Option<serde_json::Value>>,
-) -> Result<(), Error> {
-    let mut url = format!("{}{path}", api_url());
+    body: Option<serde_json::Value>,
+) -> Result<String, Error> {
+    let mut url = format!("{api}{path}");
     if let Some(target) = target {
         url.push_str(&format!("?target={target}"));
     }
-    let method = if body.is_some() { "PUT" } else { "DELETE" };
     let request = http::agent()
         .request(method, &url)
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"));
-    let response = match body.flatten() {
+    let response = match body {
         Some(json) => request.send_json(json),
         None => request.call(),
     };
 
     match response {
-        Ok(_) => Ok(()),
+        Ok(response) => Ok(response.into_string()?),
         Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {
             action,
             status,
@@ -482,6 +537,55 @@ mod tests {
         let sent = log.lock().unwrap()[1].clone();
         assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
         assert!(sent.contains("x-github-oidc-token: oidc"), "{sent}");
+    }
+
+    #[test]
+    fn a_notice_posts_its_level_message_and_range_and_gives_back_the_id() {
+        let (api, log) = mock::serve(|request| {
+            if request.contains("too long") {
+                mock::reply(
+                    "400 Bad Request",
+                    r#"{"error":"message must be 1 to 500 characters"}"#,
+                )
+            } else {
+                mock::reply(
+                    "201 Created",
+                    r#"{"notice":{"id":"3f9c0a1b2c4d"},"notices":[]}"#,
+                )
+            }
+        });
+        let id = post_notice_at(
+            &api,
+            "ember_abc",
+            "acme/rocket",
+            "warning",
+            "leaks",
+            Some("^1"),
+        )
+        .unwrap();
+        assert_eq!(id, "3f9c0a1b2c4d");
+        let sent = log.lock().unwrap()[0].clone();
+        assert!(
+            sent.starts_with("post /v1/packages/acme/rocket/notices "),
+            "{sent}"
+        );
+        assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
+        assert!(
+            sent.contains(r#"{"level":"warning","message":"leaks","versions":"^1"}"#),
+            "{sent}"
+        );
+
+        let refused = post_notice_at(&api, "ember_abc", "acme/rocket", "notice", "too long", None);
+        let Err(Error::OwnerActionFailed {
+            status, message, ..
+        }) = refused
+        else {
+            panic!("a refusal is an owner action failure: {refused:?}");
+        };
+        assert_eq!(
+            (status, message.as_str()),
+            (400, "message must be 1 to 500 characters")
+        );
     }
 
     #[test]

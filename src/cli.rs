@@ -124,6 +124,9 @@ pub enum Commands {
     /// Mark a package, or one version, as deprecated, with a reason
     Deprecate(commands::deprecate::DeprecateArgs),
 
+    /// List the notices, warnings and deprecations of the installed packages, or post a notice
+    Notices(commands::notices::NoticesArgs),
+
     /// Serve package search to a coding agent, as an MCP server on stdio
     Mcp,
 
@@ -183,6 +186,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
+        Commands::Notices(args) => done(commands::notices::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
         Commands::Cache(command) => done(commands::cache::run(command)),

@@ -2,8 +2,9 @@ use crate::error::Error;
 use crate::project::manifest::{
     DEFAULT_INDEX_URL, Language, Manifest, parse_version_req, split_package_name, takes,
 };
-use crate::registry::index::pesde::Candidate;
+use crate::registry::index::pesde::{self, Candidate};
 use crate::registry::index::{Index, Refresh, hidden};
+use crate::registry::notices::{Level, Meta};
 use crate::ui;
 use clap::Args;
 use crossterm::style::Stylize;
@@ -40,7 +41,7 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
     let req_text = args.version.as_deref().unwrap_or("^");
     let req = parse_version_req(req_text)?;
 
-    let (mut entries, deprecated) = read(&url, &name)?;
+    let (mut entries, meta) = read(&url, &name)?;
     entries.sort_by(|a, b| {
         b.version
             .cmp(&a.version)
@@ -69,10 +70,7 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
     if let Some(index) = &args.index {
         add.push_str(&format!(" --index {index}"));
     }
-    print!(
-        "{}",
-        describe(&name, &entries, shown, deprecated.as_deref(), &add)
-    );
+    print!("{}", describe(&name, &entries, shown, &meta, &add));
     Ok(())
 }
 
@@ -80,20 +78,29 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
 does not hold it earns one forced refresh, since it can be minutes old. a
 private or unlisted package is not in ember's git index, so the API
 answers for it, as it does for an install. */
-fn read(url: &str, name: &str) -> Result<(Vec<Candidate>, Option<String>), Error> {
+fn read(url: &str, name: &str) -> Result<(Vec<Candidate>, Meta), Error> {
     let index = Index::open(url, Refresh::Ttl)?;
-    let found = match index.read(name) {
+    let found = match index.file(name) {
         Err(Error::PackageNotFound { .. }) if index.ttl_skipped() => {
-            Index::open(url, Refresh::Force)?.read(name)
+            Index::open(url, Refresh::Force)?.file(name)
         }
         found => found,
     };
-    match found {
+    let file = match found {
         Err(missing @ Error::PackageNotFound { .. }) if url == DEFAULT_INDEX_URL => {
-            hidden::read(name)?.ok_or(missing)
+            hidden::file(name)?.ok_or(missing)?
         }
-        found => found,
-    }
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            return Err(Error::IndexFetch {
+                url: url.to_string(),
+                reason: "only a pesde-format index lists its versions this way".to_string(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let (entries, _) = pesde::entries(&file, url, name)?;
+    Ok((entries, Meta::of(&file)))
 }
 
 /** the info text. `entries` is newest first, and `shown` is the version
@@ -103,7 +110,7 @@ fn describe(
     name: &str,
     entries: &[Candidate],
     shown: &Candidate,
-    deprecated: Option<&str>,
+    meta: &Meta,
     add: &str,
 ) -> String {
     let entry = &shown.entry;
@@ -133,10 +140,35 @@ fn describe(
         out.push_str(&format!("{description}\n"));
     }
     // the whole package's deprecation, else this version's
-    if let Some(reason) = deprecated.or(shown.deprecated.as_deref()) {
+    if let Some(reason) = meta.deprecated.as_ref().or(shown.deprecated.as_ref()) {
+        let mut line = format!("Deprecated: {}", ui::strip_controls(reason).trim());
+        if let Some(replacement) = meta
+            .replacement
+            .as_ref()
+            .filter(|_| meta.deprecated.is_some())
+        {
+            line.push_str(&format!(
+                ". Use {} instead",
+                ui::strip_controls(replacement)
+            ));
+        }
+        out.push_str(&format!("{}\n", line.with(ui::accent())));
+    }
+    // every notice, with the id that `embr notices remove` takes
+    for notice in &meta.notices {
+        let level = match notice.level {
+            Level::Warning => "Warning".yellow(),
+            Level::Notice => "Notice".stylize(),
+        };
+        let range = notice
+            .versions
+            .as_deref()
+            .map_or(String::new(), |range| format!(" for {range}"));
+        let message = ui::strip_controls(&notice.message);
+        let message = message.trim().replace('\n', "\n  ");
         out.push_str(&format!(
-            "{}\n",
-            format!("Deprecated: {reason}").with(ui::accent())
+            "{level} {}{range}: {message}\n",
+            notice.id.as_str().dark_grey()
         ));
     }
 
@@ -342,16 +374,15 @@ mod tests {
         out
     }
 
-    fn entries(file: &str) -> (Vec<Candidate>, Option<String>) {
+    fn entries(file: &str) -> (Vec<Candidate>, Meta) {
         let file: Value = toml::from_str(file).unwrap();
-        let (mut entries, deprecated) =
-            pesde::entries(&file, DEFAULT_INDEX_URL, "acme/rocket").unwrap();
+        let (mut entries, _) = pesde::entries(&file, DEFAULT_INDEX_URL, "acme/rocket").unwrap();
         entries.sort_by(|a, b| {
             b.version
                 .cmp(&a.version)
                 .then_with(|| a.target.cmp(&b.target))
         });
-        (entries, deprecated)
+        (entries, Meta::of(&file))
     }
 
     // the keys that the registry writes, from a real entry and API.md
@@ -418,14 +449,14 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
 
     #[test]
     fn info_shows_the_newest_open_version_and_its_details() {
-        let (entries, deprecated) = entries(ENTRY);
+        let (entries, meta) = entries(ENTRY);
         // 2.0.0 is yanked, so 1.1.0 is the one an install takes
         let shown = entries.iter().find(|entry| !entry.yanked).unwrap();
         let text = plain(&describe(
             "acme/rocket",
             &entries,
             shown,
-            deprecated.as_deref(),
+            &meta,
             "embr add acme/rocket",
         ));
         assert_eq!(
@@ -474,7 +505,7 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
             "acme/rocket",
             &entries,
             &entries[0],
-            None,
+            &Meta::default(),
             "embr add x",
         ));
         assert!(text.starts_with("acme/rocket 0.11.0\n\nLicense    MIT\nAuthors    Erica <e@x.dev>\nPublished  2024-11-12\n"), "{text}");
@@ -491,13 +522,53 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
     }
 
     #[test]
+    fn info_names_the_replacement_and_every_notice_with_its_id() {
+        let file = r#"
+["1.0.0 roblox"]
+version = "1.0.0"
+target = "roblox"
+
+[meta]
+deprecated = "no longer kept up"
+replacement = "acme/jet"
+
+[[meta.notices]]
+id = "aaaaaaaaaaaa"
+level = "warning"
+message = "1.x leaks memory\nupdate to 2.0"
+versions = "<2.0.0"
+
+[[meta.notices]]
+id = "bbbbbbbbbbbb"
+level = "notice"
+message = "docs moved\u001b[2J"
+"#;
+        let (entries, meta) = entries(file);
+        let text = plain(&describe(
+            "acme/rocket",
+            &entries,
+            &entries[0],
+            &meta,
+            "embr add x",
+        ));
+        assert!(
+            text.contains(
+                "Deprecated: no longer kept up. Use acme/jet instead\n\
+                 Warning aaaaaaaaaaaa for <2.0.0: 1.x leaks memory\n  update to 2.0\n\
+                 Notice bbbbbbbbbbbb: docs moved\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_yanked_version_shows_only_when_nothing_else_matches() {
         let (entries, _) = entries(ENTRY);
         let text = plain(&describe(
             "acme/rocket",
             &entries,
             &entries[0],
-            None,
+            &Meta::default(),
             "embr add x",
         ));
         assert!(text.starts_with("acme/rocket 2.0.0 (yanked)\n"), "{text}");

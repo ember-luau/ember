@@ -147,6 +147,11 @@ pub fn read(
     index_url: &str,
     name: &str,
 ) -> Result<(Vec<Candidate>, Option<String>), Error> {
+    entries(&file(root, index_url, name)?, index_url, name)
+}
+
+/// the package file of `name`, parsed. [`entries`] reads its versions.
+pub fn file(root: &Path, index_url: &str, name: &str) -> Result<Value, Error> {
     let (scope, package) = split_package_name(name)?;
     let path = root.join(scope).join(package);
     if !path.exists() {
@@ -155,9 +160,7 @@ pub fn read(
             index: index_url.to_string(),
         });
     }
-
-    let file: Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    entries(&file, index_url, name)
+    Ok(toml::from_str(&std::fs::read_to_string(&path)?)?)
 }
 
 /// [`read`] of a package file that is already parsed.
@@ -186,7 +189,7 @@ pub(crate) fn entries(
             .filter(|reason| !reason.trim().is_empty())
             .map(str::to_string)
     };
-    let package_deprecated = reason(file.get("meta").and_then(|meta| meta.get("deprecated")));
+    let package_deprecated = crate::registry::notices::Meta::of(file).deprecated;
 
     let mut candidates: Vec<Candidate> = Vec::new();
     for (key, entry) in entries {

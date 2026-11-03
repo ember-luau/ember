@@ -130,6 +130,62 @@ pub fn printable(text: &str) -> String {
     out
 }
 
+/** `text` with no escape sequence and no control character but the line
+break, for registry text that embr prints as its own output, such as a
+package notice. [`printable`] shows a control as an escape. this drops the
+whole sequence, so `ESC [2K` leaves no `[2K` behind. a tab becomes a space,
+and the bidi controls go too. the registry strips the same set when the
+text is written; this repeats it, since the index is text that anyone can
+edit. */
+pub fn strip_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\n' => out.push('\n'),
+            '\t' => out.push(' '),
+            // a lone ESC goes, and the text after it stays
+            '\u{1b}' => match chars.next_if(|c| matches!(c, ' '..='~')) {
+                Some('[') => skip_csi(&mut chars),
+                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
+                // intermediates, then one final character
+                Some(' '..='/') => {
+                    while chars.next_if(|c| matches!(c, ' '..='/')).is_some() {}
+                    chars.next_if(|c| matches!(c, '0'..='~'));
+                }
+                // a two-character escape, such as ESC c (reset)
+                _ => {}
+            },
+            '\u{9b}' => skip_csi(&mut chars),
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => skip_string(&mut chars),
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            character if character.is_control() => {}
+            character => out.push(character),
+        }
+    }
+    out
+}
+
+/// a CSI sequence: parameters and intermediates, then a final byte.
+fn skip_csi(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
+    while chars.next_if(|c| matches!(c, ' '..='?')).is_some() {}
+    chars.next_if(|c| matches!(c, '@'..='~'));
+}
+
+/// an OSC, DCS, SOS, PM or APC string: up to BEL or the string terminator.
+fn skip_string(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
+    while let Some(character) = chars.next() {
+        match character {
+            '\u{7}' | '\u{9c}' => return,
+            '\u{1b}' => {
+                chars.next_if_eq(&'\\');
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// accent "✗ message" line to stderr.
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("✗ {}", printable(message)).with(accent()));
@@ -327,7 +383,7 @@ pub fn render_config() -> RenderConfig<'static> {
 mod tests {
     use std::time::Duration;
 
-    use super::{ACCENT, RESET, fg, format_duration, printable, visible_width};
+    use super::{ACCENT, RESET, fg, format_duration, printable, strip_controls, visible_width};
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {
@@ -373,6 +429,30 @@ mod tests {
             printable("\x1b]8;;https://evil\x1b\\x\r\u{7f}\u{85}"),
             r"\u{1b}]8;;https://evil\u{1b}\x\u{d}\u{7f}\u{85}"
         );
+    }
+
+    /** a notice is registry text that embr prints as its own line. no
+    sequence in it may move the cursor, clear the screen, set the clipboard
+    or draw over the line. */
+    #[test]
+    fn strip_controls_drops_whole_escape_sequences() {
+        assert_eq!(strip_controls("one\r\ntwo\tthree"), "one\ntwo three");
+        assert_eq!(strip_controls("é ✓ 👩\u{200d}💻"), "é ✓ 👩\u{200d}💻");
+        assert_eq!(
+            strip_controls("a\x1b[2K\x1b[1A\x1b[2J\x1b[31mb\u{9b}0mc"),
+            "abc"
+        );
+        assert_eq!(strip_controls("x\x1b]52;c;ZXZpbA==\x07y"), "xy");
+        assert_eq!(
+            strip_controls("\x1b]8;;https://evil\x1b\\link\x1b]8;;\x1b\\"),
+            "link"
+        );
+        assert_eq!(strip_controls("a\u{9d}0;title\u{9c}b"), "ab");
+        assert_eq!(strip_controls("bad\rgood\u{8}!\u{7f}"), "badgood!");
+        assert_eq!(strip_controls("a\x1bcb\x1b(Bc"), "abc");
+        assert_eq!(strip_controls("a\u{202e}gkp/live\u{202c}b"), "agkp/liveb");
+        assert_eq!(strip_controls("a\x1b"), "a");
+        assert_eq!(strip_controls("a\x1b[\nb"), "a\nb");
     }
 
     /** a bidi control reorders the text after it, so `evil/pkg` with an

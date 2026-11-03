@@ -176,6 +176,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         );
     }
     println!("Run `embr install` to install it");
+    crate::registry::notices::report_added(&index_url, &name, &package.version);
 
     // `postadd` sees the written manifest, so it can go straight to installing
     lifecycle.after()

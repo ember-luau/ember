@@ -20,8 +20,11 @@ pub struct DeprecateArgs {
     /// The Luau target of this environment, the spelling before --target
     #[arg(long, value_name = "ENV", hide = true, conflicts_with = "target")]
     pub environment: Option<String>,
+    /// The package to use instead, as scope/name; for a whole package only
+    #[arg(long = "use", alias = "replacement", value_name = "PACKAGE")]
+    pub replacement: Option<String>,
     /// Remove the deprecation
-    #[arg(long)]
+    #[arg(long, conflicts_with = "replacement")]
     pub undo: bool,
 }
 
@@ -38,6 +41,19 @@ pub fn run(args: DeprecateArgs) -> Result<(), Error> {
         return Err(Error::DeprecateArgs(
             "--target narrows one version; write the package as scope/name@version",
         ));
+    }
+    let replacement = args
+        .replacement
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_lowercase);
+    if let Some(replacement) = &replacement {
+        if version.is_some() {
+            return Err(Error::DeprecateArgs(
+                "--use names a package for the whole package; leave out the @version",
+            ));
+        }
+        split_package_name(replacement)?;
     }
     let reason = match (args.undo, args.reason.as_deref().map(str::trim)) {
         (true, _) => None,
@@ -58,7 +74,9 @@ pub fn run(args: DeprecateArgs) -> Result<(), Error> {
 
     as_owner(|token| {
         ui::with_spinner("Contacting the registry", || {
-            registry::deprecate(token, name, version.as_ref(), target.as_deref(), reason)
+            let version = version.as_ref();
+            let replacement = replacement.as_deref();
+            registry::deprecate(token, name, version, target.as_deref(), reason, replacement)
         })
     })?;
 
@@ -71,7 +89,12 @@ pub fn run(args: DeprecateArgs) -> Result<(), Error> {
         ui::print_success(&format!("{what} is no longer deprecated"));
     } else {
         ui::print_success(&format!("Deprecated {what}"));
-        println!("It still installs. Each install that resolves it prints the reason.");
+        match &replacement {
+            Some(replacement) => println!(
+                "It still installs. Each install prints the reason and says to use {replacement}."
+            ),
+            None => println!("It still installs. Each install prints the reason."),
+        }
     }
     Ok(())
 }
