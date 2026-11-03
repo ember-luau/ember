@@ -12,6 +12,7 @@ use crate::registry::notices::{self, Item, Kind};
 use crate::ui;
 use clap::{Args, Subcommand, ValueEnum};
 use crossterm::style::Stylize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -23,6 +24,9 @@ pub struct NoticesArgs {
     /// Exit with an error when an item of this kind applies, such as `--deny warnings`
     #[arg(long, value_enum, value_delimiter = ',', value_name = "KIND")]
     pub deny: Vec<Deny>,
+    /// Print the list as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,7 +91,7 @@ pub fn run(args: NoticesArgs) -> Result<(), Error> {
         None => {
             let deny: Vec<Kind> = args.deny.iter().map(|deny| deny.kind()).collect();
             let quiet = "The installed packages have no notices, warnings, deprecations or yanks";
-            list(|_| true, &deny, quiet)
+            list(|_| true, &deny, quiet, args.json)
         }
     }
 }
@@ -96,8 +100,14 @@ pub fn run(args: NoticesArgs) -> Result<(), Error> {
 package: each one of a kind that `shown` takes. it exits 0 unless an
 item of a kind in `deny` applies, so CI can fail on it. `quiet` is the
 line when no item shows. `embr notices` shows every kind, and `embr
-audit` shows the security notices and the yanks. */
-pub(crate) fn list(shown: impl Fn(Kind) -> bool, deny: &[Kind], quiet: &str) -> Result<(), Error> {
+audit` shows the security notices and the yanks. `json` prints the list
+as a JSON document, and the exit is the same. */
+pub(crate) fn list(
+    shown: impl Fn(Kind) -> bool,
+    deny: &[Kind],
+    quiet: &str,
+    json: bool,
+) -> Result<(), Error> {
     let (manifest, lock) = tree::load()?;
     let mut problems = Vec::new();
     let mut items = ui::with_spinner("Reading the indices", || {
@@ -110,7 +120,11 @@ pub(crate) fn list(shown: impl Fn(Kind) -> bool, deny: &[Kind], quiet: &str) -> 
         items.retain(|item| shown(item.kind));
     }
     let by = tree::brought_in_by(&manifest, &lock, Path::new(""));
-    print!("{}", describe(&lock.packages, &items, by.as_deref(), quiet));
+    if json {
+        ui::print_json(&document(&lock.packages, &items, by.as_deref()))?;
+    } else {
+        print!("{}", describe(&lock.packages, &items, by.as_deref(), quiet));
+    }
 
     let denied: BTreeSet<&Item> = items
         .iter()
@@ -163,15 +177,13 @@ struct Group<'a> {
     items: BTreeSet<&'a Item>,
 }
 
-/** the list text. one heading for each package and version, which names
-the manifest entries that bring it in, then its items. a package in two
-environments shows once. */
-fn describe(
-    packages: &[LockedPackage],
-    items: &[Vec<Item>],
-    by: Option<&[Vec<String>]>,
-    quiet: &str,
-) -> String {
+/** one group for each package and version that has items, by name. a
+package in two environments is one group. */
+fn groups<'a>(
+    packages: &'a [LockedPackage],
+    items: &'a [Vec<Item>],
+    by: Option<&'a [Vec<String>]>,
+) -> BTreeMap<(String, String), Group<'a>> {
     let mut groups: BTreeMap<(String, String), Group> = BTreeMap::new();
     for (index, (package, items)) in packages.iter().zip(items).enumerate() {
         if items.is_empty() {
@@ -185,6 +197,18 @@ fn describe(
             .extend(by.and_then(|by| by.get(index)).into_iter().flatten());
         group.items.extend(items);
     }
+    groups
+}
+
+/** the list text. one heading for each package and version, which names
+the manifest entries that bring it in, then its items. */
+fn describe(
+    packages: &[LockedPackage],
+    items: &[Vec<Item>],
+    by: Option<&[Vec<String>]>,
+    quiet: &str,
+) -> String {
+    let groups = groups(packages, items, by);
     if groups.is_empty() {
         return format!("{quiet}\n");
     }
@@ -209,6 +233,37 @@ fn describe(
         }
     }
     out
+}
+
+/** the `--json` list: the groups of [`describe`], in the same order.
+`brought_in_by` names the manifest entries whose tree holds the package,
+its own entry too, and it is empty when the installed graph does not
+read. */
+fn document(packages: &[LockedPackage], items: &[Vec<Item>], by: Option<&[Vec<String>]>) -> Value {
+    let packages: Vec<Value> = groups(packages, items, by)
+        .into_iter()
+        .map(|((name, version), Group { direct, by, items })| {
+            let items: Vec<Value> = items
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "kind": item.kind.as_str(),
+                        "version": item.version,
+                        "message": Some(item.message()).filter(|text| !text.is_empty()),
+                        "replacement": item.replacement.as_deref().map(ui::strip_controls),
+                    })
+                })
+                .collect();
+            json!({
+                "name": name,
+                "version": version,
+                "direct": direct,
+                "brought_in_by": by,
+                "items": items,
+            })
+        })
+        .collect();
+    json!({ "version": ui::JSON_VERSION, "packages": packages })
 }
 
 /// `embr notices add`: posts a notice as an owner of the package.
@@ -342,6 +397,65 @@ mod tests {
         // with no installed graph, a transitive package names nothing
         let text = plain(&describe(&lock.packages, &items, None, QUIET));
         assert!(text.starts_with("acme/fuel@0.2.0\n"), "{text}");
+    }
+
+    /// the `--json` shape of `embr notices` and `embr audit`.
+    #[test]
+    fn the_json_list_groups_as_the_text_does() {
+        let lock: Lockfile = toml::from_str(LOCK).unwrap();
+        let fuel = vec![
+            item(Kind::Yanked, "acme/fuel", Some("0.2.0"), ""),
+            item(
+                Kind::Security,
+                "acme/fuel",
+                Some("0.2.0"),
+                "sends\x1b[2J it away ",
+            ),
+        ];
+        let rocket = vec![Item {
+            replacement: Some("acme/jet".to_string()),
+            ..item(Kind::Deprecated, "acme/rocket", None, "no longer kept up")
+        }];
+        let items = vec![rocket, fuel.clone(), fuel, Vec::new()];
+        let by = vec![
+            vec!["rocket".to_string()],
+            vec!["rocket".to_string()],
+            vec!["server-tools".to_string()],
+            vec!["quiet".to_string()],
+        ];
+        assert_eq!(
+            document(&lock.packages, &items, Some(&by)),
+            json!({
+                "version": 1,
+                "packages": [
+                    {
+                        "name": "acme/fuel",
+                        "version": "0.2.0",
+                        "direct": false,
+                        "brought_in_by": ["rocket", "server-tools"],
+                        "items": [
+                            { "kind": "security", "version": "0.2.0", "message": "sends it away", "replacement": null },
+                            { "kind": "yanked", "version": "0.2.0", "message": null, "replacement": null },
+                        ],
+                    },
+                    {
+                        "name": "acme/rocket",
+                        "version": "1.0.0",
+                        "direct": true,
+                        "brought_in_by": ["rocket"],
+                        "items": [
+                            { "kind": "deprecated", "version": null, "message": "no longer kept up", "replacement": "acme/jet" },
+                        ],
+                    },
+                ],
+            })
+        );
+        // nothing applies: an empty list, and no graph names nothing
+        let quiet = vec![Vec::new(); lock.packages.len()];
+        assert_eq!(
+            document(&lock.packages, &quiet, None),
+            json!({ "version": 1, "packages": [] })
+        );
     }
 
     #[test]

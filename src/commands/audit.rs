@@ -12,6 +12,9 @@ pub struct AuditArgs {
     /// Also exit with an error when an item of this kind applies, such as `--deny yanked`
     #[arg(long, value_enum, value_delimiter = ',', value_name = "KIND")]
     pub deny: Vec<Deny>,
+    /// Print the list as one JSON document on stdout; the exit code stays the same
+    #[arg(long)]
+    pub json: bool,
 }
 
 /** lists the security notices and the yanks that apply to ember.lock,
@@ -24,6 +27,7 @@ pub fn run(args: AuditArgs) -> Result<(), Error> {
         |kind| matches!(kind, Kind::Security | Kind::Yanked) || deny.contains(&kind),
         &deny,
         "No security notice or yanked version applies to the installed packages",
+        args.json,
     )
 }
 

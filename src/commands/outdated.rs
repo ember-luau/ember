@@ -14,6 +14,9 @@ pub struct OutdatedArgs {
     /// Fetch the indices even if they were refreshed recently
     #[arg(long)]
     pub refresh: bool,
+    /// Print every registry dependency as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// one dependency's versions: what is locked, what its requirement allows, what is out.
@@ -97,6 +100,9 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
         });
     }
 
+    if args.json {
+        return ui::print_json(&document(&rows));
+    }
     let behind: Vec<&Row> = rows.iter().filter(|row| row.behind()).collect();
     if behind.is_empty() {
         ui::print_success("Every dependency is up to date");
@@ -111,6 +117,26 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
         if behind.len() == 1 { "has" } else { "have" },
     );
     Ok(())
+}
+
+/** the `--json` table: every registry dependency, by alias, also the
+ones that are up to date, with `behind` as the text decides it. */
+fn document(rows: &[Row]) -> serde_json::Value {
+    let text = |version: &Option<semver::Version>| version.as_ref().map(ToString::to_string);
+    let rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "alias": row.alias,
+                "name": row.name,
+                "current": text(&row.current),
+                "wanted": text(&row.wanted),
+                "latest": text(&row.latest),
+                "behind": row.behind(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "version": ui::JSON_VERSION, "dependencies": rows })
 }
 
 /// the newest version ember.lock holds for `name`, across its contexts.
@@ -197,6 +223,37 @@ mod tests {
             wanted: parse(wanted),
             latest: parse(latest),
         }
+    }
+
+    /// the `--json` shape of `embr outdated`: every row, behind or not.
+    #[test]
+    fn the_json_table_holds_every_registry_dependency() {
+        let rows = [
+            row(Some("1.2.0"), Some("1.3.0"), Some("2.0.0")),
+            row(Some("1.2.0"), Some("1.2.0"), Some("1.2.0")),
+            row(None, None, None),
+        ];
+        let entry = |current, wanted, latest, behind| {
+            serde_json::json!({
+                "alias": "Thing",
+                "name": "acme/thing",
+                "current": current,
+                "wanted": wanted,
+                "latest": latest,
+                "behind": behind,
+            })
+        };
+        assert_eq!(
+            document(&rows),
+            serde_json::json!({
+                "version": 1,
+                "dependencies": [
+                    entry(Some("1.2.0"), Some("1.3.0"), Some("2.0.0"), true),
+                    entry(Some("1.2.0"), Some("1.2.0"), Some("1.2.0"), false),
+                    entry(None, None, None, false),
+                ],
+            })
+        );
     }
 
     #[test]

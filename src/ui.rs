@@ -345,6 +345,25 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
+/** the shape version of every `--json` document, its top-level
+`"version"`. a change that can break a reader of a shape raises it. */
+pub const JSON_VERSION: u32 = 1;
+
+/** prints `document`, the one JSON document of a `--json` run, to stdout.
+no colour, progress or other line goes to stdout in that run; the
+spinners and warnings go to stderr. a closed pipe is not an error. */
+pub fn print_json(document: &serde_json::Value) -> Result<(), Error> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let written = serde_json::to_writer_pretty(&mut out, document)
+        .map_err(std::io::Error::from)
+        .and_then(|()| writeln!(out));
+    match written {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        written => Ok(written?),
+    }
+}
+
 /// dimmed "Done in 142ms" line.
 pub fn print_elapsed(duration: Duration) {
     println!(

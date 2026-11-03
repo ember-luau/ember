@@ -37,7 +37,11 @@ pub enum TemplateCommand {
 
     /// List the saved templates
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// Print the list as one JSON document on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Show the files of a saved template and the project it came from
     Show {
@@ -74,7 +78,7 @@ pub enum TemplateCommand {
 pub fn run(command: TemplateCommand) -> Result<(), Error> {
     match command {
         TemplateCommand::Save { name, force } => save(&name, force),
-        TemplateCommand::List => list(),
+        TemplateCommand::List { json } => list(json),
         TemplateCommand::Show { name } => show(&name),
         TemplateCommand::Remove { name } => remove(&name),
         TemplateCommand::Publish {
@@ -182,8 +186,23 @@ fn save(name: &str, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn list() -> Result<(), Error> {
+fn list(json: bool) -> Result<(), Error> {
     let names = saved()?;
+    if json {
+        let dir = paths::templates_dir()?;
+        let templates: Vec<serde_json::Value> = names
+            .iter()
+            .map(|name| {
+                let source = meta(&dir.join(name)).map(|meta| meta.source);
+                serde_json::json!({ "name": name, "source": source })
+            })
+            .collect();
+        return ui::print_json(&serde_json::json!({
+            "version": ui::JSON_VERSION,
+            "folder": dir,
+            "templates": templates,
+        }));
+    }
     if names.is_empty() {
         println!("No templates saved. Save one with `embr template save <name>`");
         return Ok(());

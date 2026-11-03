@@ -136,6 +136,19 @@ pub enum Kind {
     Notice,
 }
 
+impl Kind {
+    /// the label of a line, also the `kind` of a `--json` item.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Security => "security",
+            Kind::Warning => "warning",
+            Kind::Deprecated => "deprecated",
+            Kind::Yanked => "yanked",
+            Kind::Notice => "notice",
+        }
+    }
+}
+
 /// one line of the install block or of `embr notices`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
@@ -152,21 +165,20 @@ pub struct Item {
 }
 
 impl Item {
+    /// the message or the reason as embr prints it, with no escape sequence.
+    pub fn message(&self) -> String {
+        ui::strip_controls(&self.text).trim().to_string()
+    }
+
     /** the line, from the kind on: `warning: scope/name@1.2.0: text`. the
     package part is left out when `with_package` is false, for a list that
     heads each package. a message of more lines goes on under the first,
     two spaces in. */
     pub fn line(&self, with_package: bool) -> String {
-        let label = match self.kind {
-            Kind::Security => "security",
-            Kind::Warning => "warning",
-            Kind::Deprecated => "deprecated",
-            Kind::Yanked => "yanked",
-            Kind::Notice => "notice",
-        };
+        let label = self.kind.as_str();
         let mut text = match self.kind {
             Kind::Yanked => "the owners withdrew this version, so new installs skip it".to_string(),
-            _ => ui::strip_controls(&self.text).trim().to_string(),
+            _ => self.message(),
         };
         if let Some(replacement) = &self.replacement {
             // "Old.", so not "Old., use"

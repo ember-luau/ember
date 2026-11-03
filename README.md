@@ -272,6 +272,27 @@ notice: acme/rocket: the docs moved to rocket.dev
 The notices are in the index, so they cost no request. embr removes escape
 sequences and control characters from them before it prints them.
 
+## `--json`: output for scripts
+
+`embr info`, `embr tree`, `embr why`, `embr outdated`, `embr notices`,
+`embr audit`, `embr search`, `embr tool list` and `embr template list` take
+`--json`. The command then prints one JSON document on stdout, with no
+colour and no progress line. Warnings and errors go to stderr.
+
+```sh
+embr audit --json > audit.json      # exits with 1 when a security notice applies
+embr outdated --json | jq '.dependencies[] | select(.behind)'
+```
+
+- Each document has `"version": 1` at the top. A change that can break a
+  reader of a shape raises the number.
+- The field names are snake_case. Each field of a shape is always there,
+  and a field with no value is `null`.
+- The exit code is the one of the text mode. A failed command prints no
+  document, and its error goes to stderr.
+
+The docs page "JSON output" on emberpm.dev gives the shape of each command.
+
 ## One package, several targets
 
 A package can ship one release for each target. Write one `[[target]]`
