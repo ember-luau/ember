@@ -40,8 +40,11 @@ pub struct AddArgs {
     /// The text: at most 500 characters on at most 5 lines
     pub message: String,
     /// Post a warning, which shows on each install, not a notice
-    #[arg(long)]
+    #[arg(long, conflicts_with = "security")]
     pub warning: bool,
+    /// Post a security notice for a known vulnerability or a malicious version. It shows on each install, and `embr audit` fails on it
+    #[arg(long)]
+    pub security: bool,
     /// The versions that it covers, as a semver range such as ">=1.0.0, <1.3.0"; all versions when left out
     #[arg(long, alias = "range", value_name = "RANGE")]
     pub versions: Option<String>,
@@ -58,6 +61,7 @@ pub struct RemoveArgs {
 /// a kind of item that `--deny` refuses.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deny {
+    Security,
     Warnings,
     Deprecations,
     Yanked,
@@ -65,8 +69,9 @@ pub enum Deny {
 }
 
 impl Deny {
-    fn kind(self) -> Kind {
+    pub(crate) fn kind(self) -> Kind {
         match self {
+            Deny::Security => Kind::Security,
             Deny::Warnings => Kind::Warning,
             Deny::Deprecations => Kind::Deprecated,
             Deny::Yanked => Kind::Yanked,
@@ -79,37 +84,72 @@ pub fn run(args: NoticesArgs) -> Result<(), Error> {
     match args.command {
         Some(NoticesCommand::Add(add)) => post(add),
         Some(NoticesCommand::Remove(remove)) => take(remove),
-        None => list(&args.deny),
+        None => {
+            let deny: Vec<Kind> = args.deny.iter().map(|deny| deny.kind()).collect();
+            let quiet = "The installed packages have no notices, warnings, deprecations or yanks";
+            list(|_| true, &deny, quiet)
+        }
     }
 }
 
-/** every notice, warning, deprecation and yank of the installed packages,
-direct and transitive, by package. it exits 0 unless `--deny` names a
-kind that applies, so CI can fail on it. */
-fn list(deny: &[Deny]) -> Result<(), Error> {
+/** the items of the installed packages, direct and transitive, by
+package: each one of a kind that `shown` takes. it exits 0 unless an
+item of a kind in `deny` applies, so CI can fail on it. `quiet` is the
+line when no item shows. `embr notices` shows every kind, and `embr
+audit` shows the security notices and the yanks. */
+pub(crate) fn list(shown: impl Fn(Kind) -> bool, deny: &[Kind], quiet: &str) -> Result<(), Error> {
     let (manifest, lock) = tree::load()?;
     let mut problems = Vec::new();
-    let items = ui::with_spinner("Reading the indices", || {
+    let mut items = ui::with_spinner("Reading the indices", || {
         Ok(notices::gather(&lock.packages, true, &mut problems))
     })?;
     for problem in &problems {
         eprintln!("warning: embr cannot read {}", ui::printable(problem));
     }
+    for items in &mut items {
+        items.retain(|item| shown(item.kind));
+    }
     let by = tree::brought_in_by(&manifest, &lock, Path::new(""));
-    print!("{}", describe(&lock.packages, &items, by.as_deref()));
+    print!("{}", describe(&lock.packages, &items, by.as_deref(), quiet));
 
     let denied: BTreeSet<&Item> = items
         .iter()
         .flatten()
-        .filter(|item| deny.iter().any(|deny| deny.kind() == item.kind))
+        .filter(|item| deny.contains(&item.kind))
         .collect();
-    match denied.len() {
-        0 => Ok(()),
-        count => Err(Error::NoticesDenied(format!(
-            "{count} item{} above {} of a kind that --deny names",
-            ui::plural(count),
-            if count == 1 { "is" } else { "are" }
-        ))),
+    if denied.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::NoticesDenied(denial(&denied)))
+    }
+}
+
+/** the error of a check that fails, which counts each kind:
+"1 security notice and 2 warnings apply". */
+fn denial(denied: &BTreeSet<&Item>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (kind, one, many) in [
+        (Kind::Security, "security notice", "security notices"),
+        (Kind::Warning, "warning", "warnings"),
+        (Kind::Deprecated, "deprecation", "deprecations"),
+        (Kind::Yanked, "yanked version", "yanked versions"),
+        (Kind::Notice, "notice", "notices"),
+    ] {
+        match denied.iter().filter(|item| item.kind == kind).count() {
+            0 => {}
+            1 => parts.push(format!("1 {one}")),
+            count => parts.push(format!("{count} {many}")),
+        }
+    }
+    let verb = if denied.len() == 1 {
+        "applies"
+    } else {
+        "apply"
+    };
+    match parts.split_last() {
+        Some((last, [])) => format!("{last} {verb}"),
+        Some((last, rest)) => format!("{} and {last} {verb}", rest.join(", ")),
+        None => String::new(),
     }
 }
 
@@ -126,7 +166,12 @@ struct Group<'a> {
 /** the list text. one heading for each package and version, which names
 the manifest entries that bring it in, then its items. a package in two
 environments shows once. */
-fn describe(packages: &[LockedPackage], items: &[Vec<Item>], by: Option<&[Vec<String>]>) -> String {
+fn describe(
+    packages: &[LockedPackage],
+    items: &[Vec<Item>],
+    by: Option<&[Vec<String>]>,
+    quiet: &str,
+) -> String {
     let mut groups: BTreeMap<(String, String), Group> = BTreeMap::new();
     for (index, (package, items)) in packages.iter().zip(items).enumerate() {
         if items.is_empty() {
@@ -141,8 +186,7 @@ fn describe(packages: &[LockedPackage], items: &[Vec<Item>], by: Option<&[Vec<St
         group.items.extend(items);
     }
     if groups.is_empty() {
-        return "The installed packages have no notices, warnings, deprecations or yanks\n"
-            .to_string();
+        return format!("{quiet}\n");
     }
 
     let mut out = String::new();
@@ -171,7 +215,11 @@ fn describe(packages: &[LockedPackage], items: &[Vec<Item>], by: Option<&[Vec<St
 fn post(args: AddArgs) -> Result<(), Error> {
     let name = args.package.trim().to_lowercase();
     split_package_name(&name)?;
-    let level = if args.warning { "warning" } else { "notice" };
+    let level = match (args.security, args.warning) {
+        (true, _) => "security",
+        (false, true) => "warning",
+        (false, false) => "notice",
+    };
     let versions = args.versions.as_deref().map(str::trim);
     let id = as_owner(|token| {
         ui::with_spinner("Contacting the registry", || {
@@ -182,11 +230,19 @@ fn post(args: AddArgs) -> Result<(), Error> {
         Some(range) => format!("{name} {range}"),
         None => name.clone(),
     };
-    ui::print_success(&format!("Posted a {level} on {on}"));
-    if args.warning {
-        println!("Each install shows it.");
-    } else {
-        println!("An install that adds or updates the package shows it.");
+    match level {
+        "security" => {
+            ui::print_success(&format!("Posted a security notice on {on}"));
+            println!("Each install shows it, and `embr audit` fails on it.");
+        }
+        "warning" => {
+            ui::print_success(&format!("Posted a warning on {on}"));
+            println!("Each install shows it.");
+        }
+        _ => {
+            ui::print_success(&format!("Posted a notice on {on}"));
+            println!("An install that adds or updates the package shows it.");
+        }
     }
     println!("To remove it: embr notices remove {name} {id}");
     Ok(())
@@ -245,6 +301,8 @@ mod tests {
         }
     }
 
+    const QUIET: &str = "Nothing";
+
     #[test]
     fn the_list_groups_by_package_and_names_what_brings_it_in() {
         let lock: Lockfile = toml::from_str(LOCK).unwrap();
@@ -252,6 +310,12 @@ mod tests {
             item(Kind::Notice, "acme/fuel", None, "docs moved"),
             item(Kind::Yanked, "acme/fuel", Some("0.2.0"), ""),
             item(Kind::Warning, "acme/fuel", Some("0.2.0"), "leaks\nupdate"),
+            item(
+                Kind::Security,
+                "acme/fuel",
+                Some("0.2.0"),
+                "sends the place file away",
+            ),
         ];
         let rocket = vec![Item {
             replacement: Some("acme/jet".to_string()),
@@ -266,8 +330,9 @@ mod tests {
             vec!["quiet".to_string()],
         ];
         assert_eq!(
-            plain(&describe(&lock.packages, &items, Some(&by))),
+            plain(&describe(&lock.packages, &items, Some(&by), QUIET)),
             "acme/fuel@0.2.0 (through rocket, server-tools)\n  \
+               security: sends the place file away\n  \
                warning: leaks\n    update\n  \
                yanked: the owners withdrew this version, so new installs skip it\n  \
                notice: docs moved\n\
@@ -275,7 +340,7 @@ mod tests {
                deprecated: no longer kept up, use acme/jet instead\n"
         );
         // with no installed graph, a transitive package names nothing
-        let text = plain(&describe(&lock.packages, &items, None));
+        let text = plain(&describe(&lock.packages, &items, None, QUIET));
         assert!(text.starts_with("acme/fuel@0.2.0\n"), "{text}");
     }
 
@@ -283,9 +348,26 @@ mod tests {
     fn a_quiet_project_says_so() {
         let lock: Lockfile = toml::from_str(LOCK).unwrap();
         let items = vec![Vec::new(); lock.packages.len()];
+        assert_eq!(describe(&lock.packages, &items, None, QUIET), "Nothing\n");
+    }
+
+    #[test]
+    fn a_failed_check_counts_each_kind() {
+        let security = item(Kind::Security, "acme/fuel", Some("0.2.0"), "x");
+        let other = item(Kind::Security, "acme/rocket", None, "y");
+        let warning = item(Kind::Warning, "acme/fuel", None, "z");
+        let yank = item(Kind::Yanked, "acme/fuel", Some("0.2.0"), "");
         assert_eq!(
-            describe(&lock.packages, &items, None),
-            "The installed packages have no notices, warnings, deprecations or yanks\n"
+            denial(&BTreeSet::from([&security])),
+            "1 security notice applies"
+        );
+        assert_eq!(
+            denial(&BTreeSet::from([&security, &other])),
+            "2 security notices apply"
+        );
+        assert_eq!(
+            denial(&BTreeSet::from([&security, &warning, &yank])),
+            "1 security notice, 1 warning and 1 yanked version apply"
         );
     }
 
@@ -297,8 +379,11 @@ mod tests {
             #[command(flatten)]
             args: NoticesArgs,
         }
-        let cli = Cli::try_parse_from(["embr", "--deny", "warnings,yanked"]).unwrap();
-        assert_eq!(cli.args.deny, [Deny::Warnings, Deny::Yanked]);
+        let cli = Cli::try_parse_from(["embr", "--deny", "security,warnings,yanked"]).unwrap();
+        assert_eq!(
+            cli.args.deny,
+            [Deny::Security, Deny::Warnings, Deny::Yanked]
+        );
         assert!(Cli::try_parse_from(["embr", "--deny", "errors"]).is_err());
         let cli = Cli::try_parse_from([
             "embr",
@@ -316,6 +401,11 @@ mod tests {
         assert_eq!(
             (add.message.as_str(), add.warning, add.versions.as_deref()),
             ("leaks", true, Some("^1"))
+        );
+        // a notice has one level
+        assert!(Cli::try_parse_from(["embr", "add", "a/b", "x", "--security"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["embr", "add", "a/b", "x", "--security", "--warning"]).is_err()
         );
     }
 }

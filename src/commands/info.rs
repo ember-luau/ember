@@ -158,6 +158,7 @@ fn describe(
     // every notice, with the id that `embr notices remove` takes
     for notice in &meta.notices {
         let level = match notice.level {
+            Level::Security => "Security".red(),
             Level::Warning => "Warning".yellow(),
             Level::Notice => "Notice".stylize(),
         };
@@ -563,6 +564,12 @@ versions = "<2.0.0"
 id = "bbbbbbbbbbbb"
 level = "notice"
 message = "docs moved\u001b[2J"
+
+[[meta.notices]]
+id = "cccccccccccc"
+level = "security"
+message = "1.0.0 sends the place file to a remote host"
+versions = "=1.0.0"
 "#;
         let (entries, meta) = entries(file);
         let text = plain(&describe(
@@ -576,7 +583,8 @@ message = "docs moved\u001b[2J"
             text.contains(
                 "Deprecated: no longer kept up. Use acme/jet instead\n\
                  Warning aaaaaaaaaaaa for <2.0.0: 1.x leaks memory\n  update to 2.0\n\
-                 Notice bbbbbbbbbbbb: docs moved\n"
+                 Notice bbbbbbbbbbbb: docs moved\n\
+                 Security cccccccccccc for =1.0.0: 1.0.0 sends the place file to a remote host\n"
             ),
             "{text}"
         );

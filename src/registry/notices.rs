@@ -12,7 +12,7 @@ replacement = "acme/jet"
 
 [[meta.notices]]
 id = "3f9c0a1b2c4d"
-level = "warning"            # or "notice"
+level = "warning"            # or "notice", or "security"
 message = "1.x leaks memory"
 versions = ">=1.0.0, <2.0.0" # absent: every version
 posted_by = "evaera"
@@ -33,11 +33,14 @@ use crossterm::style::Stylize;
 use std::collections::{BTreeSet, HashMap};
 use toml::Value;
 
-/// how loud a notice is. a warning shows on every install.
+/** how loud a notice is. a warning and a security notice show on every
+install. a security notice names a known vulnerability or a malicious
+version, and `embr audit` fails on it. */
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Notice,
     Warning,
+    Security,
 }
 
 /// one `[[meta.notices]]` entry.
@@ -68,6 +71,7 @@ impl Notice {
             id: text("id").unwrap_or_default(),
             level: match text("level").as_deref() {
                 Some("notice") => Level::Notice,
+                Some("security") => Level::Security,
                 _ => Level::Warning,
             },
             message: text("message").filter(|message| !message.trim().is_empty())?,
@@ -125,6 +129,7 @@ impl Meta {
 /// what one line says. the order is the order of the install block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
+    Security,
     Warning,
     Deprecated,
     Yanked,
@@ -153,6 +158,7 @@ impl Item {
     two spaces in. */
     pub fn line(&self, with_package: bool) -> String {
         let label = match self.kind {
+            Kind::Security => "security",
             Kind::Warning => "warning",
             Kind::Deprecated => "deprecated",
             Kind::Yanked => "yanked",
@@ -175,6 +181,7 @@ impl Item {
             (true, None) => format!("{label}: {}: {text}", self.package),
         };
         match self.kind {
+            Kind::Security => line.red().to_string(),
             Kind::Warning | Kind::Deprecated | Kind::Yanked => line.yellow().to_string(),
             Kind::Notice => line,
         }
@@ -237,6 +244,7 @@ pub fn items(
 
     for notice in meta.notices.iter().filter(|notice| notice.covers(version)) {
         let kind = match notice.level {
+            Level::Security => Kind::Security,
             Level::Warning => Kind::Warning,
             Level::Notice => Kind::Notice,
         };
@@ -311,11 +319,11 @@ pub fn gather(
         .collect()
 }
 
-/** the install block: every warning and deprecation, and the notices of
-the packages that this install added or changed, so a repeat install
-stays quiet about them. a yank is left out, the resolver says it when it
-keeps a yanked pin. one line for each item, also when a package sits in
-two environments. */
+/** the install block: every security notice, warning and deprecation,
+and the notices of the packages that this install added or changed, so
+a repeat install stays quiet about them. a yank is left out, the
+resolver says it when it keeps a yanked pin. one line for each item,
+also when a package sits in two environments. */
 pub fn install_lines(items: &[Vec<Item>], fresh: &BTreeSet<String>) -> Vec<String> {
     let shown: BTreeSet<&Item> = items
         .iter()
@@ -323,7 +331,7 @@ pub fn install_lines(items: &[Vec<Item>], fresh: &BTreeSet<String>) -> Vec<Strin
         .filter(|item| match item.kind {
             Kind::Yanked => false,
             Kind::Notice => fresh.contains(&item.package),
-            Kind::Warning | Kind::Deprecated => true,
+            Kind::Security | Kind::Warning | Kind::Deprecated => true,
         })
         .collect();
     shown.into_iter().map(|item| item.line(true)).collect()
@@ -432,6 +440,12 @@ id = "dddddddddddd"
 level = "warning"
 message = "a range that does not parse"
 versions = "one point two"
+
+[[meta.notices]]
+id = "eeeeeeeeeeee"
+level = "security"
+message = "1.0.0 sends the place file to a remote host"
+versions = "=1.0.0"
 "#;
 
     fn file() -> Value {
@@ -467,10 +481,19 @@ versions = "one point two"
         assert_eq!(meta.replacement.as_deref(), Some("acme/jet"));
         // the notice with a range that does not parse drops
         let ids: Vec<&str> = meta.notices.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(ids, ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]);
+        assert_eq!(
+            ids,
+            [
+                "aaaaaaaaaaaa",
+                "bbbbbbbbbbbb",
+                "cccccccccccc",
+                "eeeeeeeeeeee"
+            ]
+        );
         assert_eq!(meta.notices[0].posted_by, "evaera");
         // an unknown level is as loud as a warning
         assert_eq!(meta.notices[2].level, Level::Warning);
+        assert_eq!(meta.notices[3].level, Level::Security);
         // a file without [meta], and pesde's empty "not deprecated"
         let none = Meta::of(&toml::from_str("[meta]\ndeprecated = \"\"\n").unwrap());
         assert!(none.deprecated.is_none() && none.notices.is_empty());
@@ -518,6 +541,7 @@ versions = "one point two"
                 "deprecated: acme/rocket@1.0.0: 1.0.0 drops events",
                 "warning: acme/rocket@1.0.0: 1.x leaks memory\n  update to 2.0",
                 "notice: acme/rocket: docs moved to rocket.dev",
+                "security: acme/rocket@1.0.0: 1.0.0 sends the place file to a remote host",
             ]
         );
         // the lune target of 1.0.0 is the yanked one
@@ -560,7 +584,7 @@ versions = "one point two"
     }
 
     #[test]
-    fn the_install_block_orders_warnings_first_and_leaves_out_yanks() {
+    fn the_install_block_orders_security_first_and_leaves_out_yanks() {
         let file = file();
         let lune = items(
             "acme/rocket",
@@ -576,9 +600,22 @@ versions = "one point two"
         assert_eq!(
             block,
             [
+                "security: acme/rocket@1.0.0: 1.0.0 sends the place file to a remote host",
                 "warning: acme/rocket@1.0.0: 1.x leaks memory\n  update to 2.0",
                 "deprecated: acme/rocket: no longer kept up, use acme/jet instead",
             ]
+        );
+        // a security line is red, so it stands out from the yellow ones
+        let security = Item {
+            kind: Kind::Security,
+            package: "acme/rocket".to_string(),
+            version: None,
+            text: "x".to_string(),
+            replacement: None,
+        };
+        assert_eq!(
+            security.line(true),
+            "security: acme/rocket: x".red().to_string()
         );
     }
 
