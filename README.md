@@ -66,6 +66,52 @@ embr self install  # still worth running: tool shims live in ~/.ember/bin
 The package puts `embr` in `/usr/bin`, and pacman updates it with each
 release.
 
+### Homebrew (macOS and Linux)
+
+Once the tap `ember-luau/homebrew-tap` is set up:
+
+```sh
+brew install ember-luau/tap/embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
+```
+
+`brew upgrade embr` updates it.
+
+### Scoop (Windows)
+
+Once the bucket `ember-luau/scoop-bucket` is set up:
+
+```powershell
+scoop bucket add ember-luau https://github.com/ember-luau/scoop-bucket
+scoop install ember-luau/embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
+```
+
+`scoop update embr` updates it.
+
+### winget (Windows)
+
+Once winget has the package `ember-luau.embr`:
+
+```powershell
+winget install ember-luau.embr
+embr self install    # still worth running: tool shims live in ~/.ember/bin
+```
+
+`winget upgrade ember-luau.embr` updates it.
+
+### Nix
+
+The flake builds embr from source:
+
+```sh
+nix run github:ember-luau/ember -- --version           # the newest commit
+nix profile install github:ember-luau/ember/v0.14.0    # a release, from 0.14.0 on
+```
+
+Pinned tools run through shims in `~/.ember/bin`, so add that folder to
+your PATH. `nix profile upgrade` updates a profile install.
+
 ### VS Code IntelliSense
 
 ```sh
