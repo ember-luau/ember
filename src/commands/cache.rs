@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Subcommand, Debug)]
 pub enum CacheCommand {
-    /// Delete the downloaded-archive, index and tool shorthand caches under ~/.ember
+    /// Delete the downloaded-archive, index, git and tool shorthand caches under ~/.ember
     Clean,
 }
 
@@ -17,13 +17,17 @@ pub fn run(command: CacheCommand) -> Result<(), Error> {
     }
 }
 
-/** the caches go: archives, index clones and the registry's tool
+/** the caches go: archives, index clones, git dependency clones and the registry's tool
 shorthands. removing the index root also sweeps orphaned index dirs left
 behind by older embr versions that keyed them differently. everything here
 re-downloads on demand. */
 fn clean() -> Result<(), Error> {
     let mut freed = 0;
-    for root in [paths::archive_cache_root()?, paths::index_cache_dir()?] {
+    for root in [
+        paths::archive_cache_root()?,
+        paths::index_cache_dir()?,
+        paths::git_cache_dir()?,
+    ] {
         if root.exists() {
             freed += dir_size(&root);
             fs::remove_dir_all(&root)?;
@@ -39,7 +43,7 @@ fn clean() -> Result<(), Error> {
         println!("Nothing cached");
     } else {
         ui::print_success(&format!(
-            "Removed the archive, index and shorthand caches ({:.1} MiB)",
+            "Removed the archive, index, git and shorthand caches ({:.1} MiB)",
             freed as f64 / (1024.0 * 1024.0)
         ));
     }

@@ -3,10 +3,11 @@ use crate::net::{auth, provenance, registry};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::{
     DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Manifest, Target, is_github_username,
-    split_package_name, workspace_version_req,
+    manifest_in, split_package_name, workspace_version_req,
 };
 use crate::project::package;
 use crate::project::workspace::{self, Workspace};
+use crate::registry::index::git::Reference;
 use crate::registry::{local, pack};
 use crate::ui;
 use clap::Args;
@@ -185,6 +186,7 @@ fn publish_project(
     /* workspace deps become registry ones in the archive's manifest,
     the on-disk ember.toml is never touched */
     convert_workspace_dependencies(&mut manifest, root)?;
+    convert_local_dependencies(&mut manifest, root)?;
     strip_local_tables(&mut manifest);
 
     let targets: Vec<Target> = std::mem::take(&mut manifest.targets)
@@ -462,6 +464,112 @@ fn convert_workspace_dependencies(
     Ok(())
 }
 
+/** rewrites path and git dependencies into registry ones, Cargo's rule. a
+project that installs the package cannot reach this computer's folders or
+a commit it never named, so the entry needs a registry `version`, and the
+archive keeps only the registry part. its `name` is the entry's, else the
+package's own. a dev dependency without a `version` drops out, since only
+this project's tests use it. */
+fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Result<(), Error> {
+    for (dev, table) in [
+        (false, &mut manifest.dependencies),
+        (true, &mut manifest.dev_dependencies),
+        (false, &mut manifest.peer_dependencies),
+    ] {
+        let mut dropped = Vec::new();
+        for (alias, dependency) in table.iter_mut() {
+            let (kind, name, version, index, target, entry) = match dependency {
+                Dependency::Path {
+                    name,
+                    version,
+                    index,
+                    target,
+                    entry,
+                    ..
+                } => ("path", name, version, index, target, entry),
+                Dependency::Git {
+                    name,
+                    version,
+                    index,
+                    target,
+                    entry,
+                    ..
+                } => ("git", name, version, index, target, entry),
+                Dependency::Registry { .. } | Dependency::Workspace { .. } => continue,
+            };
+            let Some(version) = version.clone() else {
+                if dev {
+                    dropped.push(alias.clone());
+                    continue;
+                }
+                return Err(Error::PublishLocalDependency {
+                    alias: alias.clone(),
+                    kind,
+                });
+            };
+            let (name, index, target, entry) =
+                (name.clone(), index.clone(), target.clone(), entry.clone());
+            let name = match name {
+                Some(name) => name,
+                None => own_name(alias, dependency, project_dir)?,
+            };
+            *dependency = Dependency::Registry {
+                name,
+                version,
+                index,
+                target,
+                entry,
+                key: None,
+                optional: false,
+                // a path or git entry takes no features yet
+                features: Vec::new(),
+                default_features: true,
+            };
+        }
+        for alias in dropped {
+            table.remove(&alias);
+        }
+    }
+    Ok(())
+}
+
+/// the [package] name of a path folder or of a git commit, for [`convert_local_dependencies`].
+fn own_name(alias: &str, dependency: &Dependency, project_dir: &Path) -> Result<String, Error> {
+    let (manifest, at) = match dependency {
+        Dependency::Path { path, .. } => {
+            let file = manifest_in(&workspace::lexical(&project_dir.join(path)));
+            if !file.exists() {
+                return Err(Error::PathDependencyMissing {
+                    alias: alias.to_string(),
+                    path: path.clone(),
+                });
+            }
+            (Manifest::load_from(&file)?, path.clone())
+        }
+        Dependency::Git {
+            git,
+            rev,
+            tag,
+            branch,
+            ..
+        } => {
+            let reference = Reference::of(rev.as_deref(), tag.as_deref(), branch.as_deref());
+            let (_, text) = crate::registry::index::git::locate(git, &reference, None, false)?;
+            (Manifest::parse(&text)?, git.clone())
+        }
+        Dependency::Registry { .. } | Dependency::Workspace { .. } => {
+            unreachable!("only path and git entries need a name")
+        }
+    };
+    manifest
+        .name()
+        .map(str::to_string)
+        .ok_or_else(|| Error::LocalNameMissing {
+            alias: alias.to_string(),
+            at,
+        })
+}
+
 /** tables that never travel, dropped from the archive's manifest.
 [overrides] is only ever consulted on the installing project, and its
 alias-form values refer to aliases only this manifest has. [patches] points
@@ -672,6 +780,65 @@ mod tests {
             Err(Error::NotInWorkspace(_))
         ));
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** Cargo's rule: a path or git dependency publishes only with a
+    registry `version`, and then as its registry part alone. the name comes
+    from the entry, else from the folder. a dev dependency without one drops
+    out. */
+    #[test]
+    fn path_and_git_dependencies_publish_as_their_registry_part() {
+        let base = std::env::temp_dir().join("embr-test-publish-local");
+        let _ = fs::remove_dir_all(&base);
+        let lib = base.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(
+            lib.join("ember.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.2.0\"\n",
+        )
+        .unwrap();
+        let project = base.join("game");
+        let parse = |text: &str| -> Manifest { toml::from_str(text).unwrap() };
+
+        let mut manifest = parse(
+            "[dependencies]\n\
+             lib = { path = \"../lib\", version = \"^1.2.0\", entry = \"src\" }\n\
+             ui = { git = \"https://github.com/acme/ui\", tag = \"v2.0.0\", name = \"acme/ui\", version = \"^2\", index = \"mine\" }\n\n\
+             [dev-dependencies]\nspec = { path = \"../spec\" }\n",
+        );
+        convert_local_dependencies(&mut manifest, &project).unwrap();
+        assert!(matches!(
+            &manifest.dependencies["lib"],
+            Dependency::Registry { name, version, entry: Some(entry), .. }
+                if name == "acme/lib" && version == "^1.2.0" && entry == "src"
+        ));
+        assert!(matches!(
+            &manifest.dependencies["ui"],
+            Dependency::Registry { name, index: Some(index), .. } if name == "acme/ui" && index == "mine"
+        ));
+        assert!(manifest.dev_dependencies.is_empty());
+        let serialized = toml::to_string(&manifest).unwrap();
+        assert!(
+            !serialized.contains("path") && !serialized.contains("git"),
+            "{serialized}"
+        );
+
+        for kind in ["path = \"../lib\"", "git = \"https://github.com/acme/ui\""] {
+            let mut manifest = parse(&format!("[dependencies]\nlib = {{ {kind} }}\n"));
+            let error = convert_local_dependencies(&mut manifest, &project).unwrap_err();
+            assert!(
+                matches!(&error, Error::PublishLocalDependency { alias, .. } if alias == "lib"),
+                "{error}"
+            );
+        }
+        let mut manifest = parse("[peer-dependencies]\nlib = { path = \"../lib\" }\n");
+        assert_eq!(
+            convert_local_dependencies(&mut manifest, &project)
+                .unwrap_err()
+                .to_string(),
+            "Dependency 'lib' is a path dependency without a registry `version`, so a project that installs this package cannot get it. Add `version` to the entry: publish then writes the registry part (`name`, `version`, `index`) in place of the path, as Cargo does"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

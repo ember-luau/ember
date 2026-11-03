@@ -1,14 +1,17 @@
 use crate::error::Error;
+use crate::project::lockfile::Lockfile;
+use crate::project::manifest::manifest_in;
 use crate::project::manifest::{
     DEFAULT_INDEX_URL, Language, Manifest, features, parse_version_req, split_package_name, takes,
 };
 use crate::registry::index::pesde::{self, Candidate};
-use crate::registry::index::{Index, Refresh, hidden};
+use crate::registry::index::{DownloadSource, Index, Refresh, git, hidden};
 use crate::registry::notices::{Level, Meta};
 use crate::ui;
 use clap::Args;
 use crossterm::style::Stylize;
 use serde_json::json;
+use std::path::Path;
 use toml::Value;
 
 #[derive(Args, Debug)]
@@ -35,6 +38,17 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
     let name = args.package.trim().to_lowercase();
     // a bad name fails here, before the index clone
     split_package_name(&name)?;
+    // a path or git dependency of this project is in no index
+    if args.version.is_none()
+        && args.index.is_none()
+        && let Some((source, manifest)) = local(&name)
+    {
+        if args.json {
+            return ui::print_json(&local_document(&name, &source, &manifest));
+        }
+        print!("{}", describe_local(&name, &source, &manifest));
+        return Ok(());
+    }
     /* outside a project an empty manifest stands in, so --index takes
     `ember` and `local`, and the default index is this computer's */
     let manifest: Manifest = match Manifest::load() {
@@ -79,6 +93,89 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
     }
     print!("{}", describe(&name, &entries, shown, &meta, &add));
     Ok(())
+}
+
+/** the source and the own ember.toml of `name` when ember.lock installs
+it from a path or a git commit. None when the lock has no such package. */
+fn local(name: &str) -> Option<(DownloadSource, Value)> {
+    let lock = Lockfile::load().ok()?;
+    let package = lock.packages.into_iter().find(|package| {
+        package.name.eq_ignore_ascii_case(name) && package.source.local_label().is_some()
+    })?;
+    let text = match &package.source {
+        DownloadSource::Path { path } => {
+            std::fs::read_to_string(manifest_in(Path::new(path))).ok()?
+        }
+        DownloadSource::Git { url, rev, .. } => {
+            git::locate(url, &git::Reference::Rev(rev.clone()), None, false)
+                .ok()?
+                .1
+        }
+        _ => return None,
+    };
+    Some((package.source, toml::from_str(&text).ok()?))
+}
+
+/// the info text of a path or git package: its version, its source and its dependencies.
+fn describe_local(name: &str, source: &DownloadSource, manifest: &Value) -> String {
+    let field = |key: &str| manifest.get("package")?.get(key)?.as_str();
+    let mut out = name.bold().to_string();
+    if let Some(version) = field("version") {
+        out.push_str(&format!(" {}", version.with(ui::accent())));
+    }
+    out.push('\n');
+    if let Some(description) = field("description") {
+        out.push_str(&format!("{}\n", ui::strip_controls(description).trim()));
+    }
+    let source = source.local_label().unwrap_or_default();
+    out.push_str(&format!("\n{}  {source}\n", "Source".bold()));
+    out.push_str(&dependency_sections(manifest));
+    out
+}
+
+/** the `--json` details of a path or git package, in the shape of
+[`document`]. its own ember.toml gives the fields, and the ones that only
+an index knows are null or empty. */
+fn local_document(name: &str, source: &DownloadSource, manifest: &Value) -> serde_json::Value {
+    let package = manifest.get("package");
+    let field = |key: &str| {
+        let text = package?.get(key)?.as_str()?.trim();
+        (!text.is_empty()).then(|| ui::strip_controls(text).trim().to_string())
+    };
+    let authors: Vec<&str> = package
+        .and_then(|package| package.get("authors"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let (dependencies, dev_dependencies) = dependencies_json(manifest);
+    json!({
+        "version": ui::JSON_VERSION,
+        "name": name,
+        "source": source.local_json(),
+        "deprecated": null,
+        "replacement": null,
+        "notices": [],
+        "shown": {
+            "version": field("version"),
+            "yanked": false,
+            "deprecated": null,
+            "description": field("description"),
+            "license": field("license"),
+            "repository": field("repository"),
+            "homepage": field("homepage"),
+            "authors": authors,
+            "published_at": null,
+            "published_by": null,
+            "targets": [],
+            "requires": {},
+            "dependencies": dependencies,
+            "features": feature_table(manifest),
+            "dev_dependencies": dev_dependencies,
+        },
+        "versions": [],
+    })
 }
 
 /** every entry of `name` in the index at `url`. a TTL-fresh cache that
@@ -245,21 +342,7 @@ fn describe(
         out.push_str(&format!("{}  {value}\n", format!("{label:<width$}").bold()));
     }
 
-    let (dependencies, dev_dependencies) = dependencies(entry);
-    for (title, list) in [
-        ("Dependencies", dependencies),
-        ("Features", features(entry)),
-        ("Dev dependencies", dev_dependencies),
-    ] {
-        if list.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("\n{}\n", title.bold()));
-        let width = list.iter().map(|(alias, _)| alias.len()).max().unwrap_or(0);
-        for (alias, spec) in list {
-            out.push_str(&format!("  {alias:<width$}  {spec}\n"));
-        }
-    }
+    out.push_str(&dependency_sections(entry));
 
     out.push_str(&format!("\n{}\n", "Versions".bold()));
     let mut versions: Vec<&semver::Version> = entries.iter().map(|entry| &entry.version).collect();
@@ -401,6 +484,7 @@ fn document(
     json!({
         "version": ui::JSON_VERSION,
         "name": name,
+        "source": null,
         "deprecated": clean(meta.deprecated.as_ref()),
         "replacement": meta.replacement.as_deref().map(ui::strip_controls),
         "notices": notices,
@@ -426,9 +510,9 @@ fn document(
 }
 
 /** the dependencies and dev dependencies of an entry for `--json`, read
-as [`dependencies`] reads them: `{alias, name, version, index, features,
-default_features, optional, peer}`. the `features` of the entry say which
-features gate a dependency. */
+as [`dependencies`] reads them: `{alias, name, version, source, index,
+features, default_features, optional, peer}`. the `features` of the entry
+say which features gate a dependency. */
 fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let (mut runtime, mut dev) = (Vec::new(), Vec::new());
     for (table, in_dev) in [
@@ -452,10 +536,21 @@ fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::
                 continue;
             };
             let field = |key: &str| spec.get(key).and_then(Value::as_str);
-            let name = ["name", "wally", "workspace", "repo"]
-                .into_iter()
-                .find_map(field)
-                .unwrap_or("?");
+            let name = ["name", "wally", "workspace"].into_iter().find_map(field);
+            // a git or path entry names its source, pesde's git entry a `repo`
+            let source = if let Some(url) = field("git").or_else(|| field("repo")) {
+                json!({
+                    "type": "git",
+                    "url": url,
+                    "rev": field("rev"),
+                    "tag": field("tag"),
+                    "branch": field("branch"),
+                })
+            } else if let Some(path) = field("path") {
+                json!({ "type": "path", "path": path })
+            } else {
+                serde_json::Value::Null
+            };
             let asked: Vec<&str> = spec
                 .get("features")
                 .and_then(Value::as_array)
@@ -465,8 +560,10 @@ fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::
                 .collect();
             let dependency = json!({
                 "alias": alias,
-                "name": name.strip_prefix("wally#").unwrap_or(name),
-                "version": field("version").unwrap_or("*"),
+                "name": name.map(|name| name.strip_prefix("wally#").unwrap_or(name)),
+                // a git or path entry needs no version
+                "version": field("version").or(source.is_null().then_some("*")),
+                "source": source,
                 "index": field("index"),
                 "features": asked,
                 "default_features": spec.get("default-features").and_then(Value::as_bool)
@@ -483,6 +580,27 @@ fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::
         }
     }
     (runtime, dev)
+}
+
+/// the Dependencies, Features and Dev dependencies sections of an entry or a manifest.
+fn dependency_sections(entry: &Value) -> String {
+    let mut out = String::new();
+    let (dependencies, dev_dependencies) = dependencies(entry);
+    for (title, list) in [
+        ("Dependencies", dependencies),
+        ("Features", features(entry)),
+        ("Dev dependencies", dev_dependencies),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n{}\n", title.bold()));
+        let width = list.iter().map(|(alias, _)| alias.len()).max().unwrap_or(0);
+        for (alias, spec) in list {
+            out.push_str(&format!("  {alias:<width$}  {spec}\n"));
+        }
+    }
+    out
 }
 
 /// a target as a person reads it: the environment, and the language when it is not luau.
@@ -561,13 +679,24 @@ fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
                 continue;
             };
             let field = |key: &str| spec.get(key).and_then(Value::as_str);
-            let name = ["name", "wally", "workspace", "repo"]
+            let name = ["name", "wally", "workspace"]
                 .into_iter()
                 .find_map(field)
                 .unwrap_or("?");
             // pesde writes a wally package name with a "wally#" prefix
             let name = name.strip_prefix("wally#").unwrap_or(name);
-            let mut text = format!("{name} {}", field("version").unwrap_or("*"));
+            // a git or path entry names its source, pesde's git entry a `repo`
+            let mut text = if let Some(url) = field("git").or_else(|| field("repo")) {
+                let reference = ["rev", "tag", "branch"]
+                    .into_iter()
+                    .find_map(|key| Some(format!(" {key} {}", field(key)?)))
+                    .unwrap_or_default();
+                format!("git {url}{reference}")
+            } else if let Some(path) = field("path") {
+                format!("path {path}")
+            } else {
+                format!("{name} {}", field("version").unwrap_or("*"))
+            };
             if let Some(index) = field("index") {
                 text.push_str(&format!(" (index {index})"));
             }
@@ -722,6 +851,60 @@ type = "roblox"
 download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
 "#;
 
+    /// a git or path entry, ember's or pesde's `repo`, names its source in place of a version.
+    #[test]
+    fn git_and_path_dependencies_name_their_source() {
+        let entry: Value = toml::from_str(
+            "[dependencies]\n\
+             ui = { git = \"https://github.com/acme/ui\", tag = \"v2.0.0\" }\n\
+             lib = { path = \"../lib\" }\n\
+             old = { repo = \"https://github.com/acme/old\", rev = \"abc1234\" }\n",
+        )
+        .unwrap();
+        let (runtime, _) = dependencies(&entry);
+        assert_eq!(
+            runtime,
+            [
+                ("lib".to_string(), "path ../lib".to_string()),
+                (
+                    "old".to_string(),
+                    "git https://github.com/acme/old rev abc1234".to_string()
+                ),
+                (
+                    "ui".to_string(),
+                    "git https://github.com/acme/ui tag v2.0.0".to_string()
+                ),
+            ]
+        );
+        // --json gives the source as data, and no name or version that the entry lacks
+        let (runtime, _) = dependencies_json(&entry);
+        assert_eq!(
+            runtime[0]["source"],
+            json!({ "type": "path", "path": "../lib" })
+        );
+        assert_eq!(
+            runtime[2]["source"],
+            json!({ "type": "git", "url": "https://github.com/acme/ui", "rev": null, "tag": "v2.0.0", "branch": null })
+        );
+        assert_eq!(
+            (&runtime[2]["name"], &runtime[2]["version"]),
+            (&json!(null), &json!(null))
+        );
+        let document = local_document(
+            "acme/lib",
+            &DownloadSource::Path {
+                path: "../lib".to_string(),
+            },
+            &toml::from_str("[package]\nname = \"acme/lib\"\nversion = \"0.1.0\"\n").unwrap(),
+        );
+        assert_eq!(
+            document["source"],
+            json!({ "type": "path", "path": "../lib" })
+        );
+        assert_eq!(document["shown"]["version"], "0.1.0");
+        assert_eq!(document["shown"]["dependencies"], json!([]));
+    }
+
     #[test]
     fn info_shows_the_newest_open_version_and_its_details() {
         let (entries, meta) = entries(ENTRY);
@@ -867,6 +1050,7 @@ versions = "=1.0.0"
                 "alias": alias,
                 "name": name,
                 "version": version,
+                "source": null,
                 "index": index,
                 "features": [],
                 "default_features": true,
@@ -895,6 +1079,7 @@ versions = "=1.0.0"
             json!({
                 "version": 1,
                 "name": "acme/rocket",
+                "source": null,
                 "deprecated": "use acme/jet",
                 "replacement": "acme/jet",
                 "notices": [{

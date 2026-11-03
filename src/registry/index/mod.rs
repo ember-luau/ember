@@ -1,4 +1,5 @@
 pub mod forest;
+pub mod git;
 pub mod hidden;
 pub mod pesde;
 pub mod wally;
@@ -7,7 +8,7 @@ use crate::error::Error;
 use crate::net::{http, registry};
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language};
 use crate::registry::local;
-use crate::sys::git;
+use crate::sys;
 use crate::sys::hash::{fnv1a, fnv1a_parts, sha256_hex};
 use crate::sys::paths;
 use serde::{Deserialize, Serialize};
@@ -132,6 +133,65 @@ pub enum DownloadSource {
     /** A workspace member, linked in place instead of downloaded. `path` is
     the member's directory relative to the consuming project. */
     Workspace { path: String },
+    /** a path dependency, linked in place as a member is. `path` is the
+    folder relative to the project. the lock keeps no version for it: the
+    folder is the source, and an edit there shows on the next install. */
+    Path { path: String },
+    /** a git dependency at one commit. `rev` is the full commit, which is
+    also its integrity. `branch` or `tag` is what ember.toml asked for, so
+    an edit there resolves again, see [`git`]. */
+    Git {
+        url: String,
+        rev: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    },
+}
+
+impl DownloadSource {
+    /// the folder of a source that install links in place, relative to the project.
+    pub fn in_place(&self) -> Option<&str> {
+        match self {
+            DownloadSource::Workspace { path } | DownloadSource::Path { path } => Some(path),
+            _ => None,
+        }
+    }
+
+    /** how output names a path or git source, `path ../lib` or `git <url>
+    <short commit>`. None for the others, whose name and version say it. */
+    pub fn local_label(&self) -> Option<String> {
+        match self {
+            DownloadSource::Path { path } => Some(format!("path {path}")),
+            DownloadSource::Git { url, rev, .. } => {
+                Some(format!("git {url} {}", rev.get(..7).unwrap_or(rev)))
+            }
+            _ => None,
+        }
+    }
+
+    /** how `--json` names a path or git source, as `{type, path}` or
+    `{type, url, rev, tag, branch}`. null for the others, as for
+    [`DownloadSource::local_label`]. */
+    pub fn local_json(&self) -> serde_json::Value {
+        match self {
+            DownloadSource::Path { path } => serde_json::json!({ "type": "path", "path": path }),
+            DownloadSource::Git {
+                url,
+                rev,
+                branch,
+                tag,
+            } => serde_json::json!({
+                "type": "git",
+                "url": url,
+                "rev": rev,
+                "tag": tag,
+                "branch": branch,
+            }),
+            _ => serde_json::Value::Null,
+        }
+    }
 }
 
 impl Index {
@@ -288,9 +348,18 @@ pub fn download_with(
     expect: Option<&Expect>,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<String, Error> {
+    /* a git package comes from its commit in the git cache, see
+    `git::export`. the commit is its integrity, so it has no archive hash */
+    if let DownloadSource::Git { url, rev, .. } = source {
+        git::export(url, rev, dest)?;
+        remove_links(dest)?;
+        return Ok(String::new());
+    }
     let entry = match source {
         DownloadSource::Zip { url } | DownloadSource::TarGz { url } => archive_entry(url),
-        DownloadSource::Workspace { .. } => None,
+        DownloadSource::Workspace { .. }
+        | DownloadSource::Path { .. }
+        | DownloadSource::Git { .. } => None,
     };
     download_at(entry.as_deref(), source, dest, cache, expect, on_bytes)
 }
@@ -363,7 +432,11 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
                 tar::Archive::new(bytes).unpack(dest)?;
             }
         }
-        DownloadSource::Workspace { .. } => unreachable!("rejected by download"),
+        DownloadSource::Workspace { .. }
+        | DownloadSource::Path { .. }
+        | DownloadSource::Git { .. } => {
+            unreachable!("rejected by download")
+        }
     }
     remove_links(dest)
 }
@@ -561,6 +634,12 @@ stable in practice within a compiler release series but documented as
 unstable. fnv1a_parts with a marker keeps the same "slug-hash" shape under
 a deliberate, stable function. old-key caches are simply re-cloned once. */
 pub(crate) fn cache_dir(url: &str) -> Result<PathBuf, Error> {
+    Ok(paths::index_cache_dir()?.join(cache_key(b"index-cache", url)))
+}
+
+/** the "slug-hash" folder name of `url` in one cache, `marker` naming the
+cache so two caches never share a key. */
+fn cache_key(marker: &[u8], url: &str) -> String {
     let slug: String = url
         .trim_end_matches('/')
         .rsplit('/')
@@ -570,8 +649,8 @@ pub(crate) fn cache_dir(url: &str) -> Result<PathBuf, Error> {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
 
-    let key = fnv1a_parts(&[b"index-cache", url.as_bytes()]);
-    Ok(paths::index_cache_dir()?.join(format!("{slug}-{key:016x}")))
+    let key = fnv1a_parts(&[marker, url.as_bytes()]);
+    format!("{slug}-{key:016x}")
 }
 
 fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> {
@@ -636,7 +715,7 @@ fn fetch(url: &str, args: &[&str], stall_secs: u32) -> Result<(), Error> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let Err(reason) = git::run(&full) else {
+        let Err(reason) = sys::git::run(&full) else {
             return Ok(());
         };
         // a 503 reads "returned error: 503", a stall "Operation too slow"
@@ -956,7 +1035,7 @@ mod tests {
                 "user.email=embr-test@localhost",
             ];
             full.extend_from_slice(args);
-            git::run(&full).unwrap();
+            crate::sys::git::run(&full).unwrap();
         };
         let publish = |version: &str| {
             let entry = format!(
