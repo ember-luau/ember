@@ -219,6 +219,15 @@ impl Index {
         }
     }
 
+    /** the package file of `name`, parsed, from a pesde-format index. None
+    for an index of another format, which has no such file. */
+    pub fn file(&self, name: &str) -> Result<Option<toml::Value>, Error> {
+        match &self.kind {
+            Kind::Pesde(_) => pesde::file(&self.root, &self.url, name).map(Some),
+            Kind::Wally(_) | Kind::Forest => Ok(None),
+        }
+    }
+
     /** every entry of `name`, yanked ones included, and the package-wide
     deprecation reason. it reads pesde-format indices only, which the ember
     index is. */

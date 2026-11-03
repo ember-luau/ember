@@ -80,6 +80,10 @@ pub enum Error {
     #[error("{0}")]
     DeprecateArgs(&'static str),
 
+    /// `embr notices --deny` found an item of a kind that it names.
+    #[error("{0}")]
+    NoticesDenied(String),
+
     /// a bad flag combination for `embr init`, or an answer it cannot guess
     #[error("{0}")]
     InitArgs(String),

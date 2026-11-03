@@ -236,6 +236,33 @@ dependencies do not show again. When the direct dependencies install in
 more than one environment, such as `roblox` and `roblox_server`, each
 environment gets a heading.
 
+## `embr notices`: what the owners say
+
+The owners of a package can post a notice or a warning on the package or
+on a range of its versions. `embr install` and `embr add` end with one line
+for each item:
+
+```text
+warning: acme/rocket@1.0.0: 1.x leaks memory
+deprecated: acme/old: no longer kept up, use acme/new instead
+notice: acme/rocket: the docs moved to rocket.dev
+```
+
+- A warning and a deprecation show on each install. A notice shows when
+  the install adds or updates the package.
+- `embr notices` lists every notice, warning, deprecation and yank of the
+  installed packages, with the dependency that brings each one in. It
+  exits with 0. `embr notices --deny warnings,deprecations` exits with 1
+  when one of them applies, for CI.
+- The owners post with `embr notices add acme/rocket "1.x leaks memory"
+  --warning --versions "<2.0.0"`, and remove with `embr notices remove
+  acme/rocket <id>`. `embr info` shows each id.
+- `embr deprecate acme/old "no longer kept up" --use acme/new` names the
+  package to use instead.
+
+The notices are in the index, so they cost no request. embr removes escape
+sequences and control characters from them before it prints them.
+
 ## One package, several targets
 
 A package can ship one release for each target. Write one `[[target]]`

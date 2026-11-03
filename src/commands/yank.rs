@@ -66,7 +66,7 @@ pub(crate) fn target_id(
 /** runs `send` with EMBER_TOKEN or the stored login, logging in first when
 there is neither. a 401 means the token was revoked, not that the call is
 doomed, so it earns one fresh login and one retry, as publish does. */
-pub(crate) fn as_owner(send: impl Fn(&str) -> Result<(), Error>) -> Result<(), Error> {
+pub(crate) fn as_owner<T>(send: impl Fn(&str) -> Result<T, Error>) -> Result<T, Error> {
     let token = match auth::token()? {
         Some(token) => token,
         None => auth::login()?.token,

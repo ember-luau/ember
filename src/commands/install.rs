@@ -9,6 +9,7 @@ use crate::project::requires;
 use crate::project::rojo;
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index;
+use crate::registry::notices;
 use crate::registry::resolver;
 use crate::sys::git;
 use crate::sys::hash::fnv1a_parts;
@@ -314,14 +315,33 @@ fn section(title: &str, printed: &mut bool) {
     *printed = true;
 }
 
-/** installs one project from the current directory. global tools only
-install on the primary run since workspace members share them and
-repeating the merge per member would just re-print every pin. */
+/** installs one project from the current directory, then prints its
+notices, warnings and deprecations against the lock from before the
+install, see `registry::notices`. */
 pub(crate) fn install_project(
     args: &InstallArgs,
     manifest: &Manifest,
     include_global_tools: bool,
 ) -> Result<(), Error> {
+    let previous = Lockfile::load().ok();
+    let resolved = install_steps(args, manifest, include_global_tools)?;
+    if let Ok(lock) = Lockfile::load() {
+        let previous = previous.as_ref().map_or(&[][..], |lock| &lock.packages[..]);
+        // an install that resolved nothing reads the index copies on disk only
+        notices::report(previous, &lock.packages, resolved);
+    }
+    Ok(())
+}
+
+/** the install itself. returns whether it resolved, which is when the
+index copies are fresh. global tools only install on the primary run
+since workspace members share them and repeating the merge per member
+would just re-print every pin. */
+fn install_steps(
+    args: &InstallArgs,
+    manifest: &Manifest,
+    include_global_tools: bool,
+) -> Result<bool, Error> {
     let started = Instant::now();
 
     /* fast path. nothing local changed since the last install, so the
@@ -334,7 +354,7 @@ pub(crate) fn install_project(
     if fast == FastPath::Skip {
         finish_up_to_date(manifest, include_global_tools)?;
         ui::timing("fast-path total", started);
-        return Ok(());
+        return Ok(false);
     }
 
     let cache = if args.refresh {
@@ -450,7 +470,7 @@ pub(crate) fn install_project(
         drop(progress);
         finish_up_to_date(manifest, include_global_tools)?;
         ui::timing("recheck total", started);
-        return Ok(());
+        return Ok(true);
     }
 
     /* before the wipe below, which would otherwise take a [config]-claimed
@@ -581,7 +601,7 @@ pub(crate) fn install_project(
         ),
     }
     ui::timing("install total", started);
-    Ok(())
+    Ok(!args.locked)
 }
 
 /** the manifest's tools plus global ones on the primary run, deduped.

@@ -46,7 +46,8 @@ pub fn why(args: WhyArgs) -> Result<(), Error> {
     Ok(())
 }
 
-fn load() -> Result<(Manifest, Lockfile), Error> {
+/// the manifest and the lock of the project here. `embr notices` reads them too.
+pub(crate) fn load() -> Result<(Manifest, Lockfile), Error> {
     let manifest = Manifest::load()?;
     let lock = match Lockfile::load() {
         Err(Error::LockfileMissing) => {
@@ -55,6 +56,32 @@ fn load() -> Result<(Manifest, Lockfile), Error> {
         lock => lock?,
     };
     Ok((manifest, lock))
+}
+
+/** for each package of `lock`, the aliases of the manifest entries whose
+tree holds it, in manifest order, for the project in `project`. None when
+the installed graph does not read, as before an install. */
+pub(crate) fn brought_in_by(
+    manifest: &Manifest,
+    lock: &Lockfile,
+    project: &Path,
+) -> Option<Vec<Vec<String>>> {
+    let graph = Graph::read(manifest, lock, project).ok()?;
+    let mut by = vec![Vec::<String>::new(); graph.packages.len()];
+    for root in &graph.roots {
+        let mut seen = vec![false; graph.packages.len()];
+        let mut stack = vec![root.node];
+        while let Some(node) = stack.pop() {
+            if std::mem::replace(&mut seen[node], true) {
+                continue;
+            }
+            if !by[node].contains(&root.alias) {
+                by[node].push(root.alias.clone());
+            }
+            stack.extend(graph.children[node].iter().map(|(_, child)| *child));
+        }
+    }
+    Some(by)
 }
 
 /// one manifest entry, and the installed package it became.
@@ -413,6 +440,41 @@ mod tests {
     fn read<'lock>(base: &Path, lock: &'lock Lockfile) -> Result<Graph<'lock>, Error> {
         let manifest: Manifest = toml::from_str(MANIFEST).unwrap();
         Graph::read(&manifest, lock, base)
+    }
+
+    #[test]
+    fn each_package_knows_the_manifest_entries_that_bring_it_in() {
+        let base = project("brought");
+        let lock: Lockfile = toml::from_str(LOCK).unwrap();
+        let manifest: Manifest = toml::from_str(MANIFEST).unwrap();
+        let by = brought_in_by(&manifest, &lock, &base).unwrap();
+        let names: Vec<(&str, Vec<&str>)> = lock
+            .packages
+            .iter()
+            .zip(&by)
+            .map(|(package, by)| {
+                (
+                    package.name.as_str(),
+                    by.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("chief/core", vec!["Core", "tools"]),
+                ("chief/helper", vec!["Core", "tools"]),
+                ("chief/traits", vec!["Core", "tools"]),
+                ("chief/util", vec!["Core", "tools"]),
+                ("acme/signal", vec!["signal"]),
+                ("chief/util", vec!["signal"]),
+                ("acme/tools", vec!["tools"]),
+                ("alloy/lest", vec!["lest"]),
+            ]
+        );
+        // before an install there is no graph to read
+        assert!(brought_in_by(&manifest, &lock, &base.join("nothing")).is_none());
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

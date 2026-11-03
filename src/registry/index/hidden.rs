@@ -17,6 +17,13 @@ struct Package {
     /// the package's deprecation reason, `[meta] deprecated` in the package file.
     #[serde(default)]
     deprecated: Option<String>,
+    /// the package to use in place of a deprecated one, `[meta] replacement`.
+    #[serde(default)]
+    replacement: Option<String>,
+    /// `[[meta.notices]]`. JSON, so one notice that TOML cannot hold drops
+    /// alone rather than failing the install.
+    #[serde(default)]
+    notices: Vec<serde_json::Value>,
 }
 
 /** `name` from the API, by the rules of the git index. None when embr has
@@ -47,15 +54,43 @@ pub fn read(name: &str) -> Result<Option<Entries>, Error> {
     read_at(&registry::api_url(), &access, name).map(Some)
 }
 
-fn read_at(api: &str, access: &Access, name: &str) -> Result<Entries, Error> {
+/** the package file of `name` from the API, in the shape of a git index
+file, `[meta]` included. None as for [`resolve`]. */
+pub fn file(name: &str) -> Result<Option<toml::Value>, Error> {
+    let access = Access::of(name)?;
+    if access.is_empty() {
+        return Ok(None);
+    }
+    file_at(&registry::api_url(), &access, name).map(Some)
+}
+
+fn file_at(api: &str, access: &Access, name: &str) -> Result<toml::Value, Error> {
     let package: Package = serde_json::from_str(&registry::package(api, name, access)?)
         .map_err(crate::net::http::error::HttpError::from)?;
     let mut file = package.versions;
+    let mut meta = toml::Table::new();
     if let Some(reason) = package.deprecated {
-        let meta = toml::Table::from_iter([("deprecated".to_string(), reason.into())]);
+        meta.insert("deprecated".to_string(), reason.into());
+    }
+    if let Some(replacement) = package.replacement {
+        meta.insert("replacement".to_string(), replacement.into());
+    }
+    let notices: Vec<toml::Value> = package
+        .notices
+        .into_iter()
+        .filter_map(|notice| toml::Value::try_from(notice).ok())
+        .collect();
+    if !notices.is_empty() {
+        meta.insert("notices".to_string(), notices.into());
+    }
+    if !meta.is_empty() {
         file.insert("meta".to_string(), meta.into());
     }
-    pesde::entries(&file.into(), DEFAULT_INDEX_URL, name)
+    Ok(file.into())
+}
+
+fn read_at(api: &str, access: &Access, name: &str) -> Result<Entries, Error> {
+    pesde::entries(&file_at(api, access, name)?, DEFAULT_INDEX_URL, name)
 }
 
 fn resolve_at(
@@ -92,7 +127,10 @@ mod tests {
             "download":"API/v1/packages/acme/secret/files/1.1.0/roblox.tar.gz"},
         "2.0.0-rc.1 roblox":{"version":"2.0.0-rc.1","target":"roblox","language":"luau",
             "download":"API/v1/packages/acme/secret/files/2.0.0-rc.1/roblox.tar.gz"}},
-        "deprecated":"use acme/open"}"#;
+        "deprecated":"use acme/open","replacement":"acme/open",
+        "notices":[{"id":"aaaaaaaaaaaa","level":"warning","message":"1.0 leaks","versions":"^1.0.0",
+            "posted_by":"acme","posted_at":"2026-11-02T00:00:00Z","covers":["1.0.0"]},
+            {"id":"bbbbbbbbbbbb","level":"notice","message":null}]}"#;
 
     fn api() -> (String, mock::Log) {
         mock::serve(|request| {
@@ -143,6 +181,25 @@ mod tests {
         let first = log.lock().unwrap()[0].clone();
         assert!(first.contains("authorization: bearer ember_abc"), "{first}");
         assert!(!first.contains("ember-link-key"), "{first}");
+    }
+
+    /** the API's notices and replacement land in `[meta]` as in a git
+    file. a notice that TOML cannot hold, here a null, drops alone. */
+    #[test]
+    fn a_hidden_package_file_carries_its_meta() {
+        let (api, _log) = api();
+        let access = Access {
+            token: Some("ember_abc".to_string()),
+            key: None,
+        };
+        let file = file_at(&api, &access, "acme/secret").unwrap();
+        let meta = crate::registry::notices::Meta::of(&file);
+        assert_eq!(meta.deprecated.as_deref(), Some("use acme/open"));
+        assert_eq!(meta.replacement.as_deref(), Some("acme/open"));
+        assert_eq!(meta.notices.len(), 1);
+        assert_eq!(meta.notices[0].message, "1.0 leaks");
+        assert!(meta.notices[0].covers(&semver::Version::new(1, 0, 0)));
+        assert!(!meta.notices[0].covers(&semver::Version::new(2, 0, 0)));
     }
 
     #[test]

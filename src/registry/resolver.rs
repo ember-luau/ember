@@ -427,7 +427,10 @@ fn resolve_once(
                         package.environment,
                     ));
                 }
-                warn_on_marks(&name, &package, warnings);
+                /* a package file's deprecations show in the install's
+                notice block. Forest has no file, so it says them here */
+                let deprecations = crate::registry::index::forest::is_forest(&index_url);
+                warn_on_marks(&name, &package, deprecations, warnings);
 
                 for dependency in &package.dependencies {
                     let mut child_path = alias_path.clone();
@@ -678,13 +681,22 @@ environment, else the project's `[target]` one. placement is decided at
 resolve time since children queue with it, so unlike a package's own
 environment it can never wait for the archive to be extracted and
 inspected. */
-/// says when a picked package is yanked or deprecated. it still installs.
-fn warn_on_marks(name: &str, package: &ResolvedPackage, warnings: &mut Vec<String>) {
+/** says when a picked package is yanked, and with `deprecations` when it
+is deprecated. it still installs. */
+fn warn_on_marks(
+    name: &str,
+    package: &ResolvedPackage,
+    deprecations: bool,
+    warnings: &mut Vec<String>,
+) {
     let id = format!("{name}@{}", package.version);
     if package.yanked {
         warnings.push(format!(
             "warning: {id} is yanked; ember.lock pins it, so it stays"
         ));
+    }
+    if !deprecations {
+        return;
     }
     // the reasons are registry text, and the caller prints the warnings
     if let Some(reason) = &package.package_deprecated {
@@ -1627,7 +1639,7 @@ mod tests {
             source: DownloadSource::TarGz { url: String::new() },
         };
         let mut warnings = Vec::new();
-        warn_on_marks("acme/thing", &package, &mut warnings);
+        warn_on_marks("acme/thing", &package, true, &mut warnings);
         assert_eq!(
             warnings,
             [
@@ -1641,6 +1653,23 @@ mod tests {
     /** a deprecation reason is registry text. OSC 52 in it would set the
     clipboard, and CR with an erase sequence would hide the warning. */
     #[test]
+    fn a_package_file_says_its_deprecations_in_the_notice_block_instead() {
+        let package = ResolvedPackage {
+            version: semver::Version::new(1, 0, 0),
+            environment: Some(Environment::Roblox),
+            language: Language::Luau,
+            yanked: false,
+            deprecated: Some("leaks".to_string()),
+            package_deprecated: Some("use acme/new".to_string()),
+            dependencies: Vec::new(),
+            source: DownloadSource::TarGz { url: String::new() },
+        };
+        let mut warnings = Vec::new();
+        warn_on_marks("acme/thing", &package, false, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
     fn deprecation_reasons_reach_the_terminal_without_escapes() {
         let package = ResolvedPackage {
             version: semver::Version::new(1, 0, 0),
@@ -1653,7 +1682,7 @@ mod tests {
             source: DownloadSource::TarGz { url: String::new() },
         };
         let mut warnings = Vec::new();
-        warn_on_marks("acme/thing", &package, &mut warnings);
+        warn_on_marks("acme/thing", &package, true, &mut warnings);
         assert_eq!(
             warnings,
             [
