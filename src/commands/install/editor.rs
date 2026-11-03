@@ -44,21 +44,10 @@ pub(super) fn sync(
     packages: &[LockedPackage],
     warn: &mut impl FnMut(String),
 ) {
-    if manifest.config.aliases != Some(false) {
-        let wanted = wanted_aliases(manifest, packages);
-        match sync_aliases(dir, &wanted) {
-            // only an install that changes the file says it, so not every install
-            Ok(true) => {
-                if let Some(Some(path)) = wanted.get(OLD_LUWU_ALIAS) {
-                    warn(format!(
-                        "note: `@{OLD_LUWU_ALIAS}` now points at {path} and goes in embr 0.15. Require `@{}` instead",
-                        alias_name(manifest, Environment::Luau)
-                    ));
-                }
-            }
-            Ok(false) => {}
-            Err(message) => warn(format!("warning: {message}")),
-        }
+    if manifest.config.aliases != Some(false)
+        && let Err(message) = sync_aliases(dir, &wanted_aliases(manifest, packages))
+    {
+        warn(format!("warning: {message}"));
     }
     if manifest.config.definition_files != Some(false)
         && let Err(reason) = sync_definitions(manifest, dir, packages)
@@ -80,15 +69,10 @@ fn alias_name(manifest: &Manifest, environment: Environment) -> String {
     }
 }
 
-/* ponytail: before 0.14, the portable tree of a Luwu project on another
-runtime had this alias. it keeps the `luwu` folder for the 0.14 series, so
-requires that spell it still work. drop it in 0.15. */
-const OLD_LUWU_ALIAS: &str = "luau-packages";
-
 /** the aliases for the folders that hold links. an instance-require tree
 gets none: its code gets to packages through `script`, never by string. */
 fn wanted_aliases(manifest: &Manifest, packages: &[LockedPackage]) -> Aliases {
-    let mut aliases: Aliases = Environment::ALL
+    Environment::ALL
         .into_iter()
         .map(|environment| {
             let linked = manifest.require_style(environment) == RequireStyle::String
@@ -101,14 +85,7 @@ fn wanted_aliases(manifest: &Manifest, packages: &[LockedPackage]) -> Aliases {
                 linked.then(|| slashed(&path)),
             )
         })
-        .collect();
-    // the name moved only where the portable tree is not the project's own
-    let portable = alias_name(manifest, Environment::Luau);
-    if portable != "packages" && portable != OLD_LUWU_ALIAS {
-        let path = aliases[&portable].clone();
-        aliases.insert(OLD_LUWU_ALIAS.to_string(), path);
-    }
-    aliases
+        .collect()
 }
 
 fn slashed(path: &Path) -> String {
@@ -686,8 +663,7 @@ mod tests {
     }
 
     /** a Luwu project's portable tree is `packages/luwu`. on its own runtime
-    it is `@packages`. on another runtime it is `@luwu-packages`, and the old
-    `@luau-packages` points at the same folder until 0.15. */
+    it is `@packages`, and on another runtime it is `@luwu-packages`. */
     #[test]
     fn a_luwu_project_aliases_the_luwu_folder() {
         let packages = [locked("acme/color", Some("color"), Environment::Luau)];
@@ -705,26 +681,7 @@ mod tests {
 
         let seal = aliases("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n");
         assert_eq!(seal["luwu-packages"].as_deref(), Some("./packages/luwu"));
-        assert_eq!(seal["luau-packages"].as_deref(), Some("./packages/luwu"));
-
-        // the old alias in a .luaurc that an older embr wrote moves to the new folder
-        let dir = scratch("old-luwu-alias");
-        let old = r#"{ "aliases": { "packages": "./packages/seal", "luau-packages": "./packages/luau" } }"#;
-        let new = edit_luaurc(old, &seal, &dir).unwrap().unwrap();
-        assert!(
-            new.contains(r#""luau-packages": "./packages/luwu""#),
-            "{new}"
-        );
-        assert!(
-            new.contains(r#""luwu-packages": "./packages/luwu""#),
-            "{new}"
-        );
-        // with no portable links the old alias goes too, as its folder is gone
-        let none = wanted_aliases(
-            &manifest("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n"),
-            &[],
-        );
-        assert_eq!(none["luau-packages"], None);
+        assert!(!seal.contains_key("luau-packages"));
     }
 
     /// a hand-written .luaurc keeps its comments and keys. only embr's aliases move.

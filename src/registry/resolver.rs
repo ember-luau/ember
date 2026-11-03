@@ -103,7 +103,8 @@ impl Allow {
 }
 
 /** the versions an existing lockfile holds, by lowercase package name.
-a yanked version stays installable while it is in here. */
+a yanked version stays installable while it is in here, and a resolve
+keeps each one that its requirements still take, see [`resolve_updating`]. */
 pub type Pinned = HashMap<String, Vec<semver::Version>>;
 
 /// A package ready to download, the flattened result of resolution.
@@ -251,8 +252,13 @@ pub fn resolve(
     resolve_updating(manifest, project_dir, refresh, pinned, allow, &[], warnings)
 }
 
-/** [`resolve`], and the git packages that `update` names leave the commit
-of ember.lock, as `--refresh` makes every one of them do. */
+/** [`resolve`], and the packages that `update` names leave ember.lock, as
+`--refresh` makes every one of them do.
+
+the lock policy is Cargo's. a registry package keeps the version in
+`pinned` while its requirements take it. a new entry, a requirement that
+no longer takes the locked version, `update` and `--refresh` resolve to the
+newest version. a git package keeps its commit in the same cases. */
 pub fn resolve_updating(
     manifest: &Manifest,
     project_dir: &Path,
@@ -264,13 +270,24 @@ pub fn resolve_updating(
 ) -> Result<Vec<ResolvedInstall>, Error> {
     let mut ttl_skipped = false;
     /* the retry below forces a refresh of the indices, not of the git
-    commits. only `--refresh` and `--update` move a locked branch */
+    commits or the locked versions. only `--refresh` and `--update` move
+    those */
     let pins = GitPins::read(project_dir, refresh == Refresh::Force, update);
+    let keep: Pinned = if refresh == Refresh::Force {
+        Pinned::new()
+    } else {
+        pinned
+            .iter()
+            .filter(|(name, _)| !update.iter().any(|named| named.eq_ignore_ascii_case(name)))
+            .map(|(name, versions)| (name.clone(), versions.clone()))
+            .collect()
+    };
     match resolve_skipping(
         manifest,
         project_dir,
         refresh,
         pinned,
+        &keep,
         allow,
         &pins,
         &mut ttl_skipped,
@@ -290,6 +307,7 @@ pub fn resolve_updating(
                 project_dir,
                 Refresh::Force,
                 pinned,
+                &keep,
                 allow,
                 &pins,
                 &mut ignored,
@@ -304,13 +322,19 @@ pub fn resolve_updating(
 /** [`resolve_once`] until a run ends with no failure under an optional
 edge. such a failure leaves that edge out, and the next run starts from
 the top, so the optional package goes with all that it alone brought in.
-each skip gives one line. the bool says whether any edge went out. */
+each skip gives one line. the bool says whether any edge went out.
+
+a conflict on a package that `keep` holds drops that lock version and
+runs again before anything is skipped. the resolver takes the first
+version that an edge picks, so a kept version that a later edge refuses
+must not fail the install: the newest version can take both. */
 #[allow(clippy::too_many_arguments)]
 fn resolve_skipping(
     manifest: &Manifest,
     project_dir: &Path,
     refresh: Refresh,
     pinned: &Pinned,
+    keep: &Pinned,
     allow: Option<&Allow>,
     pins: &GitPins,
     ttl_skipped: &mut bool,
@@ -319,6 +343,7 @@ fn resolve_skipping(
     let mut indices: HashMap<String, Index> = HashMap::new();
     let mut excluded: HashSet<Vec<String>> = HashSet::new();
     let mut skips = Vec::new();
+    let mut keep = keep.clone();
     loop {
         let mut failing = None;
         let mut run = Vec::new();
@@ -327,6 +352,7 @@ fn resolve_skipping(
             project_dir,
             refresh,
             pinned,
+            &keep,
             allow,
             pins,
             &mut indices,
@@ -336,6 +362,7 @@ fn resolve_skipping(
             &mut run,
         );
         match (result, failing) {
+            (Err(Error::DependencyConflict { name, .. }), _) if keep.remove(&name).is_some() => {}
             (Err(error), Some((path, name))) if excluded.insert(path.clone()) => {
                 skips.push(format!(
                     "skipped optional dependency '{}' ({name}): {error}",
@@ -361,6 +388,7 @@ fn resolve_once(
     project_dir: &Path,
     refresh: Refresh,
     pinned: &Pinned,
+    keep: &Pinned,
     allow: Option<&Allow>,
     pins: &GitPins,
     indices: &mut HashMap<String, Index>,
@@ -588,6 +616,7 @@ fn resolve_once(
                 let pins = pinned.get(&name).map(Vec::as_slice).unwrap_or_default();
                 let preferred = preferred.map(|environment| (environment, language));
                 let package = index.resolve(&name, &req, preferred, pins)?;
+                let package = keep_locked(index, &name, &req, preferred, pins, keep, package);
                 /* a transitive package is judged by its tree's environment.
                 a seed's `target` crosses environments on purpose, so a
                 seed with one skips the environment, and its subtree is
@@ -1111,6 +1140,46 @@ fn seed_context(
 
 fn dependency_name(dependency: &Dependency) -> &str {
     dependency.package()
+}
+
+/** `newest`, or the version that `keep` locks for `name` when `req` still
+takes it. a locked prerelease counts as `newest` does: only while no
+stable version is open. a locked version that the index no longer gives
+for this target falls back to `newest`. */
+fn keep_locked(
+    index: &Index,
+    name: &str,
+    req: &semver::VersionReq,
+    preferred: Option<(Environment, Language)>,
+    pins: &[semver::Version],
+    keep: &Pinned,
+    newest: ResolvedPackage,
+) -> ResolvedPackage {
+    let no_stable = !newest.version.pre.is_empty();
+    let Some(locked) = keep
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter(|version| takes(req, version, no_stable))
+        .max()
+    else {
+        return newest;
+    };
+    if *locked == newest.version {
+        return newest;
+    }
+    let exact = semver::VersionReq {
+        comparators: vec![semver::Comparator {
+            op: semver::Op::Exact,
+            major: locked.major,
+            minor: Some(locked.minor),
+            patch: Some(locked.patch),
+            pre: locked.pre.clone(),
+        }],
+    };
+    index
+        .resolve(name, &exact, preferred, pins)
+        .unwrap_or(newest)
 }
 
 /** Queue entry for a dependency of `owner`. Index keys resolve against the
@@ -2548,6 +2617,73 @@ mod tests {
         }
     }
 
+    /** a plain resolve keeps each locked version that the requirements
+    take. a requirement past it, `--update` and `--refresh` move it, and a
+    kept version that a later edge refuses gives way to the newest. */
+    #[test]
+    fn a_resolve_keeps_the_locked_versions() {
+        let fuel = |version: &str| ember_entry("acme/fuel", version, "roblox", "");
+        let needs_fuel = |name: &str, req: &str| {
+            ember_entry(
+                name,
+                "1.0.0",
+                "roblox",
+                &format!("[.dependencies.fuel]\nname = \"acme/fuel\"\nversion = \"{req}\"\n"),
+            )
+        };
+        let origin = PesdeOrigin::new(
+            "keep-locked",
+            &[
+                ("acme/fuel", format!("{}{}", fuel("0.2.0"), fuel("0.2.1"))),
+                ("acme/rocket", needs_fuel("acme/rocket", "^0.2")),
+                ("acme/jet", needs_fuel("acme/jet", "^0.2.1")),
+            ],
+        );
+        let pinned: Pinned =
+            [("acme/fuel".to_string(), vec![semver::Version::new(0, 2, 0)])].into();
+        let fuel_of = |tables: &str, refresh: Refresh, update: &[String]| {
+            let manifest: Manifest = toml::from_str(&format!(
+                "[target]\nenvironment = \"roblox\"\n\n[indices]\ndefault = \"{}\"\n\n{tables}",
+                origin.url
+            ))
+            .unwrap();
+            let installs = resolve_updating(
+                &manifest,
+                &origin.dirs[0],
+                refresh,
+                &pinned,
+                None,
+                update,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let fuel = installs
+                .iter()
+                .find(|install| install.name == "acme/fuel")
+                .unwrap();
+            fuel.version.to_string()
+        };
+        let direct = |req: &str| {
+            format!("[dependencies]\nfuel = {{ name = \"acme/fuel\", version = \"{req}\" }}\n")
+        };
+
+        assert_eq!(fuel_of(&direct("^0.2"), Refresh::Never, &[]), "0.2.0");
+        assert_eq!(fuel_of(&direct("^0.2.1"), Refresh::Never, &[]), "0.2.1");
+        assert_eq!(
+            fuel_of(&direct("^0.2"), Refresh::Never, &["ACME/fuel".to_string()]),
+            "0.2.1"
+        );
+        assert_eq!(fuel_of(&direct("^0.2"), Refresh::Force, &[]), "0.2.1");
+        // a transitive keeps its version too
+        let rocket = "[dependencies]\nrocket = { name = \"acme/rocket\", version = \"^1\" }\n";
+        assert_eq!(fuel_of(rocket, Refresh::Never, &[]), "0.2.0");
+        /* `early` keeps 0.2.0, and `late` needs ^0.2.1. the conflict drops
+        the lock version, and the newest takes both edges */
+        let both = "[dependencies]\nearly = { name = \"acme/rocket\", version = \"^1\" }\n\
+                    late = { name = \"acme/jet\", version = \"^1\" }\n";
+        assert_eq!(fuel_of(both, Refresh::Never, &[]), "0.2.1");
+    }
+
     impl Drop for PesdeOrigin {
         fn drop(&mut self) {
             for dir in &self.dirs {
@@ -3047,6 +3183,18 @@ mod tests {
         write(&base.join("libs/lib"), "ember.toml", &gated(""));
         let installs = resolve_in(&project, tables, Refresh::Never).unwrap();
         assert_eq!(sources(&installs), ["acme/lib path ../libs/lib lib"]);
+
+        // the entry picks the folder's features, as on a registry entry
+        let picked = "[dependencies]
+lib = { path = \"../libs/lib\", features = [\"pretty\"] }\n";
+        let installs = resolve_in(&project, picked, Refresh::Never).unwrap();
+        assert_eq!(installs[0].features, ["pretty"]);
+        assert_eq!(installs[1].name, "acme/util");
+        write(&base.join("libs/lib"), "ember.toml", &gated("\"pretty\""));
+        let off = "[dependencies]
+lib = { path = \"../libs/lib\", default-features = false }\n";
+        let installs = resolve_in(&project, off, Refresh::Never).unwrap();
+        assert_eq!(sources(&installs), ["acme/lib path ../libs/lib lib"]);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -3138,6 +3286,19 @@ mod tests {
         assert!(
             matches!(&installs[0].source, DownloadSource::Git { rev, branch: None, .. } if *rev == first)
         );
+
+        // the entry picks the commit's features, as on a registry entry
+        let featured = remote.commit(&[(
+            "ember.toml",
+            "[package]\nname = \"acme/gitlib\"\nversion = \"1.2.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\n\n[features]\nfast = []\n",
+        )]);
+        let picked = format!(
+            "[dependencies]\nlib = {{ git = \"{}\", rev = \"{featured}\", features = [\"fast\"] }}\n",
+            remote.url
+        );
+        let installs = resolve_in(&project, &picked, Refresh::Force).unwrap();
+        assert_eq!(installs[0].features, ["fast"]);
         let _ = fs::remove_dir_all(&project);
     }
 

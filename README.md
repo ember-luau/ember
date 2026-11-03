@@ -40,7 +40,7 @@ chmod +x embr-macos-aarch64
 .\embr-windows-x86_64.exe self install
 ```
 
-From 0.14.0 on, each release has a `SHA256SUMS` file. To check a download,
+From 1.0.0 on, each release has a `SHA256SUMS` file. To check a download,
 run `sha256sum --check --ignore-missing SHA256SUMS` in its folder (on macOS,
 `shasum -a 256 --check --ignore-missing SHA256SUMS`).
 
@@ -106,7 +106,7 @@ The flake builds embr from source:
 
 ```sh
 nix run github:ember-luau/ember -- --version           # the newest commit
-nix profile install github:ember-luau/ember/v0.14.0    # a release, from 0.14.0 on
+nix profile install github:ember-luau/ember/v1.0.0    # a release, from 1.0.0 on
 ```
 
 Pinned tools run through shims in `~/.ember/bin`, so add that folder to
@@ -498,7 +498,7 @@ warning: acme/ui@1.0.0: needs the peer jsdotlua/react ^17.0.0, which the project
 warning: acme/menu@2.0.0: needs the peer jsdotlua/react ^17.0.0, and the project has 16.4.0
 ```
 
-Both need embr 0.14.0, and a registry that keeps the new tables in the
+Both need embr 1.0.0, and a registry that keeps the new tables in the
 index entry. The entry keeps an optional dependency in
 `optional-dependencies` and a peer in `peer-dependencies`. An older embr
 reads neither table, so it does not install an optional dependency and
@@ -583,7 +583,7 @@ turn it on, also when another package installs the same dependency. A
 feature that turns on no dependency, such as `debug = []` above, has no
 run time check. It can turn on a feature of a dependency.
 
-This needs embr 0.14.0, and a registry that keeps the new keys in the index
+This needs embr 1.0.0, and a registry that keeps the new keys in the index
 entry. The entry keeps `features`, and the gated dependencies in
 `feature-dependencies`. An older embr reads only `dependencies`, so it
 installs no gated dependency, also not one that a `default` feature turns
@@ -622,9 +622,12 @@ core = { git = "https://github.com/acme/core", rev = "4f2a9c1" }
   keeps the full commit of a git dependency, so a branch or a tag stays at
   that commit until `embr install --update <scope/name>` moves that
   package, or `embr install --refresh` moves all of them.
-- `target` and `entry` work as on other entries. `features` and
-  `default-features` do not work on a path or git entry yet, so the
-  `default` features of the package are on.
+- `target`, `entry`, `features` and `default-features` work as on a
+  registry entry. The folder's or the commit's own `[features]` table
+  follows that choice, as a registry package does.
+- An entry with a key that it does not take is an error that names the
+  key and the entry, as on every dependency form. `optional` is for a
+  registry entry only.
 - `embr tree`, `embr why` and `embr info` show the source: the path, or
   the URL and the commit.
 
@@ -645,7 +648,7 @@ lib = { path = "../my-lib", version = "^0.3.0" }
 A dev dependency without a `version` drops out of the published
 manifest, since only your own tests use it.
 
-Path and git dependencies need embr 0.14.0. An older embr cannot read a
+Path and git dependencies need embr 1.0.0. An older embr cannot read a
 manifest or an `ember.lock` that has one.
 
 ## Workspace inheritance
@@ -680,9 +683,10 @@ signal = { workspace = true }
   `[workspace]`, so `package.version` reads `workspace.package.version`.
 - `[dev-dependencies]` reads `[workspace.dependencies]`, the same as
   `[dependencies]`.
-- An inherited dependency can add `target`, `entry`, `optional` and
-  `features`. Its `features` add to the shared ones. Any other key next to
-  `workspace = true` is an error.
+- An inherited dependency can add `target`, `entry`, `optional`,
+  `features` and `default-features`. Its `features` add to the shared
+  ones. Any other key next to `workspace = true` is an error.
+- A shared `path` is relative to the root, as in Cargo.
 - The root can inherit from its own `[workspace]` table.
 - `embr publish` writes the values into the package, and the `[workspace]`
   table stays home.
@@ -747,8 +751,7 @@ model at publish and refuses:
   `require("@packages/core")` works. Each other folder gets
   `<folder>-packages`, such as `server-packages` for `packages/server`,
   because Luau allows no `/` in an alias name. In a Luwu project on another
-  runtime, `packages/luwu` gets `luwu-packages`, and the old
-  `luau-packages` points there too until embr 0.15. The aliases go into
+  runtime, `packages/luwu` gets `luwu-packages`. The aliases go into
   `.config.luau` when the project has one, else into `.luaurc`. embr makes
   a `.luaurc` only when an alias needs it. A folder with both files gets no
   aliases, because Luau refuses that folder. A tree with
@@ -795,7 +798,7 @@ extracts it. `ember.lock` keeps the hash of each package as `sha256`.
   change. If the publisher changed the archive on purpose, run
   `embr install --update <scope/name>` to lock the new hash.
 - `embr install --locked` checks against `ember.lock`.
-- A lockfile from before embr 0.14.0 gets the hashes on the next
+- A lockfile from before embr 1.0.0 gets the hashes on the next
   `embr install`. An older embr ignores them.
 - Local packages, workspace members and path dependencies have no hash.
   A git dependency has none either: its commit in `ember.lock` is its
@@ -981,6 +984,24 @@ Other clients read an `mcpServers` block like this one:
   }
 }
 ```
+
+## The lockfile
+
+`embr install` writes `ember.lock`. A later install keeps each locked
+version that `ember.toml` still takes, as Cargo does. A version moves only
+when its requirement no longer takes it, when its entry is new, with
+`embr install --update <scope/name>`, or with `embr install --refresh`,
+which moves all of them. `embr install --locked` installs the lock as it
+is.
+
+## Compatibility
+
+From embr 1.0.0, `ember.toml`, `ember.lock` (version 2), the `--json`
+documents (`"version": 1`), the command names, the flags and the exit
+codes stay compatible for all of 1.x. A deprecated command, flag or key
+prints a warning for at least one minor release, and goes only in 2.0.
+[Compatibility and versioning](https://emberpm.dev/docs/compatibility)
+gives the rules.
 
 ## Docs
 

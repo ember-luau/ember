@@ -12,7 +12,8 @@ use std::path::Path;
 
 pub const MANIFEST_FILE: &str = "ember.toml";
 
-/// the manifest's name before the ember rename. still read, never written.
+/** the manifest's name before the ember rename. read with a warning until
+embr 2.0, never written. */
 pub const LEGACY_MANIFEST_FILE: &str = "lpm.toml";
 
 /** The manifest to read inside `dir`.
@@ -692,7 +693,10 @@ impl Studio {
 
 /* untagged, so serde tries the shapes in order. `Git` and `Path` come
 first: `{ path = "../lib", name = "acme/lib", version = "^1" }` also has
-the keys of `Registry` */
+the keys of `Registry`. each shape keeps the keys that it does not take in
+`unknown`, and [`Manifest::validate`] refuses them. without that, the
+untagged match ignores a key, such as `features` on a path entry, and
+gives no error */
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Dependency {
@@ -722,9 +726,22 @@ pub enum Dependency {
         /// see [`Dependency::entry`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<String>,
+        /// see [`Dependency::features`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// see [`Dependency::default_features`].
+        #[serde(
+            rename = "default-features",
+            default = "yes",
+            skip_serializing_if = "is_yes"
+        )]
+        default_features: bool,
         /// read only so that [`Manifest::validate`] can refuse `path` beside `git`.
         #[serde(default, skip_serializing)]
         path: Option<toml::Value>,
+        /// the keys that this shape does not take, see [`Dependency::unknown_keys`].
+        #[serde(flatten)]
+        unknown: BTreeMap<String, toml::Value>,
     },
     /** a folder on this computer: `{ path = "../my-lib" }`. install links
     it in place, as it links a workspace member, so an edit there shows on
@@ -745,6 +762,19 @@ pub enum Dependency {
         /// see [`Dependency::entry`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<String>,
+        /// see [`Dependency::features`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// see [`Dependency::default_features`].
+        #[serde(
+            rename = "default-features",
+            default = "yes",
+            skip_serializing_if = "is_yes"
+        )]
+        default_features: bool,
+        /// the keys that this shape does not take, see [`Dependency::unknown_keys`].
+        #[serde(flatten)]
+        unknown: BTreeMap<String, toml::Value>,
     },
     /// package from an index: `{ name = "scope/pkg", version = "^", index = "wally" }`.
     Registry {
@@ -780,6 +810,9 @@ pub enum Dependency {
             skip_serializing_if = "is_yes"
         )]
         default_features: bool,
+        /// the keys that this shape does not take, see [`Dependency::unknown_keys`].
+        #[serde(flatten)]
+        unknown: BTreeMap<String, toml::Value>,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -806,6 +839,9 @@ pub enum Dependency {
             skip_serializing_if = "is_yes"
         )]
         default_features: bool,
+        /// the keys that this shape does not take, see [`Dependency::unknown_keys`].
+        #[serde(flatten)]
+        unknown: BTreeMap<String, toml::Value>,
     },
 }
 
@@ -876,13 +912,14 @@ impl Dependency {
     /** the features that this entry turns on in the package, e.g.
     `ui = { name = "acme/ui", version = "^1", features = ["icons"] }`. the
     enabled features of a package are the union over every dependent in one
-    environment root, as in Cargo. a path or git entry takes none yet. */
+    environment root, as in Cargo. a path folder or a git commit has its own
+    [features] table, which this choice reads as a registry package's. */
     pub fn features(&self) -> &[String] {
         match self {
-            Dependency::Registry { features, .. } | Dependency::Workspace { features, .. } => {
-                features
-            }
-            Dependency::Path { .. } | Dependency::Git { .. } => &[],
+            Dependency::Registry { features, .. }
+            | Dependency::Workspace { features, .. }
+            | Dependency::Path { features, .. }
+            | Dependency::Git { features, .. } => features,
         }
     }
 
@@ -894,8 +931,33 @@ impl Dependency {
             }
             | Dependency::Workspace {
                 default_features, ..
+            }
+            | Dependency::Path {
+                default_features, ..
+            }
+            | Dependency::Git {
+                default_features, ..
             } => *default_features,
-            Dependency::Path { .. } | Dependency::Git { .. } => true,
+        }
+    }
+
+    /// the keys of the entry that its shape does not take, such as a typo.
+    pub fn unknown_keys(&self) -> impl Iterator<Item = &String> {
+        match self {
+            Dependency::Registry { unknown, .. }
+            | Dependency::Workspace { unknown, .. }
+            | Dependency::Path { unknown, .. }
+            | Dependency::Git { unknown, .. } => unknown.keys(),
+        }
+    }
+
+    /// what the docs call the shape: a registry, workspace, path or git entry.
+    pub fn form(&self) -> &'static str {
+        match self {
+            Dependency::Registry { .. } => "registry",
+            Dependency::Workspace { .. } => "workspace",
+            Dependency::Path { .. } => "path",
+            Dependency::Git { .. } => "git",
         }
     }
 
@@ -1211,6 +1273,15 @@ impl Manifest {
         }
         let text = std::fs::read_to_string(path)?;
         let mut raw: toml::Table = text.parse()?;
+        if path
+            .file_name()
+            .is_some_and(|name| name == LEGACY_MANIFEST_FILE)
+        {
+            crate::ui::warn_deprecated(LEGACY_MANIFEST_FILE, MANIFEST_FILE);
+        }
+        for (old, new) in old_spellings(&raw) {
+            crate::ui::warn_deprecated(&old, &new);
+        }
         let manifest: Manifest = if inherit::inherits(&raw) {
             inherit::apply(&mut raw, path.parent().unwrap_or(Path::new("")))?;
             raw.try_into()?
@@ -1251,6 +1322,28 @@ impl Manifest {
     fn validate(&self) -> Result<(), Error> {
         for target in &self.targets {
             target.check_requires()?;
+        }
+        let overrides = self
+            .overrides
+            .iter()
+            .filter_map(|(key, value)| match value {
+                Override::Specifier(dependency) => {
+                    Some((format!("override '{key}'"), &**dependency))
+                }
+                Override::Alias(_) => None,
+            });
+        for (entry, dependency) in self
+            .all_dependencies()
+            .chain(&self.peer_dependencies)
+            .map(|(alias, dependency)| (format!("dependency '{alias}'"), dependency))
+            .chain(overrides)
+        {
+            if let Some(key) = dependency.unknown_keys().next() {
+                return Err(Error::ManifestInvalid(format!(
+                    "{entry} has the key '{key}', which a {} entry does not take",
+                    dependency.form()
+                )));
+            }
         }
         for (alias, dependency) in self.all_dependencies().chain(&self.peer_dependencies) {
             if let Dependency::Git {
@@ -1353,17 +1446,20 @@ impl Manifest {
     }
 
     /** the default folders that an older embr installed to and this one
-    does not, each with the environment that moved out. `packages/shared`
-    held the roblox packages before the rename, and `packages/luau` held the
-    portable packages of a Luwu project before 0.14. */
+    does not, each with the environment that moved out. `packages/luau` held
+    the portable packages of a Luwu project up to embr 0.13. */
     pub fn legacy_packages_outs(&self) -> Vec<(std::path::PathBuf, Environment)> {
-        let packages = std::path::Path::new("packages");
-        let mut legacy = vec![(packages.join("shared"), Environment::Roblox)];
         let luau = Environment::Luau.dir_name();
-        if self.packages_dir(Environment::Luau) != luau {
-            legacy.push((packages.join(luau), Environment::Luau));
-        }
-        legacy
+        let moved = self.packages_dir(Environment::Luau) != luau;
+        moved
+            .then(|| {
+                (
+                    std::path::Path::new("packages").join(luau),
+                    Environment::Luau,
+                )
+            })
+            .into_iter()
+            .collect()
     }
 
     /// folder an environment's packages (and their link files) install to.
@@ -1453,6 +1549,65 @@ impl Manifest {
         }
         Ok(script)
     }
+}
+
+/** the deprecated spellings in a manifest's TOML, each as (old, new) for
+[`crate::ui::warn_deprecated`]. they still parse in embr 1.x: the serde
+aliases and [`Environment::from_embr`] read them. the schema marks the same
+spellings deprecated. */
+pub(crate) fn old_spellings(raw: &toml::Table) -> Vec<(String, String)> {
+    let environment = |value: Option<&toml::Value>| match value.and_then(toml::Value::as_str) {
+        Some("shared") => Some((
+            "the environment `shared`".to_string(),
+            "`roblox`".to_string(),
+        )),
+        Some("server") => Some((
+            "the environment `server`".to_string(),
+            "`roblox_server`".to_string(),
+        )),
+        _ => None,
+    };
+    let targets: Vec<&toml::Table> = match raw.get("target") {
+        Some(toml::Value::Table(target)) => vec![target],
+        Some(toml::Value::Array(targets)) => {
+            targets.iter().filter_map(toml::Value::as_table).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut found = Vec::new();
+    for target in targets {
+        for (old, new) in [
+            ("include", "includes"),
+            ("exclude", "excludes"),
+            ("workspace_members", "workspace"),
+        ] {
+            if target.contains_key(old) {
+                found.push((format!("`{old}` in [target]"), format!("`{new}`")));
+            }
+        }
+        found.extend(environment(target.get("environment")));
+    }
+    if raw
+        .get("config")
+        .is_some_and(|config| config.get("shared-packages-out").is_some())
+    {
+        found.push((
+            "`shared-packages-out` in [config]".to_string(),
+            "`roblox-packages-out`".to_string(),
+        ));
+    }
+    for table in [
+        "dependencies",
+        "dev-dependencies",
+        "peer-dependencies",
+        "overrides",
+    ] {
+        let entries = raw.get(table).and_then(toml::Value::as_table);
+        for entry in entries.into_iter().flat_map(toml::Table::values) {
+            found.extend(environment(entry.get("target")));
+        }
+    }
+    found
 }
 
 /** shape of a GitHub username, 1-39 chars, alphanumeric or dashes, no leading/
@@ -1834,11 +1989,8 @@ mod tests {
                 .map(|(dir, _)| dir)
                 .collect()
         };
-        assert_eq!(legacy(&luau), [packages.join("shared")]);
-        assert_eq!(
-            legacy(&luwu),
-            [packages.join("shared"), packages.join("luau")]
-        );
+        assert!(legacy(&luau).is_empty());
+        assert_eq!(legacy(&luwu), [packages.join("luau")]);
     }
 
     #[test]
@@ -2041,6 +2193,120 @@ mod tests {
             dependency_target("Chief", &reparsed.dependencies["Chief"]).unwrap(),
             Some(Environment::Server)
         );
+    }
+
+    /** a key that the form of an entry does not take is an error that
+    names the key and the entry. the untagged match used to drop it. */
+    #[test]
+    fn an_unknown_key_on_any_dependency_form_is_an_error() {
+        for (table, entry, key, form) in [
+            (
+                "dependencies",
+                r#"{ path = "../lib", featurs = ["x"] }"#,
+                "featurs",
+                "path",
+            ),
+            (
+                "dependencies",
+                r#"{ git = "https://github.com/acme/ui", optional = true }"#,
+                "optional",
+                "git",
+            ),
+            (
+                "dependencies",
+                r#"{ name = "acme/ui", version = "^1", optinal = true }"#,
+                "optinal",
+                "registry",
+            ),
+            (
+                "dependencies",
+                r#"{ workspace = "acme/core", optional = true }"#,
+                "optional",
+                "workspace",
+            ),
+            (
+                "dev-dependencies",
+                r#"{ path = "../lib", key = "x" }"#,
+                "key",
+                "path",
+            ),
+            (
+                "peer-dependencies",
+                r#"{ name = "acme/ui", version = "^1", tag = "v1" }"#,
+                "tag",
+                "registry",
+            ),
+        ] {
+            let error = Manifest::parse(&format!("[{table}]\nlib = {entry}\n")).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "Invalid ember.toml: dependency 'lib' has the key '{key}', which a {form} entry does not take"
+                )
+            );
+        }
+        let error = Manifest::parse(
+            "[dependencies]\nui = { name = \"acme/ui\", version = \"^1\" }\n\n\
+             [overrides]\n\"ui.core\" = { name = \"acme/core\", version = \"^2\", index_url = \"y\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("override 'ui.core' has the key 'index_url'"),
+            "{error}"
+        );
+    }
+
+    /// each deprecated spelling gives one (old, new) pair for its warning.
+    #[test]
+    fn old_spellings_name_their_new_spelling() {
+        let raw: toml::Table = "[[target]]\nenvironment = \"shared\"\ninclude = [\"src\"]\n\
+             workspace_members = [\"places/*\"]\n\n\
+             [[target]]\nenvironment = \"server\"\nexclude = [\"x\"]\n\n\
+             [config]\nshared-packages-out = \"packages/shared\"\n\n\
+             [dependencies]\nlapis = { name = \"a/lapis\", version = \"^1\", target = \"server\" }\n\
+             plain = { name = \"a/plain\", version = \"^1\", target = \"roblox\" }\n"
+            .parse()
+            .unwrap();
+        let new: Vec<String> = old_spellings(&raw)
+            .into_iter()
+            .map(|(_, new)| new)
+            .collect();
+        assert_eq!(
+            new,
+            [
+                "`includes`",
+                "`workspace`",
+                "`roblox`",
+                "`excludes`",
+                "`roblox_server`",
+                "`roblox-packages-out`",
+                "`roblox_server`",
+            ]
+        );
+        let current: toml::Table = "[target]\nenvironment = \"roblox\"\nincludes = [\"src\"]\n"
+            .parse()
+            .unwrap();
+        assert!(old_spellings(&current).is_empty());
+    }
+
+    /// a path or git entry takes `features` and `default-features`, and keeps them on a write.
+    #[test]
+    fn path_and_git_entries_pick_features() {
+        let manifest = Manifest::parse(
+            "[dependencies]\n\
+             lib = { path = \"../lib\", features = [\"fast\"], default-features = false }\n\
+             ui = { git = \"https://github.com/acme/ui\", tag = \"v1\", features = [\"dark\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.dependencies["lib"].features(), ["fast"]);
+        assert!(!manifest.dependencies["lib"].default_features());
+        assert_eq!(manifest.dependencies["ui"].features(), ["dark"]);
+        assert!(manifest.dependencies["ui"].default_features());
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("default-features = false"), "{written}");
+        assert_eq!(written.matches("features = [").count(), 2, "{written}");
     }
 
     #[test]

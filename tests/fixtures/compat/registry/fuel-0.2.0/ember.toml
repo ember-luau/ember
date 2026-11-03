@@ -1,0 +1,8 @@
+[package]
+name = "acme/fuel"
+version = "0.2.0"
+license = "MIT"
+
+[target]
+environment = "roblox"
+main = "src/init.luau"

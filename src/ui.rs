@@ -187,6 +187,19 @@ fn skip_string(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
 }
 
 /// accent "✗ message" line to stderr.
+/** says once a run that `old` is deprecated, and names `new`. it still
+works in embr 1.x. stderr, so a `--json` document stays clean. */
+pub fn warn_deprecated(old: &str, new: &str) {
+    static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if WARNED
+        .lock()
+        .is_ok_and(|mut warned| warned.insert(old.to_string()))
+    {
+        eprintln!("warning: {old} is deprecated and goes in embr 2.0; use {new}");
+    }
+}
+
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("✗ {}", printable(message)).with(accent()));
 }

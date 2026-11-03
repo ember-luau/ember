@@ -7,7 +7,7 @@ plain TOML before serde, so every field and every whole table can inherit. */
 
 use crate::error::Error;
 use crate::project::workspace;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use toml::{Table, Value};
 
 /** whether `table` asks for its value from the workspace. a string, such
@@ -42,20 +42,31 @@ pub(super) fn apply(raw: &mut Table, dir: &Path) -> Result<(), Error> {
     /* ponytail: each member load walks the root's tree again to find it.
     pass the root's table down from `Workspace::open` if big repos get slow */
     let root = if workspace::member_globs(raw).is_empty() {
-        workspace::root_of(dir)?.map(|(_, root)| root)
+        match workspace::root_of(dir)? {
+            Some((root_dir, root)) => {
+                let base = workspace::relative_path(&std::path::absolute(dir)?, &root_dir);
+                Some((root, PathBuf::from(base)))
+            }
+            None => None,
+        }
     } else {
-        Some(raw.clone())
+        Some((raw.clone(), PathBuf::new()))
     };
+    let root = root.as_ref().map(|(table, base)| (table, base.as_path()));
     for (key, value) in raw.iter_mut() {
         if key != "workspace" {
-            resolve(value, &mut vec![key.clone()], root.as_ref())?;
+            resolve(value, &mut vec![key.clone()], root)?;
         }
     }
     Ok(())
 }
 
+/** the root manifest's table, and the root's folder relative to the
+manifest that inherits. */
+type Root<'a> = Option<(&'a Table, &'a Path)>;
+
 /// `path` names `value` from the top of the manifest. array items keep the path of their array.
-fn resolve(value: &mut Value, path: &mut Vec<String>, root: Option<&Table>) -> Result<(), Error> {
+fn resolve(value: &mut Value, path: &mut Vec<String>, root: Root) -> Result<(), Error> {
     match value {
         Value::Table(table) if is_marker(table) => {
             let inherited = inherited(table, path, root)?;
@@ -79,14 +90,15 @@ fn resolve(value: &mut Value, path: &mut Vec<String>, root: Option<&Table>) -> R
 }
 
 /** the value that the marker at `path` inherits from `root`, the root's
-whole manifest. a dependency can add `target`, `entry`, `optional` and
-`features`: they are the consumer's choice, as Cargo lets a member add
-`features` and `optional`. the member's `features` add to the shared ones.
+whole manifest. a dependency can add `target`, `entry`, `optional`,
+`features` and `default-features`: they are the consumer's choice, as Cargo
+lets a member add `features` and `optional`. the member's `features` add to
+the shared ones.
 any other key beside `workspace = true` is an error, so nothing overrides a
 shared value without a sign. */
-fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Value, Error> {
+fn inherited(marker: &Table, path: &[String], root: Root) -> Result<Value, Error> {
     let field = path.join(".");
-    let root = root.ok_or_else(|| Error::InheritOutsideWorkspace(field.clone()))?;
+    let (root, base) = root.ok_or_else(|| Error::InheritOutsideWorkspace(field.clone()))?;
     let from: Vec<&str> = std::iter::once("workspace")
         .chain(path.iter().enumerate().map(|(depth, key)| {
             if depth == 0 && matches!(key.as_str(), "dev-dependencies" | "peer-dependencies") {
@@ -110,10 +122,21 @@ fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Va
             path[0].as_str(),
             "dependencies" | "dev-dependencies" | "peer-dependencies"
         );
+    /* a shared path entry names its folder from the root, as in Cargo, and
+    the member reads a path from its own folder */
+    if dependency
+        && let Value::Table(table) = &mut value
+        && let Some(Value::String(folder)) = table.get_mut("path")
+    {
+        let rebased = workspace::lexical(&base.join(&*folder));
+        *folder = rebased.to_string_lossy().replace('\\', "/");
+    }
     for (key, item) in marker {
         match (&mut value, key.as_str()) {
             (_, "workspace") => {}
-            (Value::Table(table), "target" | "entry" | "optional") if dependency => {
+            (Value::Table(table), "target" | "entry" | "optional" | "default-features")
+                if dependency =>
+            {
                 table.insert(key.clone(), item.clone());
             }
             (Value::Table(table), "features") if dependency => {
@@ -164,7 +187,8 @@ mod tests {
              [workspace.target]\nlanguage = \"alloy\"\n\n\
              [workspace.dependencies]\n\
              signal = { name = \"acme/signal\", version = \"^1.0.0\", features = [\"fast\"] }\n\
-             core = { workspace = \"acme/core\", version = \"~\" }\n\n\
+             core = { workspace = \"acme/core\", version = \"~\" }\n\
+             lib = { path = \"libs/lib\", features = [\"fast\"] }\n\n\
              [workspace.tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\n",
         );
         write(
@@ -184,7 +208,8 @@ mod tests {
              authors = { workspace = true }\n\n\
              [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\
              language = { workspace = true }\n\n\
-             [dependencies]\nsignal = { workspace = true, optional = true, features = [\"fast\", \"pretty\"] }\ncore = { workspace = true }\n\n\
+             [dependencies]\nsignal = { workspace = true, optional = true, features = [\"fast\", \"pretty\"] }\ncore = { workspace = true }\n\
+             lib = { workspace = true, features = [\"pretty\"], default-features = false }\n\n\
              [dev-dependencies]\nspy = { name = \"acme/spy\", version = \"^1\" }\n\
              server = { workspace = true, target = \"server\" }\n\n\
              [peer-dependencies]\nserver = { workspace = true }\n\n\
@@ -217,6 +242,15 @@ mod tests {
         // its `features` add to the shared ones
         assert_eq!(lobby.dependencies["signal"].features(), ["fast", "pretty"]);
         assert_eq!(lobby.peer_dependencies["server"].package(), "acme/server");
+        /* a shared path entry names its folder from the root, and the
+        member picks its features, also for a path folder */
+        let lib = &lobby.dependencies["lib"];
+        assert!(
+            matches!(lib, Dependency::Path { path, .. } if path == "../../libs/lib"),
+            "{lib:?}"
+        );
+        assert_eq!(lib.features(), ["fast", "pretty"]);
+        assert!(!lib.default_features());
         // the member adds its own `target` to the shared entry
         let server = &lobby.dev_dependencies["server"];
         assert_eq!(server.package(), "acme/server");
@@ -251,7 +285,7 @@ mod tests {
                 if field == "dependencies.missing" && from == "workspace.dependencies.missing"
         ));
 
-        // only a dependency can add keys, and only target and entry
+        // only a dependency can add keys, and only the consumer's choices
         write_workspace(
             &base,
             "[dependencies]\nsignal = { workspace = true, version = \"^2\" }\n",

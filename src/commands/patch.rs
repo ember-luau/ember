@@ -480,20 +480,10 @@ fn remind_gitignore() {
         println!("Tip: add `{WORK_DIR}/` to .gitignore (working copies are scratch space)");
         return;
     };
-    /* the pre-rebrand name counts as ignored too: the tip is about whether
-    the working copies are out of git's way, and .lpm-patch/ still puts them
-    there for a project that has not been renamed. */
     let ignored = contents.lines().map(str::trim).any(|line| {
         matches!(
             line,
-            ".ember-patch"
-                | ".ember-patch/"
-                | "/.ember-patch"
-                | "/.ember-patch/"
-                | ".lpm-patch"
-                | ".lpm-patch/"
-                | "/.lpm-patch"
-                | "/.lpm-patch/"
+            ".ember-patch" | ".ember-patch/" | "/.ember-patch" | "/.ember-patch/"
         )
     });
     if !ignored {

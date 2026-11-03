@@ -30,10 +30,31 @@ pub enum Refresh {
     Force,
 }
 
+/** the indices that embr knows by name, with their URLs. `embr index add`
+fills in these URLs, and an index entry that names its dependency's index
+by one of them reads it as the URL, see [`named_index_url`]. */
+pub const KNOWN_INDICES: &[(&str, &str)] = &[
+    ("forest", forest::API_URL),
+    ("pesde", "https://github.com/pesde-pkg/index"),
+    ("wally", "https://github.com/UpliftGames/wally-index"),
+];
+
+/** the URL of an index that embr knows by `name`: ember's own, or one of
+[`KNOWN_INDICES`]. None for any other name. */
+pub fn named_index_url(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case(crate::project::manifest::EMBER_INDEX_NAME) {
+        return Some(DEFAULT_INDEX_URL);
+    }
+    KNOWN_INDICES
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, url)| *url)
+}
+
 /// default TTL. `EMBER_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
 const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// the knob's name before the ember rename, still honoured for existing setups.
+/// the knob's name before the ember rename. it works, with a warning, until embr 2.0.
 const LEGACY_TTL_VAR: &str = "LPM_INDEX_TTL_SECS";
 const TTL_VAR: &str = "EMBER_INDEX_TTL_SECS";
 
@@ -47,6 +68,9 @@ pub(crate) fn index_ttl() -> Duration {
         let set = std::env::var(TTL_VAR)
             .map(|value| (TTL_VAR, value))
             .or_else(|_| std::env::var(LEGACY_TTL_VAR).map(|value| (LEGACY_TTL_VAR, value)));
+        if matches!(set, Ok((LEGACY_TTL_VAR, _))) {
+            crate::ui::warn_deprecated(LEGACY_TTL_VAR, TTL_VAR);
+        }
         match set {
             Err(_) => DEFAULT_INDEX_TTL,
             Ok((name, value)) => match value.trim().parse::<u64>() {

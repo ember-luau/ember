@@ -111,7 +111,7 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
     print_table(&behind);
     println!();
     println!(
-        "{} of {} dependencies {} a newer release. `embr install` moves to Wanted; past it, raise the requirement with `embr add <name> --version <req>`.",
+        "{} of {} dependencies {} a newer release. `embr install --update <name>` moves to Wanted; past it, raise the requirement with `embr add <name> --version <req>`.",
         behind.len(),
         rows.len(),
         if behind.len() == 1 { "has" } else { "have" },
@@ -189,7 +189,7 @@ fn print_table(rows: &[&Row]) {
             .bold()
     );
     for (row, cell) in rows.iter().zip(&cells) {
-        /* colour only what moved: Wanted when an install would change it,
+        /* colour only what moved: Wanted when `--update` would change it,
         Latest when it is past what the requirement allows */
         let wanted = if row.wanted.is_some() && row.wanted != row.current {
             pad(&cell[2], 2).with(ui::accent()).to_string()
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn behind_means_a_newer_release_exists() {
         assert!(!row(Some("1.2.0"), Some("1.2.0"), Some("1.2.0")).behind());
-        // the requirement allows it, an install picks it up
+        // the requirement allows it, `install --update` picks it up
         assert!(row(Some("1.2.0"), Some("1.3.0"), Some("1.3.0")).behind());
         // only past the requirement
         assert!(row(Some("1.3.0"), Some("1.3.0"), Some("2.0.0")).behind());

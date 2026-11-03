@@ -187,6 +187,10 @@ fn publish_project(
     the on-disk ember.toml is never touched */
     convert_workspace_dependencies(&mut manifest, root)?;
     convert_local_dependencies(&mut manifest, root)?;
+    // the local registry writes its own entry, see `local::publish`
+    if !args.local {
+        write_index_urls(&mut manifest)?;
+    }
     strip_local_tables(&mut manifest);
 
     let targets: Vec<Target> = std::mem::take(&mut manifest.targets)
@@ -421,6 +425,7 @@ fn convert_workspace_dependencies(
             entry,
             features,
             default_features,
+            ..
         } = dependency
         else {
             continue;
@@ -459,6 +464,7 @@ fn convert_workspace_dependencies(
             // the features it turns on in the member stay on
             features: features.clone(),
             default_features: *default_features,
+            unknown: Default::default(),
         };
     }
     Ok(())
@@ -509,6 +515,11 @@ fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Re
             };
             let (name, index, target, entry) =
                 (name.clone(), index.clone(), target.clone(), entry.clone());
+            // the features it turns on stay on, as for a workspace entry
+            let (features, default_features) = (
+                dependency.features().to_vec(),
+                dependency.default_features(),
+            );
             let name = match name {
                 Some(name) => name,
                 None => own_name(alias, dependency, project_dir)?,
@@ -521,9 +532,9 @@ fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Re
                 entry,
                 key: None,
                 optional: false,
-                // a path or git entry takes no features yet
-                features: Vec::new(),
-                default_features: true,
+                features,
+                default_features,
+                unknown: Default::default(),
             };
         }
         for alias in dropped {
@@ -568,6 +579,49 @@ fn own_name(alias: &str, dependency: &Dependency, project_dir: &Path) -> Result<
             alias: alias.to_string(),
             at,
         })
+}
+
+/** writes the URL of each dependency's index in place of its name, so the
+index entry that the registry makes from the archive names a URL. a name
+reads through [indices], then the names that embr knows: ember, wally,
+pesde and forest. an entry with no `index` gets the URL of the project's
+default index, unless that is ember's own. an index that a project which
+installs the package cannot reach is an error. */
+fn write_index_urls(manifest: &mut Manifest) -> Result<(), Error> {
+    let indices = manifest.indices.clone();
+    let default = manifest.index_url(None)?.to_string();
+    for (alias, dependency) in manifest
+        .dependencies
+        .iter_mut()
+        .chain(&mut manifest.dev_dependencies)
+        .chain(&mut manifest.peer_dependencies)
+    {
+        let Dependency::Registry { index, .. } = dependency else {
+            continue;
+        };
+        let url = match index.as_deref() {
+            None => default.clone(),
+            Some(name) => indices
+                .get(name)
+                .map(String::to_string)
+                .or_else(|| crate::registry::index::named_index_url(name).map(str::to_string))
+                .or_else(|| {
+                    name.eq_ignore_ascii_case(local::NAME)
+                        .then(|| local::NAME.to_string())
+                })
+                .ok_or_else(|| Error::PublishUnknownIndex {
+                    alias: alias.clone(),
+                    index: name.to_string(),
+                })?,
+        };
+        if url == local::NAME {
+            return Err(Error::PublishLocalIndex {
+                alias: alias.clone(),
+            });
+        }
+        *index = (url != DEFAULT_INDEX_URL).then_some(url);
+    }
+    Ok(())
 }
 
 /** tables that never travel, dropped from the archive's manifest.
@@ -773,6 +827,7 @@ mod tests {
                 entry: None,
                 features: Vec::new(),
                 default_features: true,
+                unknown: Default::default(),
             },
         );
         assert!(matches!(
@@ -840,6 +895,56 @@ mod tests {
             "Dependency 'lib' is a path dependency without a registry `version`, so a project that installs this package cannot get it. Add `version` to the entry: publish then writes the registry part (`name`, `version`, `index`) in place of the path, as Cargo does"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /** the archive names each dependency's index by URL: an [indices] key,
+    a name that embr knows, and the project's default. ember's own index
+    stays unnamed. a name that resolves to nothing, or to the local
+    registry, stops the publish. */
+    #[test]
+    fn publish_writes_index_urls_in_place_of_names() {
+        let manifest = |dependencies: &str| -> Manifest {
+            toml::from_str(&format!(
+                "[indices]\nteam = \"https://github.com/acme/index\"\ndefault = \"https://github.com/pesde-pkg/index\"\n\n\
+                 [dependencies]\n{dependencies}"
+            ))
+            .unwrap()
+        };
+        let mut packed = manifest(
+            "own = { name = \"a/own\", version = \"^1\", index = \"team\" }\n\
+             promise = { name = \"evaera/promise\", version = \"^4\", index = \"wally\" }\n\
+             core = { name = \"chief/core\", version = \"^0.2\", index = \"ember\" }\n\
+             bare = { name = \"a/bare\", version = \"^1\" }\n",
+        );
+        write_index_urls(&mut packed).unwrap();
+        let index = |alias: &str| match &packed.dependencies[alias] {
+            Dependency::Registry { index, .. } => index.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            index("own").as_deref(),
+            Some("https://github.com/acme/index")
+        );
+        assert_eq!(
+            index("promise").as_deref(),
+            Some("https://github.com/UpliftGames/wally-index")
+        );
+        assert_eq!(index("core"), None);
+        assert_eq!(
+            index("bare").as_deref(),
+            Some("https://github.com/pesde-pkg/index")
+        );
+
+        let mut unknown = manifest("x = { name = \"a/x\", version = \"^1\", index = \"nope\" }\n");
+        assert!(matches!(
+            write_index_urls(&mut unknown),
+            Err(Error::PublishUnknownIndex { alias, index }) if alias == "x" && index == "nope"
+        ));
+        let mut local = manifest("x = { name = \"a/x\", version = \"^1\", index = \"local\" }\n");
+        assert!(matches!(
+            write_index_urls(&mut local),
+            Err(Error::PublishLocalIndex { alias }) if alias == "x"
+        ));
     }
 
     #[test]
