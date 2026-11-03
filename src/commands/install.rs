@@ -49,6 +49,10 @@ pub struct InstallArgs {
     /// Fail when a package needs a peer dependency that is missing or has a version that does not match
     #[arg(long)]
     pub strict_peers: bool,
+
+    /// Download this package again and lock its archive hash, also when the hash changed
+    #[arg(long, value_name = "PACKAGE", conflicts_with = "locked")]
+    pub update: Vec<String>,
 }
 
 struct Job {
@@ -59,6 +63,10 @@ struct Job {
     /// the output root, the environment of the dependency tree's root.
     context: Environment,
     source: index::DownloadSource,
+    /// the SHA-256 the archive must have, None when nothing records one yet.
+    sha256: Option<String>,
+    /// `sha256` comes from ember.lock, not from the index entry.
+    sha256_in_lock: bool,
     index_url: String,
     /// top level link name, None for transitives, they never get one.
     link: Option<String>,
@@ -449,6 +457,8 @@ fn install_steps(
                     environment: Some(package.environment),
                     context: package.context.unwrap_or(package.environment),
                     source: package.source,
+                    sha256_in_lock: package.sha256.is_some(),
+                    sha256: package.sha256,
                     index_url: package.index,
                     link: package.link,
                     redirects: package.redirects,
@@ -488,6 +498,8 @@ fn install_steps(
                 environment: package.environment,
                 context: package.context,
                 source: package.source,
+                sha256: package.sha256,
+                sha256_in_lock: false,
                 index_url: package.index_url,
                 link: package.link,
                 redirects: package.redirects,
@@ -503,6 +515,7 @@ fn install_steps(
     security fix. --locked skipped this on purpose, its patches came from
     the lock above */
     if !args.locked {
+        pin_hashes(&mut jobs, previous.as_ref(), &args.update)?;
         attach_patches(manifest, Path::new("."), &mut jobs)?;
     }
 
@@ -799,7 +812,11 @@ fn fast_path(
     manifest: &Manifest,
     include_global_tools: bool,
 ) -> Result<FastPath, Error> {
-    if args.locked || args.refresh || !manifest.workspace_members().is_empty() {
+    if args.locked
+        || args.refresh
+        || !args.update.is_empty()
+        || !manifest.workspace_members().is_empty()
+    {
         return Ok(FastPath::Full);
     }
     // same include_global flag the stamp writer used, or hashes never match
@@ -827,6 +844,8 @@ fn fast_path(
         not see it, so a local package always installs again */
         matches!(package.source, index::DownloadSource::Workspace { .. })
             || package.index == crate::registry::local::NAME
+            // a lock from before the hashes records them on a full install
+            || package.sha256.is_none()
     }) {
         return Ok(FastPath::Full);
     }
@@ -1019,6 +1038,56 @@ fn apply_patch(name: &str, patch: &JobPatch, staging: &Path) -> Result<(), Error
     applied
 }
 
+/** sets the SHA-256 that each registry job must match. the index entry's
+hash comes first. for an entry with none, the hash of the last lock stands
+in, so a package from an index without hashes keeps its first archive. an
+entry and a lock that disagree for one version are an error: a published
+version does not change. `update` names the packages whose locked hash
+goes, with their cached archives, so the new lock takes the registry's
+current bytes. */
+fn pin_hashes(jobs: &mut [Job], lock: Option<&Lockfile>, update: &[String]) -> Result<(), Error> {
+    for job in jobs.iter_mut() {
+        let (index::DownloadSource::Zip { url } | index::DownloadSource::TarGz { url }) =
+            &job.source
+        else {
+            continue;
+        };
+        if update
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&job.name))
+        {
+            index::evict_archive(url);
+            continue;
+        }
+        let locked = lock
+            .into_iter()
+            .flat_map(|lock| &lock.packages)
+            .find(|locked| {
+                locked.name.eq_ignore_ascii_case(&job.name)
+                    && locked.version == job.version
+                    && locked.source == job.source
+            })
+            .and_then(|locked| locked.sha256.as_ref());
+        match (&job.sha256, locked) {
+            (Some(entry), Some(locked)) if entry != locked => {
+                return Err(Error::IntegrityChanged {
+                    name: job.name.clone(),
+                    version: job.version.clone(),
+                    url: url.clone(),
+                    locked: locked.clone(),
+                    entry: entry.clone(),
+                });
+            }
+            (None, Some(locked)) => {
+                job.sha256 = Some(locked.clone());
+                job.sha256_in_lock = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /** whether a fresh resolution landed exactly where the lockfile already
 stands, the "checked the indices, nothing new" case that skips the
 rebuild. environment is compared only when resolution knows it up front.
@@ -1043,6 +1112,8 @@ fn jobs_match_lock(jobs: &[Job], lock: &Lockfile) -> bool {
                     && job.link == locked.link
                     && job.index_url == locked.index
                     && job.source == locked.source
+                    // a lock without the hash has to record it
+                    && job.sha256 == locked.sha256
                     /* redirects shape the nested links on disk, an [overrides]
                     edit that lands on the same versions still has to rebuild */
                     && job.redirects == locked.redirects
@@ -1339,7 +1410,7 @@ fn install_packages(
                     let task = progress.task(format!("{}@{}", job.name, job.version));
                     let result = install_one(manifest, &job, &staging, cache, progress, &task);
                     // an optional package that fails is skipped, so the others go on
-                    if result.is_err() && !job.optional {
+                    if result.as_ref().is_err_and(|error| !skips(&job, error)) {
                         failed.store(true, Ordering::Relaxed);
                     }
                     // a closed channel means the run is over, stop quietly
@@ -1375,6 +1446,9 @@ fn install_packages(
                         "{}@{} → {}/{shown}",
                         job.name, job.version, job.context
                     )));
+                    // a local publish can replace a version, so its hash means nothing
+                    let sha256 =
+                        (job.index_url != crate::registry::local::NAME).then_some(extracted.sha256);
                     slots[slot] = Some(LockedPackage {
                         name: job.name,
                         version: job.version,
@@ -1386,13 +1460,14 @@ fn install_packages(
                         patch: job.patch.map(|patch| patch.record),
                         optional: job.optional,
                         source: job.source,
+                        sha256,
                     });
                 }
                 /* ponytail: only the failed package goes. an optional
                 package whose required dependency failed stays, with no
                 link to it. drop the package's optional subtree if that
                 matters */
-                Err(error) if job.optional => {
+                Err(error) if skips(&job, &error) => {
                     progress.warn(&format!(
                         "skipped optional dependency {}@{}: {error}",
                         job.name, job.version
@@ -1428,9 +1503,19 @@ fn install_packages(
         .collect()
 }
 
+/** whether `error` skips the package and lets the install go on: a
+failed download of an optional package. An archive with another hash is no
+failed download. It stops the install, because a skip would drop the hash
+from the lock, and the next lock would take the changed archive. */
+fn skips(job: &Job, error: &Error) -> bool {
+    job.optional && !matches!(error, Error::IntegrityMismatch { .. })
+}
+
 /// what a worker learned about one extracted package, links come later.
 struct Extracted {
     environment: Environment,
+    /// the SHA-256 of the archive it came from.
+    sha256: String,
     /// None means no entry point found, warned already at link time
     entry: Option<String>,
     types: package::Exports,
@@ -1452,9 +1537,19 @@ fn install_one(
     if staging.exists() {
         with_retry(|| fs::remove_dir_all(staging))?;
     }
-    index::download_with(&job.source, staging, cache, &mut |done, total| {
-        task.bytes(done, total)
-    })?;
+    let expect = job.sha256.as_deref().map(|sha256| index::Expect {
+        name: &job.name,
+        version: &job.version,
+        sha256,
+        in_lock: job.sha256_in_lock,
+    });
+    let sha256 = index::download_with(
+        &job.source,
+        staging,
+        cache,
+        expect.as_ref(),
+        &mut |done, total| task.bytes(done, total),
+    )?;
     package::flatten_single_dir(staging)?;
 
     /* the tree is staged and pristine here, patch it now so environment
@@ -1522,6 +1617,7 @@ fn install_one(
     progress.suspend(|| ui::timing(&format!("package {}", job.name), started));
     Ok(Extracted {
         environment,
+        sha256,
         entry,
         types,
     })
@@ -1651,6 +1747,7 @@ fn link_workspace_member(
         patch: None,
         optional: job.optional,
         source: job.source,
+        sha256: None,
     })
 }
 
@@ -2250,6 +2347,7 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: format!("https://example.com/{name}/{version}"),
             },
+            sha256: None,
         }
     }
 
@@ -2406,6 +2504,8 @@ mod tests {
             source: index::DownloadSource::TarGz {
                 url: url.to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: None,
             redirects: BTreeMap::new(),
@@ -2687,6 +2787,8 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: url.to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: Some("thing".to_string()),
             redirects: BTreeMap::new(),
@@ -2706,6 +2808,7 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
+            sha256: None,
         };
         let lock = Lockfile::new(vec![locked(None)]);
 
@@ -2774,6 +2877,108 @@ mod tests {
         ));
     }
 
+    /** the index entry's hash, the lock's hash for an entry with none, and
+    an error when the two disagree. `--update` drops the lock's side. */
+    #[test]
+    fn hashes_come_from_the_entry_then_the_lock() {
+        let url = "https://example.com/thing/1.0.0";
+        let entry_hash = crate::sys::hash::sha256_hex(b"entry");
+        let lock_hash = crate::sys::hash::sha256_hex(b"lock");
+        let job = |sha256: Option<&str>| Job {
+            name: "acme/thing".to_string(),
+            version: "1.0.0".to_string(),
+            environment: None,
+            context: Environment::Roblox,
+            source: index::DownloadSource::TarGz {
+                url: url.to_string(),
+            },
+            sha256: sha256.map(str::to_string),
+            sha256_in_lock: false,
+            index_url: "https://example.com/index".to_string(),
+            link: Some("thing".to_string()),
+            redirects: BTreeMap::new(),
+            patch: None,
+            optional: false,
+        };
+        let lock = |sha256: Option<&str>| {
+            Lockfile::new(vec![LockedPackage {
+                name: "acme/thing".to_string(),
+                version: "1.0.0".to_string(),
+                environment: Environment::Roblox,
+                context: None,
+                link: Some("thing".to_string()),
+                index: "https://example.com/index".to_string(),
+                redirects: BTreeMap::new(),
+                patch: None,
+                optional: false,
+                source: index::DownloadSource::TarGz {
+                    url: url.to_string(),
+                },
+                sha256: sha256.map(str::to_string),
+            }])
+        };
+        let pinned = |job_hash: Option<&str>, lock_hash: Option<&str>| {
+            let mut jobs = [job(job_hash)];
+            pin_hashes(&mut jobs, Some(&lock(lock_hash)), &[]).map(|()| {
+                let [job] = jobs;
+                (job.sha256, job.sha256_in_lock)
+            })
+        };
+
+        // the entry and the lock agree, the entry's hash is the check
+        assert_eq!(
+            pinned(Some(&entry_hash), Some(&entry_hash)).unwrap(),
+            (Some(entry_hash.clone()), false)
+        );
+        // an entry with no hash: the lock's hash is the check (pesde, wally, not backfilled)
+        assert_eq!(
+            pinned(None, Some(&lock_hash)).unwrap(),
+            (Some(lock_hash.clone()), true)
+        );
+        // a lock from before the hashes, or the first lock: nothing to compare
+        assert_eq!(
+            pinned(Some(&entry_hash), None).unwrap(),
+            (Some(entry_hash.clone()), false)
+        );
+        assert_eq!(pinned(None, None).unwrap(), (None, false));
+
+        // the entry and the lock disagree: an error, not an update
+        let error = pinned(Some(&entry_hash), Some(&lock_hash)).unwrap_err();
+        let text = error.to_string();
+        assert!(matches!(error, Error::IntegrityChanged { .. }), "{text}");
+        for part in [
+            "acme/thing@1.0.0",
+            entry_hash.as_str(),
+            lock_hash.as_str(),
+            url,
+            "embr install --update acme/thing",
+        ] {
+            assert!(text.contains(part), "{part} not in {text}");
+        }
+
+        // --update drops the lock's hash, so the entry decides
+        let mut jobs = [job(Some(&entry_hash))];
+        let update = ["ACME/thing".to_string()];
+        pin_hashes(&mut jobs, Some(&lock(Some(&lock_hash))), &update).unwrap();
+        assert_eq!(jobs[0].sha256.as_deref(), Some(entry_hash.as_str()));
+        let mut jobs = [job(None)];
+        pin_hashes(&mut jobs, Some(&lock(Some(&lock_hash))), &update).unwrap();
+        assert_eq!(jobs[0].sha256, None);
+
+        // another version, or another archive, has its own hash
+        let mut other = job(Some(&entry_hash));
+        other.version = "1.1.0".to_string();
+        let mut jobs = [other];
+        pin_hashes(&mut jobs, Some(&lock(Some(&lock_hash))), &[]).unwrap();
+
+        // the recheck rebuilds a lock that lacks the hash, so the hash lands
+        assert!(!jobs_match_lock(&[job(Some(&entry_hash))], &lock(None)));
+        assert!(jobs_match_lock(
+            &[job(Some(&entry_hash))],
+            &lock(Some(&entry_hash))
+        ));
+    }
+
     #[test]
     fn top_level_links_are_for_direct_dependencies_only() {
         let base = std::env::temp_dir().join("embr-test-top-links");
@@ -2794,6 +2999,8 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: link.map(str::to_string),
             redirects: BTreeMap::new(),
@@ -2802,6 +3009,7 @@ mod tests {
         };
         let extracted = |entry: Option<&str>| Extracted {
             environment: Environment::Roblox,
+            sha256: String::new(),
             entry: entry.map(str::to_string),
             types: package::Exports::default(),
         };
@@ -2849,6 +3057,8 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: Some(link.to_string()),
             redirects: BTreeMap::new(),
@@ -2907,6 +3117,8 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: None,
             redirects: BTreeMap::new(),
@@ -3274,11 +3486,20 @@ mod tests {
     }
 
     /** a download that fails skips an optional package, with one line, and
-    fails the install for any other. */
+    fails the install for any other. A skipped package gets no lock entry,
+    so no hash. An archive with another hash is no failed download: it
+    stops the install, also for an optional package, so the next lock
+    cannot take the changed archive as its first hash. */
     #[test]
     fn an_optional_package_whose_download_fails_is_skipped() {
         use crate::net::http::mock;
-        let (cdn, _) = mock::serve(|_| mock::reply("404 Not Found", "gone"));
+        let (cdn, _) = mock::serve(|request| {
+            if request.contains("/changed/") {
+                mock::reply("200 OK", "not the locked archive")
+            } else {
+                mock::reply("404 Not Found", "gone")
+            }
+        });
         let base = std::env::temp_dir().join("embr-test-optional-download");
         let _ = fs::remove_dir_all(&base);
         let manifest: Manifest = toml::from_str(&format!(
@@ -3294,6 +3515,8 @@ mod tests {
             source: index::DownloadSource::TarGz {
                 url: format!("{cdn}/acme/trace/1.0.0.tar.gz"),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: Some("trace".to_string()),
             redirects: BTreeMap::new(),
@@ -3312,6 +3535,26 @@ mod tests {
         };
         assert!(install(job(true)).unwrap().is_empty());
         assert!(install(job(false)).is_err());
+
+        // a hash from ember.lock, as --locked gives it: a 404 still skips
+        let locked = |optional, url: &str| Job {
+            sha256: Some(crate::sys::hash::sha256_hex(b"the locked archive")),
+            sha256_in_lock: true,
+            source: index::DownloadSource::TarGz {
+                url: format!("{cdn}/{url}"),
+            },
+            ..job(optional)
+        };
+        assert!(
+            install(locked(true, "acme/trace/1.0.0.tar.gz"))
+                .unwrap()
+                .is_empty()
+        );
+        // another archive is an error, optional or not
+        for optional in [true, false] {
+            let error = install(locked(optional, "changed/1.0.0.tar.gz")).unwrap_err();
+            assert!(matches!(error, Error::IntegrityMismatch { .. }), "{error}");
+        }
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4002,6 +4245,8 @@ mod tests {
             source: index::DownloadSource::Zip {
                 url: "https://example.com/geometry/0.1.0".to_string(),
             },
+            sha256: None,
+            sha256_in_lock: false,
             index_url: "https://example.com/index".to_string(),
             link: Some("geometry".to_string()),
             redirects: BTreeMap::new(),
@@ -4010,6 +4255,7 @@ mod tests {
         };
         let extracted = Extracted {
             environment: Environment::Luau,
+            sha256: String::new(),
             entry: Some("build".to_string()),
             types: link_types(&storage, "build", &job.name, false, &mut |_| {}),
         };

@@ -98,6 +98,8 @@ pub fn resolve(
         package_deprecated: None,
         dependencies,
         source: DownloadSource::Zip { url: download_url },
+        // the wally index records no archive hash, so the first lock does
+        sha256: None,
     })
 }
 

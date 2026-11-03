@@ -100,6 +100,7 @@ pub(crate) fn pick(
 
     let dependencies = parse_dependencies(&candidate.entry, index_url)?;
     let source = download_source(config, index_url, name, &candidate)?;
+    let sha256 = sha256_of(&candidate, name)?;
 
     Ok(ResolvedPackage {
         version: candidate.version,
@@ -110,7 +111,25 @@ pub(crate) fn pick(
         package_deprecated,
         dependencies,
         source,
+        sha256,
     })
+}
+
+/** the entry's `sha256`, the hex SHA-256 of its archive that the ember
+registry writes. pesde entries have none. a value of another shape is an
+error, so a bad entry never falls back to no check. */
+fn sha256_of(candidate: &Candidate, name: &str) -> Result<Option<String>, Error> {
+    let Some(value) = candidate.entry.get("sha256") else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some(hex) if crate::sys::hash::is_sha256_hex(hex) => Ok(Some(hex.to_string())),
+        _ => Err(Error::IntegrityInvalid {
+            name: name.to_string(),
+            version: candidate.version.to_string(),
+            value: value.to_string(),
+        }),
+    }
 }
 
 /** which of one version's `targets` a project in `environment` written in
@@ -701,6 +720,48 @@ mod tests {
             panic!("expected tarball source");
         };
         assert_eq!(url, "https://cdn.luaupm.com/chief/core/0.1.0.tar.gz");
+    }
+
+    /** the ember registry writes the archive's hex SHA-256 as `sha256`. a
+    pesde entry has none. a value of another shape refuses the install, so
+    a bad entry never falls back to no check. */
+    #[test]
+    fn the_entry_hash_comes_through_and_a_bad_one_refuses() {
+        let hash = crate::sys::hash::sha256_hex(b"core");
+        let resolve_with = |name: &str, line: &str| {
+            let index = TempIndex::new(name, r#"github_oauth_id = "Ov23abc""#);
+            index.write_package(
+                "chief/core",
+                &format!(
+                    "[\"0.1.0 roblox\"]\ndownload = \"https://cdn.emberpm.dev/chief/core/0.1.0.tar.gz\"\ntarget = \"roblox\"\n{line}\n"
+                ),
+            );
+            let config = load_config(&index.root).unwrap();
+            resolve(
+                &index.root,
+                "https://github.com/luaupm/index",
+                &config,
+                "chief/core",
+                &semver::VersionReq::STAR,
+                None,
+                &[],
+            )
+        };
+
+        let found = resolve_with("hash-ok", &format!("sha256 = \"{hash}\"")).unwrap();
+        assert_eq!(found.sha256.as_deref(), Some(hash.as_str()));
+        assert_eq!(resolve_with("hash-none", "").unwrap().sha256, None);
+        for (name, bad) in [
+            (
+                "hash-upper",
+                format!("sha256 = \"{}\"", hash.to_uppercase()),
+            ),
+            ("hash-short", "sha256 = \"abc\"".to_string()),
+            ("hash-number", "sha256 = 5".to_string()),
+        ] {
+            let error = resolve_with(name, &bad).err().expect(name);
+            assert!(matches!(error, Error::IntegrityInvalid { .. }), "{error}");
+        }
     }
 
     #[test]

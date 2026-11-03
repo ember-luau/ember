@@ -372,7 +372,8 @@ signal = { name = "acme/signal", version = "^1.0.0", optional = true }
 - `embr install` tries to install it. When it does not resolve, the
   install skips it with one line and goes on. That happens when no version
   matches, when it has no target for the environment, when its download
-  fails, or when one of its own dependencies fails.
+  fails, or when one of its own dependencies fails. An archive with
+  another hash stops the install (see "Archive hashes").
 - A skipped optional dependency gets no link file. The code checks for it
   at run time:
 
@@ -549,6 +550,31 @@ To turn off one or both:
 aliases = false
 definition-files = false
 ```
+
+## Archive hashes
+
+`embr install` checks the SHA-256 of each package archive before it
+extracts it. `ember.lock` keeps the hash of each package as `sha256`.
+
+- The hash comes from the index entry. The ember registry writes `sha256`
+  on each version, and Forest names each archive by its hash.
+- An entry with no hash gets the hash of its first install: a pesde or
+  Wally package, or an ember version that the registry has not hashed yet.
+  Later installs check against `ember.lock`.
+- A cached archive with another hash downloads again.
+- A downloaded archive with another hash stops the install. The error
+  names the package, the version, both hashes and the URL. embr deletes
+  the download and does not use it. This is true for an optional
+  dependency too: a changed archive is not a failed download, so it is
+  not skipped.
+- When the index entry and `ember.lock` record different hashes for one
+  version, the install stops too, because a published version does not
+  change. If the publisher changed the archive on purpose, run
+  `embr install --update <scope/name>` to lock the new hash.
+- `embr install --locked` checks against `ember.lock`.
+- A lockfile from before embr 0.14.0 gets the hashes on the next
+  `embr install`. An older embr ignores them.
+- Local packages and workspace members have no hash.
 
 ## Sign in
 

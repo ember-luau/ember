@@ -67,6 +67,13 @@ pub struct LockedPackage {
     pub optional: bool,
     #[serde(flatten)]
     pub source: DownloadSource,
+    /** lowercase hex SHA-256 of the archive: the index entry's, else the
+    one the first install computed. later installs and `--locked` refuse
+    an archive with another hash. additive within v2, a lock from before
+    it gets the hashes on its next install. none for workspace members and
+    the local registry. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /** a patch as the lockfile remembers it, the repo-relative file plus a
@@ -183,6 +190,7 @@ mod tests {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
                 },
+                sha256: Some(crate::sys::hash::sha256_hex(b"promise")),
             },
             LockedPackage {
                 name: "pesde/hello".to_string(),
@@ -199,6 +207,7 @@ mod tests {
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },
+                sha256: None,
             },
         ]);
 
@@ -242,6 +251,55 @@ mod tests {
         assert!(!parsed.packages[0].optional);
         assert!(parsed.packages[1].optional);
         assert_eq!(text.matches("optional").count(), 1);
+
+        // the hash round-trips beside the url, and stays absent otherwise
+        assert_eq!(
+            parsed.packages[0].sha256.as_deref(),
+            Some(crate::sys::hash::sha256_hex(b"promise").as_str())
+        );
+        assert_eq!(parsed.packages[1].sha256, None);
+        assert_eq!(text.matches("sha256 = ").count(), 1);
+    }
+
+    /** a v2 lock from before the hashes loads with none, and an old embr
+    reads a lock with them, since it ignores keys it does not know. */
+    #[test]
+    fn locks_with_and_without_hashes_load() {
+        let entry = "version = 2\n\n\
+             [[package]]\n\
+             name = \"acme/thing\"\n\
+             version = \"1.0.0\"\n\
+             environment = \"roblox\"\n\
+             index = \"https://example.com/index\"\n\
+             type = \"tar-gz\"\n\
+             url = \"https://example.com/thing/1.0.0\"\n";
+        let old: Lockfile = toml::from_str(entry).unwrap();
+        assert_eq!(old.packages[0].sha256, None);
+
+        let hash = crate::sys::hash::sha256_hex(b"thing");
+        let new: Lockfile = toml::from_str(&format!("{entry}sha256 = \"{hash}\"\n")).unwrap();
+        assert_eq!(new.packages[0].sha256.as_deref(), Some(hash.as_str()));
+
+        /// the fields of 0.13's LockedPackage, which knew no hash.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Old {
+            name: String,
+            version: String,
+            environment: Environment,
+            index: String,
+            #[serde(flatten)]
+            source: DownloadSource,
+        }
+        #[derive(Deserialize)]
+        struct OldLock {
+            package: Vec<Old>,
+        }
+        let text = toml::to_string(&new).unwrap();
+        let read: OldLock = toml::from_str(&text).unwrap();
+        assert!(
+            matches!(&read.package[0].source, DownloadSource::TarGz { url } if url.ends_with("1.0.0"))
+        );
     }
 
     #[test]

@@ -59,6 +59,9 @@ jsonc-parser = { version = "0.33.1", features = ["cst"] }
 # liblzma bindings would put a C build script in front of every cross target
 # in the release matrix, and decompression happens once per tool install.
 lzma-rs = "0.3"
+# SHA-256 of downloaded package archives. rustls already builds ring for
+# ureq, so it costs the binary nothing new.
+ring = "0.17"
 
 # openpty, so the commands of a concurrent script run on real terminals and
 # keep their colour. Already in the tree under crossterm and console, so it

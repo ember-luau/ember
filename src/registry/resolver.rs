@@ -116,6 +116,8 @@ pub struct ResolvedInstall {
     packages/server, so one package can resolve once per context. */
     pub context: Environment,
     pub source: DownloadSource,
+    /// the archive's SHA-256 from the index entry, None when it records none.
+    pub sha256: Option<String>,
     pub index_url: String,
     /** Name of the generated top-level link file, the [dependencies] alias
     for direct deps. None for transitives, only declared dependencies are
@@ -476,7 +478,7 @@ fn resolve_once(
         let mut pending_discovered: Vec<(Vec<String>, String)> = Vec::new();
         let mut children: Vec<(String, Ask, Vec<String>, String, bool)> = Vec::new();
 
-        let (version, environment, source, index_url) = match request {
+        let (version, environment, source, sha256, index_url) = match request {
             Request::Registry { index_url, .. } => {
                 let index = open_index(indices, &index_url, refresh, ttl_skipped)?;
                 /* a multi-target entry picks the target of the tree it
@@ -559,6 +561,7 @@ fn resolve_once(
                     package.version,
                     package.environment,
                     package.source,
+                    package.sha256,
                     index_url,
                 )
             }
@@ -617,6 +620,7 @@ fn resolve_once(
                     version,
                     Some(environment),
                     DownloadSource::Workspace { path },
+                    None,
                     "workspace".to_string(),
                 )
             }
@@ -708,6 +712,7 @@ fn resolve_once(
                     environment,
                     context,
                     source,
+                    sha256,
                     index_url,
                     link,
                     redirects,
@@ -1791,6 +1796,7 @@ mod tests {
             package_deprecated: Some("use acme/new".to_string()),
             dependencies: Vec::new(),
             source: DownloadSource::TarGz { url: String::new() },
+            sha256: None,
         };
         let mut warnings = Vec::new();
         warn_on_marks("acme/thing", &package, true, &mut warnings);
@@ -1817,6 +1823,7 @@ mod tests {
             package_deprecated: Some("use acme/new".to_string()),
             dependencies: Vec::new(),
             source: DownloadSource::TarGz { url: String::new() },
+            sha256: None,
         };
         let mut warnings = Vec::new();
         warn_on_marks("acme/thing", &package, false, &mut warnings);
@@ -1834,6 +1841,7 @@ mod tests {
             package_deprecated: Some("x\r\x1b[2K\u{9b}0m\u{8}ok".to_string()),
             dependencies: Vec::new(),
             source: DownloadSource::TarGz { url: String::new() },
+            sha256: None,
         };
         let mut warnings = Vec::new();
         warn_on_marks("acme/thing", &package, true, &mut warnings);
