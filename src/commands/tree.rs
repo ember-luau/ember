@@ -7,8 +7,10 @@ use crate::error::Error;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, manifest_in};
 use crate::project::package::{self, DependencyKind};
+use crate::ui;
 use clap::Args;
 use crossterm::style::Stylize;
+use serde_json::{Value, json};
 use std::path::Path;
 
 #[derive(Args, Debug)]
@@ -16,17 +18,26 @@ pub struct TreeArgs {
     /// Levels to show under the direct dependencies, where 0 shows the direct dependencies only
     #[arg(long)]
     pub depth: Option<usize>,
+    /// Print the tree as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct WhyArgs {
     /// Package to explain, as scope/name or as the alias that a dependent gives it
     pub package: String,
+    /// Print the paths as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn tree(args: TreeArgs) -> Result<(), Error> {
     let (manifest, lock) = load()?;
     let graph = Graph::read(&manifest, &lock, Path::new(""))?;
+    if args.json {
+        return ui::print_json(&graph.tree_json(args.depth));
+    }
     if graph.roots.is_empty() {
         println!("ember.toml has no dependencies");
         return Ok(());
@@ -41,6 +52,9 @@ pub fn why(args: WhyArgs) -> Result<(), Error> {
     let paths = graph.paths_to(args.package.trim());
     if paths.is_empty() {
         return Err(Error::NotADependency(args.package));
+    }
+    if args.json {
+        return ui::print_json(&graph.why_json(args.package.trim(), &paths));
     }
     print!("{}", graph.why(&paths));
     Ok(())
@@ -306,6 +320,66 @@ impl<'lock> Graph<'lock> {
         }
     }
 
+    /** the `--json` tree: the roots in the order of [`Graph::tree`], each
+    with its dependencies under it. a package whose dependencies were shown
+    already gets `"repeated": true` and no dependencies, as `(*)` does. */
+    fn tree_json(&self, depth: Option<usize>) -> Value {
+        let mut shown = vec![false; self.packages.len()];
+        let mut roots = Vec::new();
+        for context in self.contexts() {
+            for root in &self.roots {
+                if self.packages[root.node].context() != context {
+                    continue;
+                }
+                let kind = match root.optional {
+                    true => DependencyKind::Optional,
+                    false => DependencyKind::Required,
+                };
+                let mut node = self.node_json(root.node, &root.alias, &kind, depth, &mut shown);
+                node["dev"] = json!(root.dev);
+                roots.push(node);
+            }
+        }
+        json!({ "version": ui::JSON_VERSION, "dependencies": roots })
+    }
+
+    /** one package of the `--json` tree, and the levels under it. `kind`
+    gives the `optional` and `peer` fields, as the text marks them. */
+    fn node_json(
+        &self,
+        node: usize,
+        alias: &str,
+        kind: &DependencyKind,
+        depth: Option<usize>,
+        shown: &mut [bool],
+    ) -> Value {
+        let package = &self.packages[node];
+        let children = &self.children[node];
+        let repeated = shown[node] && !children.is_empty();
+        let mut dependencies = Vec::new();
+        if !repeated && depth != Some(0) {
+            shown[node] = true;
+            for (alias, child, kind) in children {
+                // a peer stops here, as in the text tree
+                let depth = match kind {
+                    DependencyKind::Peer(_) => Some(0),
+                    _ => depth.map(|depth| depth - 1),
+                };
+                dependencies.push(self.node_json(*child, alias, kind, depth, shown));
+            }
+        }
+        json!({
+            "alias": alias,
+            "name": package.name,
+            "version": package.version,
+            "environment": package.context().as_str(),
+            "optional": matches!(kind, DependencyKind::Optional),
+            "peer": matches!(kind, DependencyKind::Peer(_)),
+            "repeated": repeated,
+            "dependencies": dependencies,
+        })
+    }
+
     /** every path from a manifest entry down to a package that `wanted`
     names, by its scope/name or by the alias of the last hop. */
     // ponytail: every path, so many diamonds print many lines. dedupe by parent if that grows too long
@@ -342,6 +416,50 @@ impl<'lock> Graph<'lock> {
             self.walk(path, wanted, found);
             path.pop();
         }
+    }
+
+    /** the `--json` paths: each package that matched, in the order of
+    [`Graph::why`], with each path to it. a path starts at the manifest
+    entry and ends at the package. */
+    fn why_json(&self, wanted: &str, paths: &[(&Root, Vec<Hop<'_>>)]) -> Value {
+        let mut targets: Vec<usize> = Vec::new();
+        for (_, path) in paths {
+            let (_, target) = path[path.len() - 1];
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        let matches: Vec<Value> = targets
+            .into_iter()
+            .map(|target| {
+                let package = &self.packages[target];
+                let paths: Vec<Value> = paths
+                    .iter()
+                    .filter(|(_, path)| path[path.len() - 1].1 == target)
+                    .map(|(root, path)| {
+                        let hops: Vec<Value> = path
+                            .iter()
+                            .map(|&(alias, node)| {
+                                let package = &self.packages[node];
+                                json!({
+                                    "alias": alias,
+                                    "name": package.name,
+                                    "version": package.version,
+                                })
+                            })
+                            .collect();
+                        json!({ "dev": root.dev, "path": hops })
+                    })
+                    .collect();
+                json!({
+                    "name": package.name,
+                    "version": package.version,
+                    "environment": package.context().as_str(),
+                    "paths": paths,
+                })
+            })
+            .collect();
+        json!({ "version": ui::JSON_VERSION, "package": wanted, "matches": matches })
     }
 
     /// the why text: each package that matched, then each path to it.
@@ -644,7 +762,119 @@ mod tests {
         let by = brought_in_by(&manifest, &lock, &base).unwrap();
         assert_eq!(by[1], ["React"]);
         assert_eq!(by[2], ["React"]);
+        // the json tree marks the same edges, and the peer stops there too
+        let json = graph.tree_json(None);
+        let marks = |node: &Value| json!([node["optional"], node["peer"]]);
+        assert_eq!(marks(&json["dependencies"][1]), json!([true, false]));
+        let ui = &json["dependencies"][2]["dependencies"];
+        assert_eq!(marks(&ui[0]), json!([true, false]));
+        assert_eq!(marks(&ui[1]), json!([false, true]));
+        assert_eq!(ui[1]["repeated"], json!(true));
+        assert_eq!(ui[1]["dependencies"], json!([]));
+        let _ = fs::remove_dir_all(&base);
+    }
 
+    /// the `--json` shapes of `embr tree` and `embr why`.
+    #[test]
+    fn the_json_tree_and_paths_follow_the_text() {
+        let base = project("json");
+        let lock: Lockfile = toml::from_str(LOCK).unwrap();
+        let graph = read(&base, &lock).unwrap();
+        let node = |alias: &str, name: &str, version: &str, environment: &str, deps: Value| {
+            json!({
+                "alias": alias,
+                "name": name,
+                "version": version,
+                "environment": environment,
+                "optional": false,
+                "peer": false,
+                "repeated": false,
+                "dependencies": deps,
+            })
+        };
+        let root = |mut node: Value, dev: bool| {
+            node["dev"] = json!(dev);
+            node
+        };
+        let repeated = |alias: &str, name: &str, version: &str| {
+            let mut node = node(alias, name, version, "roblox", json!([]));
+            node["repeated"] = json!(true);
+            node
+        };
+        let util = node("Util", "chief/util", "0.1.0", "roblox", json!([]));
+        let traits = node("traits", "chief/traits", "0.2.0", "roblox", json!([util]));
+        let helper = node("helper", "chief/helper", "1.0.0", "roblox", json!([traits]));
+        let core = node(
+            "Core",
+            "chief/core",
+            "0.3.0",
+            "roblox",
+            json!([helper, repeated("traits", "chief/traits", "0.2.0")]),
+        );
+        let tools = node(
+            "tools",
+            "acme/tools",
+            "0.1.0",
+            "roblox",
+            json!([repeated("core", "chief/core", "0.3.0")]),
+        );
+        let lest = node("lest", "alloy/lest", "0.2.0", "roblox", json!([]));
+        let server_util = node("util", "chief/util", "0.1.0", "roblox_server", json!([]));
+        let signal = node(
+            "signal",
+            "acme/signal",
+            "1.0.0",
+            "roblox_server",
+            json!([server_util]),
+        );
+        assert_eq!(
+            graph.tree_json(None),
+            json!({
+                "version": 1,
+                "dependencies": [
+                    root(core, false),
+                    root(tools, false),
+                    root(lest, true),
+                    root(signal, false),
+                ],
+            })
+        );
+        // depth 0 keeps the roots and drops what is under them
+        let top = graph.tree_json(Some(0));
+        assert_eq!(top["dependencies"].as_array().unwrap().len(), 4);
+        assert_eq!(top["dependencies"][0]["dependencies"], json!([]));
+
+        let hop = |alias: &str, name: &str, version: &str| json!({ "alias": alias, "name": name, "version": version });
+        let paths = graph.paths_to("chief/helper");
+        assert_eq!(
+            graph.why_json("chief/helper", &paths),
+            json!({
+                "version": 1,
+                "package": "chief/helper",
+                "matches": [{
+                    "name": "chief/helper",
+                    "version": "1.0.0",
+                    "environment": "roblox",
+                    "paths": [
+                        {
+                            "dev": false,
+                            "path": [
+                                hop("Core", "chief/core", "0.3.0"),
+                                hop("helper", "chief/helper", "1.0.0"),
+                            ],
+                        },
+                        {
+                            "dev": false,
+                            "path": [
+                                hop("tools", "acme/tools", "0.1.0"),
+                                hop("core", "chief/core", "0.3.0"),
+                                hop("helper", "chief/helper", "1.0.0"),
+                            ],
+                        },
+                    ],
+                }],
+            })
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

@@ -8,6 +8,7 @@ use crate::registry::notices::{Level, Meta};
 use crate::ui;
 use clap::Args;
 use crossterm::style::Stylize;
+use serde_json::json;
 use toml::Value;
 
 #[derive(Args, Debug)]
@@ -20,6 +21,9 @@ pub struct InfoArgs {
     /// Index key from [indices], ember, or local, in place of the default index
     #[arg(long)]
     pub index: Option<String>,
+    /// Print the details as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// the versions listed before "and N more".
@@ -63,6 +67,9 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
             req: req_text.to_string(),
         })?;
 
+    if args.json {
+        return ui::print_json(&document(&name, &entries, shown, &meta));
+    }
     let mut add = format!("embr add {name}");
     if let Some(version) = &args.version {
         add.push_str(&format!(" --version \"{version}\""));
@@ -295,6 +302,172 @@ fn describe(
         out.push_str(&format!("Add it with `{add}`\n"));
     }
     out
+}
+
+/** the `--json` details: the package-wide data, the version that the
+text shows as `shown`, and every version, newest first, with each of its
+targets. */
+fn document(
+    name: &str,
+    entries: &[Candidate],
+    shown: &Candidate,
+    meta: &Meta,
+) -> serde_json::Value {
+    let text = |entry: &Candidate, key: &str| {
+        entry
+            .entry
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let clean =
+        |text: Option<&String>| text.map(|text| ui::strip_controls(text).trim().to_string());
+    let target = |entry: &Candidate| {
+        let environment = entry.environment.map_or_else(
+            || entry.target.clone().unwrap_or_default(),
+            |env| env.to_string(),
+        );
+        json!({ "environment": environment, "language": entry.language.as_str() })
+    };
+    let same_version: Vec<&Candidate> = entries
+        .iter()
+        .filter(|entry| entry.version == shown.version)
+        .collect();
+    let mut requires = serde_json::Map::new();
+    for entry in &same_version {
+        for (key, req) in entry
+            .entry
+            .get("requires")
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+        {
+            requires
+                .entry(key.clone())
+                .or_insert_with(|| json!(req.as_str()));
+        }
+    }
+    let (dependencies, dev_dependencies) = dependencies_json(&shown.entry);
+    let authors: Vec<&str> = shown
+        .entry
+        .get("authors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+
+    let mut versions: Vec<&semver::Version> = entries.iter().map(|entry| &entry.version).collect();
+    versions.dedup();
+    let versions: Vec<serde_json::Value> = versions
+        .into_iter()
+        .map(|version| {
+            let targets: Vec<serde_json::Value> = entries
+                .iter()
+                .filter(|entry| entry.version == *version)
+                .map(|entry| {
+                    let mut target = target(entry);
+                    target["yanked"] = json!(entry.yanked);
+                    target["deprecated"] = json!(clean(entry.deprecated.as_ref()));
+                    target
+                })
+                .collect();
+            json!({ "version": version.to_string(), "targets": targets })
+        })
+        .collect();
+
+    let notices: Vec<serde_json::Value> = meta
+        .notices
+        .iter()
+        .map(|notice| {
+            json!({
+                "id": notice.id,
+                "level": match notice.level {
+                    Level::Security => "security",
+                    Level::Warning => "warning",
+                    Level::Notice => "notice",
+                },
+                "message": ui::strip_controls(&notice.message).trim(),
+                "versions": notice.versions,
+                "posted_by": notice.posted_by,
+                "posted_at": notice.posted_at,
+            })
+        })
+        .collect();
+
+    json!({
+        "version": ui::JSON_VERSION,
+        "name": name,
+        "deprecated": clean(meta.deprecated.as_ref()),
+        "replacement": meta.replacement.as_deref().map(ui::strip_controls),
+        "notices": notices,
+        "shown": {
+            "version": shown.version.to_string(),
+            "yanked": shown.yanked,
+            "deprecated": clean(shown.deprecated.as_ref()),
+            "description": text(shown, "description"),
+            "license": text(shown, "license"),
+            "repository": text(shown, "repository"),
+            "homepage": text(shown, "homepage"),
+            "authors": authors,
+            "published_at": text(shown, "published_at"),
+            "published_by": text(shown, "published_by"),
+            "targets": same_version.iter().map(|entry| target(entry)).collect::<Vec<_>>(),
+            "requires": requires,
+            "dependencies": dependencies,
+            "dev_dependencies": dev_dependencies,
+        },
+        "versions": versions,
+    })
+}
+
+/** the dependencies and dev dependencies of an entry for `--json`, read
+as [`dependencies`] reads them: `{alias, name, version, index, optional, peer}`. */
+fn dependencies_json(entry: &Value) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let (mut runtime, mut dev) = (Vec::new(), Vec::new());
+    for (table, in_dev) in [
+        ("dependencies", false),
+        ("optional-dependencies", false),
+        ("peer-dependencies", false),
+        ("dev-dependencies", true),
+    ] {
+        for (alias, spec) in entry
+            .get(table)
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+        {
+            let (spec, kind) = match spec {
+                Value::Array(pair) => (pair.first(), pair.get(1).and_then(Value::as_str)),
+                spec => (Some(spec), None),
+            };
+            let Some(spec) = spec else {
+                continue;
+            };
+            let field = |key: &str| spec.get(key).and_then(Value::as_str);
+            let name = ["name", "wally", "workspace", "repo"]
+                .into_iter()
+                .find_map(field)
+                .unwrap_or("?");
+            let dependency = json!({
+                "alias": alias,
+                "name": name.strip_prefix("wally#").unwrap_or(name),
+                "version": field("version").unwrap_or("*"),
+                "index": field("index"),
+                "optional": table == "optional-dependencies"
+                    || spec.get("optional").and_then(Value::as_bool) == Some(true),
+                "peer": table == "peer-dependencies" || kind == Some("peer"),
+            });
+            if in_dev || kind == Some("dev") {
+                dev.push(dependency);
+            } else {
+                runtime.push(dependency);
+            }
+        }
+    }
+    (runtime, dev)
 }
 
 /// a target as a person reads it: the environment, and the language when it is not luau.
@@ -587,6 +760,80 @@ versions = "=1.0.0"
                  Security cccccccccccc for =1.0.0: 1.0.0 sends the place file to a remote host\n"
             ),
             "{text}"
+        );
+    }
+
+    /// the `--json` shape of `embr info`.
+    #[test]
+    fn the_json_details_hold_the_shown_version_and_every_version() {
+        let file = format!(
+            "{ENTRY}\n[meta]\ndeprecated = \"use acme/jet\"\nreplacement = \"acme/jet\"\n\n\
+             [[meta.notices]]\nid = \"aaaaaaaaaaaa\"\nlevel = \"security\"\n\
+             message = \"1.1.0 runs a miner\"\nversions = \"=1.1.0\"\n\
+             posted_by = \"acme\"\nposted_at = \"2026-11-02T12:00:00Z\"\n"
+        );
+        let (entries, meta) = entries(&file);
+        let shown = entries.iter().find(|entry| !entry.yanked).unwrap();
+        let target = |environment: &str, language: &str| json!({ "environment": environment, "language": language });
+        let flagged =
+            |environment: &str, language: &str, yanked: bool, deprecated: Option<&str>| {
+                json!({
+                    "environment": environment,
+                    "language": language,
+                    "yanked": yanked,
+                    "deprecated": deprecated,
+                })
+            };
+        assert_eq!(
+            document("acme/rocket", &entries, shown, &meta),
+            json!({
+                "version": 1,
+                "name": "acme/rocket",
+                "deprecated": "use acme/jet",
+                "replacement": "acme/jet",
+                "notices": [{
+                    "id": "aaaaaaaaaaaa",
+                    "level": "security",
+                    "message": "1.1.0 runs a miner",
+                    "versions": "=1.1.0",
+                    "posted_by": "acme",
+                    "posted_at": "2026-11-02T12:00:00Z",
+                }],
+                "shown": {
+                    "version": "1.1.0",
+                    "yanked": false,
+                    "deprecated": "use 2.0",
+                    "description": "Fast rockets",
+                    "license": null,
+                    "repository": "https://github.com/acme/rocket",
+                    "homepage": "https://rocket.acme.dev",
+                    "authors": [],
+                    "published_at": "2026-10-20T18:30:00Z",
+                    "published_by": "acme",
+                    "targets": [target("lune", "alloy"), target("roblox", "luau")],
+                    "requires": { "alloy": "^0.4.0", "lune": ">=0.9.0" },
+                    "dependencies": [
+                        { "alias": "Signal", "name": "acme/signal", "version": "^1.0.0", "index": null, "optional": false, "peer": false },
+                        { "alias": "jecs", "name": "ukendio/jecs", "version": "^0.11.0", "index": "wally", "optional": false, "peer": false },
+                        { "alias": "trace", "name": "acme/trace", "version": "^2.0.0", "index": null, "optional": true, "peer": false },
+                        { "alias": "React", "name": "jsdotlua/react", "version": "^17.0.0", "index": null, "optional": false, "peer": true },
+                    ],
+                    "dev_dependencies": [
+                        { "alias": "testkit", "name": "evaera/testkit", "version": "^1.0.0", "index": null, "optional": false, "peer": false },
+                    ],
+                },
+                "versions": [
+                    { "version": "2.0.0", "targets": [flagged("lune", "alloy", true, None)] },
+                    {
+                        "version": "1.1.0",
+                        "targets": [
+                            flagged("lune", "alloy", false, Some("use 2.0")),
+                            flagged("roblox", "luau", false, None),
+                        ],
+                    },
+                    { "version": "1.0.0", "targets": [flagged("roblox", "luau", false, None)] },
+                ],
+            })
         );
     }
 
