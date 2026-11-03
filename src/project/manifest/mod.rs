@@ -12,7 +12,8 @@ use std::path::Path;
 
 pub const MANIFEST_FILE: &str = "ember.toml";
 
-/// the manifest's name before the ember rename. still read, never written.
+/** the manifest's name before the ember rename. read with a warning until
+embr 2.0, never written. */
 pub const LEGACY_MANIFEST_FILE: &str = "lpm.toml";
 
 /** The manifest to read inside `dir`.
@@ -1272,6 +1273,15 @@ impl Manifest {
         }
         let text = std::fs::read_to_string(path)?;
         let mut raw: toml::Table = text.parse()?;
+        if path
+            .file_name()
+            .is_some_and(|name| name == LEGACY_MANIFEST_FILE)
+        {
+            crate::ui::warn_deprecated(LEGACY_MANIFEST_FILE, MANIFEST_FILE);
+        }
+        for (old, new) in old_spellings(&raw) {
+            crate::ui::warn_deprecated(&old, &new);
+        }
         let manifest: Manifest = if inherit::inherits(&raw) {
             inherit::apply(&mut raw, path.parent().unwrap_or(Path::new("")))?;
             raw.try_into()?
@@ -1539,6 +1549,65 @@ impl Manifest {
         }
         Ok(script)
     }
+}
+
+/** the deprecated spellings in a manifest's TOML, each as (old, new) for
+[`crate::ui::warn_deprecated`]. they still parse in embr 1.x: the serde
+aliases and [`Environment::from_embr`] read them. the schema marks the same
+spellings deprecated. */
+pub(crate) fn old_spellings(raw: &toml::Table) -> Vec<(String, String)> {
+    let environment = |value: Option<&toml::Value>| match value.and_then(toml::Value::as_str) {
+        Some("shared") => Some((
+            "the environment `shared`".to_string(),
+            "`roblox`".to_string(),
+        )),
+        Some("server") => Some((
+            "the environment `server`".to_string(),
+            "`roblox_server`".to_string(),
+        )),
+        _ => None,
+    };
+    let targets: Vec<&toml::Table> = match raw.get("target") {
+        Some(toml::Value::Table(target)) => vec![target],
+        Some(toml::Value::Array(targets)) => {
+            targets.iter().filter_map(toml::Value::as_table).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut found = Vec::new();
+    for target in targets {
+        for (old, new) in [
+            ("include", "includes"),
+            ("exclude", "excludes"),
+            ("workspace_members", "workspace"),
+        ] {
+            if target.contains_key(old) {
+                found.push((format!("`{old}` in [target]"), format!("`{new}`")));
+            }
+        }
+        found.extend(environment(target.get("environment")));
+    }
+    if raw
+        .get("config")
+        .is_some_and(|config| config.get("shared-packages-out").is_some())
+    {
+        found.push((
+            "`shared-packages-out` in [config]".to_string(),
+            "`roblox-packages-out`".to_string(),
+        ));
+    }
+    for table in [
+        "dependencies",
+        "dev-dependencies",
+        "peer-dependencies",
+        "overrides",
+    ] {
+        let entries = raw.get(table).and_then(toml::Value::as_table);
+        for entry in entries.into_iter().flat_map(toml::Table::values) {
+            found.extend(environment(entry.get("target")));
+        }
+    }
+    found
 }
 
 /** shape of a GitHub username, 1-39 chars, alphanumeric or dashes, no leading/
@@ -2187,6 +2256,39 @@ mod tests {
                 .contains("override 'ui.core' has the key 'index_url'"),
             "{error}"
         );
+    }
+
+    /// each deprecated spelling gives one (old, new) pair for its warning.
+    #[test]
+    fn old_spellings_name_their_new_spelling() {
+        let raw: toml::Table = "[[target]]\nenvironment = \"shared\"\ninclude = [\"src\"]\n\
+             workspace_members = [\"places/*\"]\n\n\
+             [[target]]\nenvironment = \"server\"\nexclude = [\"x\"]\n\n\
+             [config]\nshared-packages-out = \"packages/shared\"\n\n\
+             [dependencies]\nlapis = { name = \"a/lapis\", version = \"^1\", target = \"server\" }\n\
+             plain = { name = \"a/plain\", version = \"^1\", target = \"roblox\" }\n"
+            .parse()
+            .unwrap();
+        let new: Vec<String> = old_spellings(&raw)
+            .into_iter()
+            .map(|(_, new)| new)
+            .collect();
+        assert_eq!(
+            new,
+            [
+                "`includes`",
+                "`workspace`",
+                "`roblox`",
+                "`excludes`",
+                "`roblox_server`",
+                "`roblox-packages-out`",
+                "`roblox_server`",
+            ]
+        );
+        let current: toml::Table = "[target]\nenvironment = \"roblox\"\nincludes = [\"src\"]\n"
+            .parse()
+            .unwrap();
+        assert!(old_spellings(&current).is_empty());
     }
 
     /// a path or git entry takes `features` and `default-features`, and keeps them on a write.

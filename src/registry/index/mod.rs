@@ -33,7 +33,7 @@ pub enum Refresh {
 /// default TTL. `EMBER_INDEX_TTL_SECS` overrides it, `0` meaning always refresh.
 const DEFAULT_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// the knob's name before the ember rename, still honoured for existing setups.
+/// the knob's name before the ember rename. it works, with a warning, until embr 2.0.
 const LEGACY_TTL_VAR: &str = "LPM_INDEX_TTL_SECS";
 const TTL_VAR: &str = "EMBER_INDEX_TTL_SECS";
 
@@ -47,6 +47,9 @@ pub(crate) fn index_ttl() -> Duration {
         let set = std::env::var(TTL_VAR)
             .map(|value| (TTL_VAR, value))
             .or_else(|_| std::env::var(LEGACY_TTL_VAR).map(|value| (LEGACY_TTL_VAR, value)));
+        if matches!(set, Ok((LEGACY_TTL_VAR, _))) {
+            crate::ui::warn_deprecated(LEGACY_TTL_VAR, TTL_VAR);
+        }
         match set {
             Err(_) => DEFAULT_INDEX_TTL,
             Ok((name, value)) => match value.trim().parse::<u64>() {
