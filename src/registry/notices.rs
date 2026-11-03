@@ -163,8 +163,10 @@ impl Item {
             _ => ui::strip_controls(&self.text).trim().to_string(),
         };
         if let Some(replacement) = &self.replacement {
+            // "Old.", so not "Old., use"
+            let reason = text.trim_end_matches('.');
             let replacement = ui::strip_controls(replacement);
-            text = format!("{text}, use {replacement} instead");
+            text = format!("{reason}, use {replacement} instead");
         }
         let text = text.replace('\n', "\n  ");
         let line = match (with_package, &self.version) {
@@ -392,7 +394,7 @@ target = "roblox"
 download = "https://cdn/acme/rocket/1.2.0.tar.gz"
 
 [meta]
-deprecated = "no longer kept up"
+deprecated = "no longer kept up."
 replacement = "acme/jet"
 
 [[meta.notices]]
@@ -450,7 +452,7 @@ versions = "one point two"
     #[test]
     fn meta_reads_the_deprecation_the_replacement_and_the_notices() {
         let meta = Meta::of(&file());
-        assert_eq!(meta.deprecated.as_deref(), Some("no longer kept up"));
+        assert_eq!(meta.deprecated.as_deref(), Some("no longer kept up."));
         assert_eq!(meta.replacement.as_deref(), Some("acme/jet"));
         // the notice with a range that does not parse drops
         let ids: Vec<&str> = meta.notices.iter().map(|n| n.id.as_str()).collect();

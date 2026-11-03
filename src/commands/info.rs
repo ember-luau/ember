@@ -147,10 +147,11 @@ fn describe(
             .as_ref()
             .filter(|_| meta.deprecated.is_some())
         {
-            line.push_str(&format!(
-                ". Use {} instead",
+            line = format!(
+                "{}. Use {} instead",
+                line.trim_end_matches('.'),
                 ui::strip_controls(replacement)
-            ));
+            );
         }
         out.push_str(&format!("{}\n", line.with(ui::accent())));
     }
