@@ -4,8 +4,8 @@ release wrote for it, unchanged. embr 1.x reads all of them.
 
 The test publishes the packages of `registry` to a local registry in a
 scratch home, so it runs offline. acme/fuel 0.2.1 is there too, which the
-requirement `^0.2` takes, so a `--locked` install that moves a locked
-version shows.
+requirement `^0.2` takes, so an install that moves a locked version
+shows.
 
 Unix only: the test points HOME at a scratch folder, and on Windows embr
 finds the home folder without HOME. */
@@ -115,15 +115,21 @@ fn locks_from_released_versions_install_unchanged() {
             "{stdout}"
         );
 
-        /* a plain install reads the old lock too, and writes it again in the
-        current format. it resolves again, so acme/fuel moves to 0.2.1 */
+        /* a plain install reads the old lock too, writes it again in the
+        current format, and keeps each locked version that ember.toml takes */
         embr(&game, &home, &["install"]);
-        let pinned = pins(&game);
-        assert_eq!(
-            pinned[&("acme/fuel".into(), "roblox_server".into())],
-            "0.2.1"
-        );
-        assert_eq!(pinned.len(), locked.len(), "{release}: {pinned:?}");
+        assert_eq!(pins(&game), locked, "install moved a version of {release}");
+        // --update moves the package that it names, and nothing else
+        embr(&game, &home, &["install", "--update", "acme/fuel"]);
+        let moved = pins(&game);
+        let fuel = ("acme/fuel".to_string(), "roblox_server".to_string());
+        assert_eq!(moved[&fuel], "0.2.1", "{release}");
+        let rest = |pins: &BTreeMap<_, _>| {
+            let mut pins = pins.clone();
+            pins.remove(&fuel);
+            pins
+        };
+        assert_eq!(rest(&moved), rest(&locked), "{release}");
         let _ = fs::remove_dir_all(&base);
     }
 }

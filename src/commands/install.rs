@@ -42,7 +42,7 @@ pub struct InstallArgs {
     #[arg(long)]
     pub locked: bool,
 
-    /// Re-resolve, re-fetch indices, and re-download archives even when caches are fresh
+    /// Move every package to the newest version that ember.toml takes, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
     pub refresh: bool,
 
@@ -50,7 +50,7 @@ pub struct InstallArgs {
     #[arg(long)]
     pub strict_peers: bool,
 
-    /// Download this package again and lock its archive hash, also when the hash changed; a git package moves to the newest commit of its branch or tag
+    /// Move this package to the newest version that ember.toml takes, and lock its archive hash again, also when the hash changed; a git package moves to the newest commit of its branch or tag
     #[arg(long, value_name = "PACKAGE", conflicts_with = "locked")]
     pub update: Vec<String>,
 }

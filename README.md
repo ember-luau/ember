@@ -985,6 +985,15 @@ Other clients read an `mcpServers` block like this one:
 }
 ```
 
+## The lockfile
+
+`embr install` writes `ember.lock`. A later install keeps each locked
+version that `ember.toml` still takes, as Cargo does. A version moves only
+when its requirement no longer takes it, when its entry is new, with
+`embr install --update <scope/name>`, or with `embr install --refresh`,
+which moves all of them. `embr install --locked` installs the lock as it
+is.
+
 ## Compatibility
 
 From embr 1.0.0, `ember.toml`, `ember.lock` (version 2), the `--json`
