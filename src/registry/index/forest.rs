@@ -151,6 +151,8 @@ fn resolved(
                 index_url: None,
                 alias,
                 optional: false,
+                features: Vec::new(),
+                default_features: true,
             }
         })
         .collect();
@@ -171,6 +173,7 @@ fn resolved(
             .archived
             .then(|| "its author archived it on Forest".to_string()),
         dependencies,
+        features: Default::default(),
         source: DownloadSource::TarGz {
             url: format!("{CDN_URL}/{integrity}.tgz"),
         },

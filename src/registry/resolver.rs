@@ -1,11 +1,12 @@
 use crate::error::Error;
+use crate::project::manifest::features::{self, Features};
 use crate::project::manifest::{
     Dependency, Environment, Language, Manifest, Override, dependency_target, override_paths,
     parse_version_req, takes,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 /** what a project may install, set by its own environment and language,
@@ -132,6 +133,9 @@ pub struct ResolvedInstall {
     /** only optional edges reach this package. install skips it, with one
     line, when its download fails. */
     pub optional: bool,
+    /** its enabled features, sorted: the union over every dependent in this
+    environment root, with the features that those turn on. */
+    pub features: Vec<String>,
 }
 
 /** the nearest optional edge above a queued dependency, or the dependency
@@ -164,6 +168,21 @@ struct Ask {
     transitively -- an `[overrides]` value, or a workspace member's own
     dependency resolved from the root -- does nothing there. */
     target: Option<Environment>,
+    /// the features the specifier turns on, see [`Dependency::features`].
+    features: BTreeSet<String>,
+    /// whether it keeps the package's `default` features on.
+    defaults: bool,
+}
+
+/** one dependency edge of a walked package: the package it names, what it
+asks for, its alias path, its alias, and whether it is optional. */
+#[derive(Clone)]
+struct Child {
+    name: String,
+    ask: Ask,
+    path: Vec<String>,
+    alias: String,
+    optional: bool,
 }
 
 /// One dependency waiting to resolve.
@@ -408,7 +427,13 @@ fn resolve_once(
         }
         let Some(QueueEntry {
             name,
-            ask: Ask { request, target },
+            ask:
+                Ask {
+                    request,
+                    target,
+                    features: asked,
+                    defaults,
+                },
             link,
             alias_path,
             context,
@@ -430,23 +455,25 @@ fn resolve_once(
         before any network. a seed's context is decided by its own resolve,
         so its gate has to wait until just after, below */
         if let Some(context) = context
-            && let Some((existing, first_req, first_by, first_optional)) =
-                resolved.get(&(name.clone(), context))
+            && let Some(existing) = resolved.get_mut(&(name.clone(), context))
         {
             /* a prerelease here was the latest of a package with no stable
-            version, so another `^` takes it too */
-            if takes(&req, &existing.version, true) {
+            version, so another `^` takes it too. the features that this
+            edge asks for join the package's, and what they turn on queues */
+            if takes(&req, &existing.install.version, true) {
+                existing.enable(&asked, defaults, &required_by)?;
+                existing.queue_edges(&mut queue, &mut edges);
                 continue;
             }
             // a required edge that conflicts with an optional one leaves the optional one out
             if failing.is_none() {
-                failing.clone_from(first_optional);
+                failing.clone_from(&existing.optional);
             }
             return Err(Error::DependencyConflict {
                 name,
                 context,
-                first: first_req.clone(),
-                first_by: first_by.label(),
+                first: existing.req.clone(),
+                first_by: existing.by.label(),
                 second: req_text,
                 second_by: required_by.label(),
             });
@@ -459,9 +486,9 @@ fn resolve_once(
         any transitive pops, so a seeded member is always visible here. */
         let request = match request {
             Request::Registry { .. }
-                if resolved.iter().any(|((resolved_name, _), (install, ..))| {
+                if resolved.iter().any(|((resolved_name, _), existing)| {
                     *resolved_name == name
-                        && matches!(install.source, DownloadSource::Workspace { .. })
+                        && matches!(existing.install.source, DownloadSource::Workspace { .. })
                 }) =>
             {
                 Request::Workspace
@@ -476,9 +503,9 @@ fn resolve_once(
         let mut redirects: BTreeMap<String, String> = BTreeMap::new();
         let mut pending_matched: Vec<Vec<String>> = Vec::new();
         let mut pending_discovered: Vec<(Vec<String>, String)> = Vec::new();
-        let mut children: Vec<(String, Ask, Vec<String>, String, bool)> = Vec::new();
+        let mut children: Vec<Child> = Vec::new();
 
-        let (version, environment, source, sha256, index_url) = match request {
+        let (version, environment, source, sha256, index_url, table) = match request {
             Request::Registry { index_url, .. } => {
                 let index = open_index(indices, &index_url, refresh, ttl_skipped)?;
                 /* a multi-target entry picks the target of the tree it
@@ -544,17 +571,19 @@ fn resolve_once(
                                         .unwrap_or_else(|| index_url.clone()),
                                 },
                                 target: None,
+                                features: dependency.features.iter().cloned().collect(),
+                                defaults: dependency.default_features,
                             },
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((
-                        child_name,
-                        child_ask,
-                        child_path,
-                        dependency.alias.clone(),
-                        dependency.optional,
-                    ));
+                    children.push(Child {
+                        name: child_name,
+                        ask: child_ask,
+                        path: child_path,
+                        alias: dependency.alias.clone(),
+                        optional: dependency.optional,
+                    });
                 }
 
                 (
@@ -563,6 +592,7 @@ fn resolve_once(
                     package.source,
                     package.sha256,
                     index_url,
+                    package.features,
                 )
             }
             Request::Workspace => {
@@ -605,13 +635,13 @@ fn resolve_once(
                         ),
                     };
                     pending_discovered.push((child_path.clone(), child_name.clone()));
-                    children.push((
-                        child_name,
-                        child_ask,
-                        child_path,
-                        alias.clone(),
-                        dependency.optional(),
-                    ));
+                    children.push(Child {
+                        name: child_name,
+                        ask: child_ask,
+                        path: child_path,
+                        alias: alias.clone(),
+                        optional: dependency.optional(),
+                    });
                 }
 
                 let path =
@@ -622,6 +652,7 @@ fn resolve_once(
                     DownloadSource::Workspace { path },
                     None,
                     "workspace".to_string(),
+                    member.manifest.features.clone(),
                 )
             }
         };
@@ -638,25 +669,26 @@ fn resolve_once(
             override diagnostics can still find this root's tree */
             seed_contexts.insert(alias_path[0].clone(), context);
             root_edges.push(((name.clone(), context), optional.is_some()));
-            if let Some((existing, first_req, first_by, first_optional)) =
-                resolved.get_mut(&(name.clone(), context))
-            {
-                if takes(&req, &existing.version, true) {
+            if let Some(existing) = resolved.get_mut(&(name.clone(), context)) {
+                if takes(&req, &existing.install.version, true) {
                     /* a dev seed that a [dependencies] subtree already
                     brought in still gets its link */
-                    if existing.link.is_none() {
-                        existing.link = link;
+                    if existing.install.link.is_none() {
+                        existing.install.link = link;
                     }
-                    continue; // this tree already walked the package, children drop
+                    // this tree already walked the package, only new features queue
+                    existing.enable(&asked, defaults, &required_by)?;
+                    existing.queue_edges(&mut queue, &mut edges);
+                    continue;
                 }
                 if failing.is_none() {
-                    failing.clone_from(first_optional);
+                    failing.clone_from(&existing.optional);
                 }
                 return Err(Error::DependencyConflict {
                     name,
                     context,
-                    first: first_req.clone(),
-                    first_by: first_by.label(),
+                    first: existing.req.clone(),
+                    first_by: existing.by.label(),
                     second: req_text,
                     second_by: required_by.label(),
                 });
@@ -682,47 +714,31 @@ fn resolve_once(
             .or_insert(alias_path.clone());
         overrides_matched.extend(pending_matched);
         discovered.extend(pending_discovered);
-        let requirer_id = format!("{name}@{version}");
-        let walked = edges.entry((name.clone(), context)).or_default();
-        for (child_name, child_ask, child_path, child_alias, child_optional) in children {
-            walked.push(((child_name.clone(), context), child_optional));
-            queue.push_back(QueueEntry {
-                optional: match child_optional {
-                    true => Some((child_path.clone(), child_name.clone())),
-                    false => optional.clone(),
-                },
-                name: child_name,
-                ask: child_ask,
-                link: None,
-                alias_path: child_path,
-                context: Some(context),
-                required_by: Requirer::Package {
-                    id: requirer_id.clone(),
-                    alias: child_alias,
-                },
-            });
-        }
-
-        resolved.insert(
-            (name.clone(), context),
-            (
-                ResolvedInstall {
-                    name,
-                    version,
-                    environment,
-                    context,
-                    source,
-                    sha256,
-                    index_url,
-                    link,
-                    redirects,
-                    optional: false,
-                },
-                req_text,
-                required_by,
-                optional,
-            ),
-        );
+        let mut walked = Resolved {
+            install: ResolvedInstall {
+                name: name.clone(),
+                version,
+                environment,
+                context,
+                source,
+                sha256,
+                index_url,
+                link,
+                redirects,
+                optional: false,
+                features: Vec::new(),
+            },
+            req: req_text,
+            by: required_by.clone(),
+            optional,
+            table,
+            enabled: BTreeSet::new(),
+            children,
+            queued: BTreeMap::new(),
+        };
+        walked.enable(&asked, defaults, &required_by)?;
+        walked.queue_edges(&mut queue, &mut edges);
+        resolved.insert((name, context), walked);
     }
     *failing = None;
 
@@ -765,8 +781,10 @@ fn resolve_once(
     let required = required_packages(&root_edges, &edges);
     Ok(resolved
         .into_iter()
-        .map(|(key, (mut install, ..))| {
+        .map(|(key, walked)| {
+            let mut install = walked.install;
             install.optional = !required.contains(&key);
+            install.features = walked.enabled.into_iter().collect();
             install
         })
         .collect())
@@ -776,7 +794,108 @@ fn resolve_once(
 type Key = (String, Environment);
 
 /// one entry of the install set while it resolves, see `resolved` in [`resolve_once`].
-type Resolved = (ResolvedInstall, String, Requirer, Option<OptionalEdge>);
+struct Resolved {
+    install: ResolvedInstall,
+    /// the requirement that picked the version, and who asked, for conflicts.
+    req: String,
+    by: Requirer,
+    /// the optional edge that the package came under, None for a required one.
+    optional: Option<OptionalEdge>,
+    /// the package's [features] table.
+    table: Features,
+    /// its enabled features so far, the union over its dependents.
+    enabled: BTreeSet<String>,
+    /// every edge of the package, the gated ones too.
+    children: Vec<Child>,
+    /// the aliases queued so far, each with the features asked of it.
+    queued: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Resolved {
+    /** turns on the `asked` features, and the defaults when `defaults`.
+    `by` asked, for the error when the package has no such feature. */
+    fn enable(
+        &mut self,
+        asked: &BTreeSet<String>,
+        defaults: bool,
+        by: &Requirer,
+    ) -> Result<(), Error> {
+        let enabled = features::enable(&self.table, asked.iter().map(String::as_str), defaults)
+            .map_err(|feature| {
+                let known: Vec<&str> = self
+                    .table
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| *name != features::DEFAULT)
+                    .collect();
+                Error::FeatureUnknown {
+                    package: format!("{}@{}", self.install.name, self.install.version),
+                    feature,
+                    by: by.label(),
+                    known: match known.as_slice() {
+                        [] => "it has no features".to_string(),
+                        names => format!("its features are {}", names.join(", ")),
+                    },
+                }
+            })?;
+        self.enabled.extend(enabled);
+        Ok(())
+    }
+
+    /** queues each edge that the enabled features turn on, the first time
+    it is on and again when it is asked for more features. a gated edge
+    that no enabled feature lists stays out. a queued edge that is already
+    resolved joins its features in the dedup gate. */
+    fn queue_edges(
+        &mut self,
+        queue: &mut VecDeque<QueueEntry>,
+        edges: &mut HashMap<Key, Vec<(Key, bool)>>,
+    ) {
+        let aliases: BTreeSet<&str> = self.children.iter().map(|c| c.alias.as_str()).collect();
+        let is_alias = |alias: &str| aliases.contains(alias);
+        let gated = features::gated(&self.table, &is_alias);
+        let (on, asked) = features::turned_on(&self.table, &self.enabled, &is_alias);
+        let key = (self.install.name.clone(), self.install.context);
+        let id = format!("{}@{}", self.install.name, self.install.version);
+        for child in &self.children {
+            if gated.contains(&child.alias) && !on.contains(&child.alias) {
+                continue;
+            }
+            let mut wants = child.ask.features.clone();
+            wants.extend(asked.get(&child.alias).into_iter().flatten().cloned());
+            let queued = self.queued.get(&child.alias);
+            if queued.is_some_and(|queued| wants.is_subset(queued)) {
+                continue;
+            }
+            if queued.is_none() {
+                let edge = ((child.name.clone(), key.1), child.optional);
+                edges.entry(key.clone()).or_default().push(edge);
+            }
+            self.queued
+                .entry(child.alias.clone())
+                .or_default()
+                .extend(wants.iter().cloned());
+            queue.push_back(QueueEntry {
+                optional: match child.optional {
+                    true => Some((child.path.clone(), child.name.clone())),
+                    false => self.optional.clone(),
+                },
+                name: child.name.clone(),
+                ask: Ask {
+                    features: wants,
+                    ..child.ask.clone()
+                },
+                link: None,
+                alias_path: child.path.clone(),
+                context: Some(key.1),
+                required_by: Requirer::Package {
+                    id: id.clone(),
+                    alias: child.alias.clone(),
+                },
+            });
+        }
+    }
+}
 
 /** the packages that a path of required edges reaches from the root. an
 optional package that a required one also needs is required. */
@@ -901,6 +1020,8 @@ fn request_for(alias: &str, dependency: &Dependency, owner: &Manifest) -> Result
     Ok(Ask {
         request,
         target: dependency_target(alias, dependency)?,
+        features: dependency.features().iter().cloned().collect(),
+        defaults: dependency.default_features(),
     })
 }
 
@@ -1795,6 +1916,7 @@ mod tests {
             deprecated: Some("leaks".to_string()),
             package_deprecated: Some("use acme/new".to_string()),
             dependencies: Vec::new(),
+            features: Default::default(),
             source: DownloadSource::TarGz { url: String::new() },
             sha256: None,
         };
@@ -1822,6 +1944,7 @@ mod tests {
             deprecated: Some("leaks".to_string()),
             package_deprecated: Some("use acme/new".to_string()),
             dependencies: Vec::new(),
+            features: Default::default(),
             source: DownloadSource::TarGz { url: String::new() },
             sha256: None,
         };
@@ -1840,6 +1963,7 @@ mod tests {
             deprecated: Some("\x1b]52;c;Y3VybCBldmlsfHNo\x07old".to_string()),
             package_deprecated: Some("x\r\x1b[2K\u{9b}0m\u{8}ok".to_string()),
             dependencies: Vec::new(),
+            features: Default::default(),
             source: DownloadSource::TarGz { url: String::new() },
             sha256: None,
         };
@@ -2244,6 +2368,169 @@ mod tests {
                 "{warnings:?}"
             );
         }
+    }
+
+    /// `name [features]` for each install, and the features in brackets only when some are on.
+    fn with_features(installs: &[ResolvedInstall]) -> Vec<String> {
+        installs
+            .iter()
+            .map(|install| match install.features.as_slice() {
+                [] => install.name.clone(),
+                features => format!("{} [{}]", install.name, features.join(", ")),
+            })
+            .collect()
+    }
+
+    /// the index for the feature tests: acme/ui gates acme/icons behind `pretty`, its default.
+    fn feature_origin(name: &str) -> PesdeOrigin {
+        let needs_ui = |name: &str, features: &str| {
+            ember_entry(
+                name,
+                "1.0.0",
+                "roblox",
+                &format!(
+                    "[.dependencies.ui]\nname = \"acme/ui\"\nversion = \"^1.0.0\"\n\
+                     features = [{features}]\ndefault-features = false\n"
+                ),
+            )
+        };
+        PesdeOrigin::new(
+            name,
+            &[
+                (
+                    "acme/ui",
+                    ember_entry(
+                        "acme/ui",
+                        "1.0.0",
+                        "roblox",
+                        "[.dependencies.core]\nname = \"acme/core\"\nversion = \"^1.0.0\"\n\
+                         [.dependencies.theme]\nname = \"acme/theme\"\nversion = \"^1.0.0\"\n\
+                         [.feature-dependencies.icons]\nname = \"acme/icons\"\nversion = \"^1.0.0\"\n\
+                         [.features]\ndefault = [\"pretty\"]\npretty = [\"icons\"]\n\
+                         dark = [\"theme/dark\"]\nfast = []\n",
+                    ),
+                ),
+                ("acme/core", ember_entry("acme/core", "1.0.0", "roblox", "")),
+                (
+                    "acme/icons",
+                    ember_entry("acme/icons", "1.0.0", "roblox", ""),
+                ),
+                (
+                    "acme/theme",
+                    ember_entry("acme/theme", "1.0.0", "roblox", "[.features]\ndark = []\n"),
+                ),
+                ("acme/a", needs_ui("acme/a", "\"dark\"")),
+                ("acme/b", needs_ui("acme/b", "\"fast\"")),
+                (
+                    "acme/wide",
+                    ember_entry(
+                        "acme/wide",
+                        "1.0.0",
+                        "roblox",
+                        "[.feature-dependencies.ghost]\nname = \"acme/ghost\"\nversion = \"^1.0.0\"\noptional = true\n\
+                         [.features]\nextra = [\"ghost\"]\n",
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /** the defaults are on unless a dependent turns them off, and a gated
+    dependency installs only when an enabled feature lists it. a feature
+    can turn on a feature of a dependency. */
+    #[test]
+    fn features_gate_dependencies_and_the_defaults_can_be_off() {
+        let origin = feature_origin("features-defaults");
+
+        let (installs, _) =
+            origin.resolve("[dependencies]\nui = { name = \"acme/ui\", version = \"^1\" }\n");
+        assert_eq!(
+            with_features(&installs.unwrap()),
+            ["acme/core", "acme/icons", "acme/theme", "acme/ui [pretty]"]
+        );
+
+        let (installs, _) = origin.resolve(
+            "[dependencies]\nui = { name = \"acme/ui\", version = \"^1\", default-features = false }\n",
+        );
+        assert_eq!(
+            with_features(&installs.unwrap()),
+            ["acme/core", "acme/theme", "acme/ui"]
+        );
+
+        let (installs, _) = origin.resolve(
+            "[dependencies]\nui = { name = \"acme/ui\", version = \"^1\", features = [\"dark\"], default-features = false }\n",
+        );
+        assert_eq!(
+            with_features(&installs.unwrap()),
+            ["acme/core", "acme/theme [dark]", "acme/ui [dark]"]
+        );
+    }
+
+    /** the enabled features of a package are the union over its dependents
+    in one environment root. a dependent that the walk meets after the
+    package resolved still adds its features, and what they turn on. */
+    #[test]
+    fn features_are_the_union_over_every_dependent() {
+        let origin = feature_origin("features-union");
+        let (installs, _) = origin.resolve(
+            "[dependencies]\na = { name = \"acme/a\", version = \"^1\" }\n\
+             b = { name = \"acme/b\", version = \"^1\" }\n",
+        );
+        assert_eq!(
+            with_features(&installs.unwrap()),
+            [
+                "acme/a",
+                "acme/b",
+                "acme/core",
+                "acme/theme [dark]",
+                "acme/ui [dark, fast]"
+            ]
+        );
+
+        // the project keeps the defaults on, so acme/icons comes back
+        let (installs, _) = origin.resolve(
+            "[dependencies]\na = { name = \"acme/a\", version = \"^1\" }\n\
+             ui = { name = \"acme/ui\", version = \"^1\" }\n",
+        );
+        assert_eq!(
+            with_features(&installs.unwrap()),
+            [
+                "acme/a",
+                "acme/core",
+                "acme/icons",
+                "acme/theme [dark]",
+                "acme/ui [dark, pretty]"
+            ]
+        );
+    }
+
+    /** a feature that the package does not have fails the resolve and
+    names the features it has. a gated dependency that is also optional
+    skips with one line when its feature is on and it does not resolve. */
+    #[test]
+    fn an_unknown_feature_fails_and_an_optional_gated_dependency_skips() {
+        let origin = feature_origin("features-unknown");
+        let (installs, _) = origin.resolve(
+            "[dependencies]\nui = { name = \"acme/ui\", version = \"^1\", features = [\"icns\"] }\n",
+        );
+        assert_eq!(
+            installs.unwrap_err().to_string(),
+            "acme/ui@1.0.0 has no feature 'icns', which ember.toml (as 'ui') asks for; its features are dark, fast, pretty"
+        );
+
+        let (installs, warnings) =
+            origin.resolve("[dependencies]\nwide = { name = \"acme/wide\", version = \"^1\" }\n");
+        assert_eq!(with_features(&installs.unwrap()), ["acme/wide"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let (installs, warnings) = origin.resolve(
+            "[dependencies]\nwide = { name = \"acme/wide\", version = \"^1\", features = [\"extra\"] }\n",
+        );
+        assert_eq!(with_features(&installs.unwrap()), ["acme/wide [extra]"]);
+        assert!(
+            warnings[0].starts_with("skipped optional dependency 'wide.ghost' (acme/ghost)"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

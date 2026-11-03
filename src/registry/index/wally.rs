@@ -97,6 +97,7 @@ pub fn resolve(
         deprecated: None,
         package_deprecated: None,
         dependencies,
+        features: Default::default(),
         source: DownloadSource::Zip { url: download_url },
         // the wally index records no archive hash, so the first lock does
         sha256: None,
@@ -115,6 +116,8 @@ fn parse_dependency(alias: &str, spec: &str) -> Option<TransitiveDependency> {
         index_url: None,
         alias: alias.to_string(),
         optional: false,
+        features: Vec::new(),
+        default_features: true,
     })
 }
 

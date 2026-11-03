@@ -195,7 +195,8 @@ and `[peer-dependencies]`. Each name is an alias or the `scope/name` of an
 entry. The comments and the format of `ember.toml` stay. If a name matches
 no entry, embr shows the aliases and changes nothing.
 
-`embr remove` does not install. Run `embr install` after it. If
+A feature that lists a removed dependency loses that item. `embr remove`
+does not install. Run `embr install` after it. If
 `[patches]` or `[overrides]` still name a removed dependency, embr shows a
 warning, because `embr install` can fail on that entry. A `preremove`
 script runs before the edit, and a `postremove` script runs after it.
@@ -219,8 +220,8 @@ embr info chief/core --version "^0.2"
 - `embr info` reads the index, as an install does. It shows the newest
   version that is not yanked, or the newest version that `--version`
   matches. It also shows the description, the repository, the targets, the
-  dependencies, the dev dependencies, `requires`, a deprecation, and the 10
-  newest versions. A pesde entry also gives the license and the authors.
+  dependencies, the features, the dev dependencies, `requires`, a
+  deprecation, and the 10 newest versions. A pesde entry also gives the license and the authors.
   `--index` reads another index, such as `pesde`. A private or unlisted
   package comes from the registry API, with your login or its link key.
 
@@ -235,7 +236,8 @@ embr why chief/traits      # each path from ember.toml to a package
 Both commands read what `embr install` wrote: `ember.lock`, and the
 manifest of each installed package. Run `embr install` first. A package
 with dependencies that shows a second time gets `(*)`, and its
-dependencies do not show again. When the direct dependencies install in
+dependencies do not show again. A package with enabled features shows them
+in brackets, as in `acme/ui@1.2.0 [icons]`. When the direct dependencies install in
 more than one environment, such as `roblox` and `roblox_server`, each
 environment gets a heading.
 
@@ -453,6 +455,92 @@ index entry. The entry keeps an optional dependency in
 reads neither table, so it does not install an optional dependency and
 does not fail on one.
 
+## Features
+
+A package can have opt-in features, as in Cargo. The `[features]` table
+names them:
+
+```toml
+[dependencies]
+core = { name = "acme/core", version = "^1.0.0" }
+icons = { name = "acme/icons", version = "^2.0.0" }
+theme = { name = "acme/theme", version = "^1.0.0" }
+
+[features]
+default = ["pretty"]
+pretty = ["icons", "dark"]
+dark = ["theme/dark"]
+debug = []
+```
+
+- `default` lists the features that are on unless the project turns them
+  off.
+- Each other key is a feature. An item of its list is one of these:
+  - A dependency alias of this package. The feature turns that dependency
+    on.
+  - Another feature of this package. The feature turns it on too.
+  - `alias/feature`. The feature turns on a feature of that dependency.
+- A dependency that a feature lists by its alias is gated. It installs
+  only when an enabled feature lists it. It needs no other key. Above,
+  `icons` is gated, and `core` and `theme` always install.
+- A gated dependency can also have `optional = true`. When a feature turns
+  it on, install tries it and skips it with one line when it does not
+  resolve. When no enabled feature turns it on, it does not install.
+- The manifest check refuses a feature name that is not ASCII letters,
+  digits, `_` and `-`, a feature with the name of a dependency alias, an
+  item that names no feature and no alias, a `default` item that is not a
+  feature, and a feature that turns itself on through other features.
+
+A project picks the features of each dependency:
+
+```toml
+[dependencies]
+ui = { name = "acme/ui", version = "^1.2.0", features = ["debug"] }
+lean = { name = "acme/ui", version = "^1.2.0", default-features = false }
+```
+
+- `features` turns on more features of the package.
+  `default-features = false` turns its `default` features off.
+- `embr add acme/ui --features debug,dark --no-default-features` writes
+  both keys. A re-add keeps them when it does not set them.
+- The enabled features of a package are the union over every package and
+  project that depends on it, in the same environment root, as in Cargo.
+  So a package can get a feature that another dependent turns on.
+- A feature that the package does not have fails the install:
+
+```
+✗ acme/ui@1.2.0 has no feature 'icns', which ember.toml (as 'ui') asks for; its features are dark, debug, pretty
+```
+
+- `ember.lock` records the enabled features of each package.
+- `embr tree` shows them, as in `acme/ui@1.2.0 [dark, debug, pretty]`.
+  `embr info` lists the features, marks the defaults, and names the
+  features that turn on each gated dependency.
+- `embr remove` takes a removed dependency out of the `[features]` lists.
+
+Luau has no conditional compilation, so a package checks a feature at run
+time. A gated dependency that a feature turns on gets its link file, and
+one that is off gets none. So `pcall(require, ...)` tells them apart:
+
+```luau
+local ok, Icons = pcall(require, "@packages/icons")
+if not ok then
+  Icons = nil -- the pretty feature is off
+end
+```
+
+Install links a gated dependency only for a package whose enabled features
+turn it on, also when another package installs the same dependency. A
+feature that turns on no dependency, such as `debug = []` above, has no
+run time check. It can turn on a feature of a dependency.
+
+This needs embr 0.14.0, and a registry that keeps the new keys in the index
+entry. The entry keeps `features`, and the gated dependencies in
+`feature-dependencies`. An older embr reads only `dependencies`, so it
+installs no gated dependency, also not one that a `default` feature turns
+on, and it never fails on one. The package then runs as with every feature
+off.
+
 ## Workspace inheritance
 
 The root of a workspace can hold shared values in a `[workspace]` table. A
@@ -485,8 +573,9 @@ signal = { workspace = true }
   `[workspace]`, so `package.version` reads `workspace.package.version`.
 - `[dev-dependencies]` reads `[workspace.dependencies]`, the same as
   `[dependencies]`.
-- An inherited dependency can add `target` and `entry`. Any other key next
-  to `workspace = true` is an error.
+- An inherited dependency can add `target`, `entry`, `optional` and
+  `features`. Its `features` add to the shared ones. Any other key next to
+  `workspace = true` is an error.
 - The root can inherit from its own `[workspace]` table.
 - `embr publish` writes the values into the package, and the `[workspace]`
   table stays home.

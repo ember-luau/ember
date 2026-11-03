@@ -79,11 +79,11 @@ fn resolve(value: &mut Value, path: &mut Vec<String>, root: Option<&Table>) -> R
 }
 
 /** the value that the marker at `path` inherits from `root`, the root's
-whole manifest. a dependency can add `target`, `entry` and `optional`:
-they are the consumer's choice, as Cargo lets a member add `features` and
-`optional`. any other key
-beside `workspace = true` is an error, so nothing overrides a shared
-value without a sign. */
+whole manifest. a dependency can add `target`, `entry`, `optional` and
+`features`: they are the consumer's choice, as Cargo lets a member add
+`features` and `optional`. the member's `features` add to the shared ones.
+any other key beside `workspace = true` is an error, so nothing overrides a
+shared value without a sign. */
 fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Value, Error> {
     let field = path.join(".");
     let root = root.ok_or_else(|| Error::InheritOutsideWorkspace(field.clone()))?;
@@ -115,6 +115,19 @@ fn inherited(marker: &Table, path: &[String], root: Option<&Table>) -> Result<Va
             (_, "workspace") => {}
             (Value::Table(table), "target" | "entry" | "optional") if dependency => {
                 table.insert(key.clone(), item.clone());
+            }
+            (Value::Table(table), "features") if dependency => {
+                let mut features = table
+                    .get("features")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for feature in item.as_array().into_iter().flatten() {
+                    if !features.contains(feature) {
+                        features.push(feature.clone());
+                    }
+                }
+                table.insert(key.clone(), Value::Array(features));
             }
             _ => {
                 return Err(Error::InheritExtraKey {
@@ -150,7 +163,7 @@ mod tests {
              [workspace.package]\nversion = \"2.1.0\"\nauthors = [\"savruun\"]\n\n\
              [workspace.target]\nlanguage = \"alloy\"\n\n\
              [workspace.dependencies]\n\
-             signal = { name = \"acme/signal\", version = \"^1.0.0\" }\n\
+             signal = { name = \"acme/signal\", version = \"^1.0.0\", features = [\"fast\"] }\n\
              core = { workspace = \"acme/core\", version = \"~\" }\n\n\
              [workspace.tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\n",
         );
@@ -171,7 +184,7 @@ mod tests {
              authors = { workspace = true }\n\n\
              [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\
              language = { workspace = true }\n\n\
-             [dependencies]\nsignal = { workspace = true, optional = true }\ncore = { workspace = true }\n\n\
+             [dependencies]\nsignal = { workspace = true, optional = true, features = [\"fast\", \"pretty\"] }\ncore = { workspace = true }\n\n\
              [dev-dependencies]\nspy = { name = \"acme/spy\", version = \"^1\" }\n\
              server = { workspace = true, target = \"server\" }\n\n\
              [peer-dependencies]\nserver = { workspace = true }\n\n\
@@ -201,6 +214,8 @@ mod tests {
         ));
         // the member adds its own `optional`, and a peer reads the shared table too
         assert!(lobby.dependencies["signal"].optional());
+        // its `features` add to the shared ones
+        assert_eq!(lobby.dependencies["signal"].features(), ["fast", "pretty"]);
         assert_eq!(lobby.peer_dependencies["server"].package(), "acme/server");
         // the member adds its own `target` to the shared entry
         let server = &lobby.dev_dependencies["server"];

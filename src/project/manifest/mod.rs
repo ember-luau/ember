@@ -1,4 +1,5 @@
 pub mod edit;
+pub mod features;
 mod inherit;
 
 use crate::error::Error;
@@ -97,6 +98,10 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub peer_dependencies: BTreeMap<String, Dependency>,
+    /** this package's opt-in features, see [`features`]. a dependency that
+    a feature lists by its alias installs only when that feature is on. */
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: features::Features,
     /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
@@ -712,6 +717,16 @@ pub enum Dependency {
         resolve or download. the package then has no link file for it. */
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         optional: bool,
+        /// see [`Dependency::features`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// see [`Dependency::default_features`].
+        #[serde(
+            rename = "default-features",
+            default = "yes",
+            skip_serializing_if = "is_yes"
+        )]
+        default_features: bool,
     },
     /** another member of this workspace, pesde-style:
     `{ workspace = "scope/pkg", version = "^" }`. linked in place during
@@ -728,11 +743,29 @@ pub enum Dependency {
         /// see [`Dependency::entry`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<String>,
+        /// see [`Dependency::features`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// see [`Dependency::default_features`].
+        #[serde(
+            rename = "default-features",
+            default = "yes",
+            skip_serializing_if = "is_yes"
+        )]
+        default_features: bool,
     },
 }
 
 fn default_workspace_version() -> String {
     "^".to_string()
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(value: &bool) -> bool {
+    *value
 }
 
 impl Dependency {
@@ -783,6 +816,30 @@ impl Dependency {
     /// whether the entry says `optional = true`. a workspace member is always there.
     pub fn optional(&self) -> bool {
         matches!(self, Dependency::Registry { optional: true, .. })
+    }
+
+    /** the features that this entry turns on in the package, e.g.
+    `ui = { name = "acme/ui", version = "^1", features = ["icons"] }`. the
+    enabled features of a package are the union over every dependent in one
+    environment root, as in Cargo. */
+    pub fn features(&self) -> &[String] {
+        match self {
+            Dependency::Registry { features, .. } | Dependency::Workspace { features, .. } => {
+                features
+            }
+        }
+    }
+
+    /// whether the package's `default` features are on. `default-features = false` turns them off.
+    pub fn default_features(&self) -> bool {
+        match self {
+            Dependency::Registry {
+                default_features, ..
+            }
+            | Dependency::Workspace {
+                default_features, ..
+            } => *default_features,
+        }
     }
 
     /// the package this entry names, whichever shape it takes.
@@ -1139,6 +1196,19 @@ impl Manifest {
                     alias: alias.clone(),
                     table,
                 });
+            }
+        }
+        let aliases = self.dependencies.keys().map(String::as_str).collect();
+        features::check(&self.features, &aliases).map_err(Error::FeaturesInvalid)?;
+        for (alias, dependency) in self.all_dependencies().chain(&self.peer_dependencies) {
+            if let Some(feature) = dependency
+                .features()
+                .iter()
+                .find(|feature| !features::valid_name(feature))
+            {
+                return Err(Error::FeaturesInvalid(format!(
+                    "dependency '{alias}' asks for '{feature}', which is not a feature name"
+                )));
             }
         }
         Ok(())
@@ -2712,6 +2782,53 @@ mod tests {
         let reparsed: Manifest = toml::from_str(&written).unwrap();
         assert!(reparsed.dependencies["signal"].optional());
         assert_eq!(reparsed.peer_dependencies.len(), 1);
+    }
+
+    /** `[features]` and the consumer keys parse and write back, and the
+    manifest check refuses a table with an unknown item or a cycle. */
+    #[test]
+    fn features_parse_write_back_and_are_checked() {
+        let text = r#"
+            [dependencies]
+            icons = { name = "acme/icons", version = "^1.0.0" }
+            ui = { name = "acme/ui", version = "^1.0.0", features = ["dark"], default-features = false }
+            core = { name = "acme/core", version = "^1.0.0" }
+
+            [features]
+            default = ["pretty"]
+            pretty = ["icons", "ui/fast"]
+            "#;
+        let manifest = validated(text).unwrap();
+        assert_eq!(manifest.features["pretty"], ["icons", "ui/fast"]);
+        assert_eq!(manifest.dependencies["ui"].features(), ["dark"]);
+        assert!(!manifest.dependencies["ui"].default_features());
+        assert!(manifest.dependencies["core"].default_features());
+
+        let written = toml::to_string(&manifest).unwrap();
+        // the defaults stay out: no empty `features` and no `default-features = true`
+        assert_eq!(written.matches("default-features").count(), 1, "{written}");
+        assert_eq!(written.matches("features = [").count(), 1, "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.features.len(), 2);
+        assert!(!reparsed.dependencies["ui"].default_features());
+
+        for (bad, why) in [
+            (
+                text.replace("\"ui/fast\"", "\"ghost\""),
+                "Invalid features in ember.toml: feature 'pretty' lists 'ghost', which is not a feature of this package, an alias in [dependencies], or 'alias/feature'",
+            ),
+            (
+                text.replace("pretty = [", "pretty = [\"loop\", ")
+                    .replace("[features]", "[features]\nloop = [\"pretty\"]"),
+                "Invalid features in ember.toml: feature 'pretty' turns itself on: pretty > loop > pretty",
+            ),
+            (
+                text.replace("features = [\"dark\"]", "features = [\"dark mode\"]"),
+                "Invalid features in ember.toml: dependency 'ui' asks for 'dark mode', which is not a feature name",
+            ),
+        ] {
+            assert_eq!(validated(&bad).unwrap_err().to_string(), why);
+        }
     }
 
     #[test]
