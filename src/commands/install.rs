@@ -273,7 +273,10 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
     let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);
     lifecycle.before()?;
 
+    // an Azul project pushes the changed packages folders into Studio
+    let auto_push = super::studio::AutoPush::before(&manifest);
     install_project(&args, &manifest, true)?;
+    auto_push.after(&manifest);
 
     /* a workspace root installs every member too, pesde's order, root
     first then each member. member installs never recurse further, nested

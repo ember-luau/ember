@@ -260,7 +260,7 @@ pub enum Error {
     #[error("No tool exists with name '{0}'")]
     ToolMissing(String),
 
-    #[error("Invalid tool spec '{0}': expected 'owner/repo@version'")]
+    #[error("Invalid tool spec '{0}': expected 'owner/repo@version' or 'npm:package@version'")]
     InvalidToolSpec(String),
 
     #[error("No release asset of {tool}@{version} matches this platform")]
@@ -288,6 +288,22 @@ pub enum Error {
 
     #[error("Tool '{0}' is not installed; run `embr install` to install it")]
     ToolNotInstalled(String),
+
+    #[error("Node.js is not on PATH; npm tools need it, install it from nodejs.org")]
+    NodeMissing,
+
+    #[error("{tool} needs Node.js {required}, but node is {found}; update it from nodejs.org")]
+    NodeTooOld {
+        tool: String,
+        found: String,
+        required: String,
+    },
+
+    #[error("npm could not get {spec}: {output}")]
+    NpmFailed { spec: String, output: String },
+
+    #[error("The npm package {0} has no command to run")]
+    NpmNoBin(String),
 
     #[error("Alias '{0}' is reserved for embr itself and can't name a tool")]
     ReservedToolAlias(String),
@@ -492,9 +508,32 @@ pub enum Error {
     StudioInvalidId(&'static str),
 
     #[error(
-        "Unknown key `{0}` under [studio] in ember.toml; expected `universe`, `place`, or `file`"
+        "Unknown key `{0}` under [studio] in ember.toml; expected `universe`, `place`, `file`, `sync`, `sync-dir`, `roblox-packages`, or `server-packages`"
     )]
     StudioUnknownKey(String),
+
+    #[error(
+        "`embr studio push` is for Azul projects; set `sync = \"azul\"` under [studio] in ember.toml"
+    )]
+    StudioNotAzul,
+
+    #[error(
+        "`{key}` under [studio] in ember.toml is \"{value}\", which is not a Studio path such as ReplicatedStorage.Packages"
+    )]
+    StudioPathInvalid { key: &'static str, value: String },
+
+    #[error(
+        "Azul is not installed; pin it with `embr tool add npm:azul-sync` and run `embr install`, or run `npm install -g azul-sync`"
+    )]
+    AzulMissing,
+
+    #[error(
+        "Azul's live sync uses its port, so `azul push` cannot start; stop `azul`, run `embr studio push`, then start `azul` again"
+    )]
+    AzulDaemonRunning,
+
+    #[error("Azul could not push {folder}:\n{output}")]
+    AzulPushFailed { folder: String, output: String },
 
     #[error(
         "`file` under [studio] in ember.toml is empty; point it at a .rbxl or .rbxlx place file"

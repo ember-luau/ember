@@ -1,11 +1,15 @@
 use crate::error::Error;
+use crate::project::azul::{self, Outcome};
+use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
-use crate::project::manifest::{Manifest, StudioTarget};
+use crate::project::manifest::{Environment, Manifest, StudioTarget, SyncTool};
 use crate::ui;
 use clap::Subcommand;
 use inquire::{Select, Text, validator::Validation};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Subcommand, Debug)]
 pub enum StudioCommand {
@@ -14,6 +18,9 @@ pub enum StudioCommand {
 
     /// Open this project's place in Roblox Studio
     Open,
+
+    /// Push the installed packages into Studio through Azul
+    Push,
 }
 
 /** bare `embr studio` never gets here, clap prints the studio help instead
@@ -22,7 +29,166 @@ pub fn run(command: StudioCommand) -> Result<(), Error> {
     match command {
         StudioCommand::Init => init(),
         StudioCommand::Open => open(),
+        StudioCommand::Push => push(),
     }
+}
+
+/** pushes each installed packages folder into Studio, one `azul push` per
+folder. azul waits for the Studio plugin to connect, so this waits too,
+and Ctrl-C stops both. */
+fn push() -> Result<(), Error> {
+    let manifest = Manifest::load()?;
+    let dir = Path::new(".");
+    if azul::sync_tool(&manifest, dir) != SyncTool::Azul {
+        return Err(Error::StudioNotAzul);
+    }
+    let pushes: Vec<_> = azul::pushes(&manifest)?
+        .into_iter()
+        .filter(|push| push.folder.is_dir())
+        .collect();
+    if pushes.is_empty() {
+        println!("No packages to push; run `embr install` first");
+        return Ok(());
+    }
+    gitignore_mirror(&manifest);
+
+    println!("Waiting for Studio. In the Azul plugin, click Connect, or turn on auto-connect");
+    for push in &pushes {
+        let mut command = azul::command(dir)?;
+        command.args(azul::push_args(push));
+        match azul::run_push(command, None) {
+            Outcome::Pushed => ui::print_success(&pushed(push)),
+            Outcome::DaemonRunning => return Err(Error::AzulDaemonRunning),
+            Outcome::Missing => return Err(Error::AzulMissing),
+            Outcome::Failed(output) => {
+                return Err(Error::AzulPushFailed {
+                    folder: push.folder.display().to_string(),
+                    output,
+                });
+            }
+            Outcome::NoStudio => unreachable!("a push with no time limit waits for Studio"),
+        }
+    }
+    Ok(())
+}
+
+fn pushed(push: &azul::Push) -> String {
+    format!("{} → {}", push.folder.display(), push.destination)
+}
+
+/** adds the copies Azul mirrors back to .gitignore. a failure here only
+warns: the push itself does not need it. */
+fn gitignore_mirror(manifest: &Manifest) {
+    let entries = azul::gitignore_entries(manifest);
+    let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+    match super::init::gitignore(Path::new(".gitignore"), &entries) {
+        Ok(Some(message)) => ui::print_success(&message),
+        Ok(None) => {}
+        Err(error) => eprintln!("warning: could not update .gitignore ({error})"),
+    }
+}
+
+/** how long an automatic push waits for the Azul plugin. with auto-connect
+on, the plugin tries again every 5 s and waits up to 5 s for an answer, so
+15 s gives it one full try and some margin. */
+const AUTO_PUSH_WAIT: Duration = Duration::from_secs(15);
+
+/** the push that `embr install` makes in an Azul project. `before` reads
+the lockfile before the install writes it, and `after` pushes each
+packages folder whose locked packages changed. it never fails: Studio
+can be closed, and that is no reason to fail an install. each case where
+no push happens prints one line that names `embr studio push`. */
+pub struct AutoPush(Option<BTreeMap<Environment, BTreeSet<String>>>);
+
+impl AutoPush {
+    pub fn before(manifest: &Manifest) -> Self {
+        let azul = azul::sync_tool(manifest, Path::new(".")) == SyncTool::Azul;
+        AutoPush(azul.then(locked_by_environment))
+    }
+
+    pub fn after(self, manifest: &Manifest) {
+        let Some(before) = self.0 else {
+            return;
+        };
+        let now = locked_by_environment();
+        let pushes = match azul::pushes(manifest) {
+            Ok(pushes) => pushes,
+            Err(error) => {
+                eprintln!("warning: {error}");
+                return;
+            }
+        };
+        let changed: Vec<_> = pushes
+            .into_iter()
+            .filter(|push| {
+                before.get(&push.environment) != now.get(&push.environment) && push.folder.is_dir()
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        gitignore_mirror(manifest);
+
+        if azul::studio_running() == Some(false) {
+            println!(
+                "Studio is not open, so embr did not push the packages. Open it, then run `embr studio push`"
+            );
+            return;
+        }
+        println!(
+            "Pushing the changed packages to Studio. In the Azul plugin, click Connect, or turn on auto-connect"
+        );
+        for push in &changed {
+            let outcome = match azul::command(Path::new(".")) {
+                Ok(mut command) => {
+                    command.args(azul::push_args(push));
+                    azul::run_push(command, Some(AUTO_PUSH_WAIT))
+                }
+                Err(Error::AzulMissing) => Outcome::Missing,
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
+            let hint = match outcome {
+                Outcome::Pushed => {
+                    ui::print_success(&pushed(push));
+                    continue;
+                }
+                Outcome::NoStudio => format!(
+                    "Studio did not connect to Azul in {} s. Run `embr studio push`, then click Connect in the Azul plugin",
+                    AUTO_PUSH_WAIT.as_secs()
+                ),
+                Outcome::DaemonRunning => "Azul's live sync uses its port, so embr did not push. Stop `azul`, run `embr studio push`, then start `azul` again".to_string(),
+                Outcome::Missing => "Azul is not installed, so embr did not push. Run `embr tool add npm:azul-sync`, `embr install`, then `embr studio push`".to_string(),
+                Outcome::Failed(output) => format!(
+                    "Azul could not push {}, so embr stopped. Run `embr studio push` to see why. Azul said: {}",
+                    push.folder.display(),
+                    output.lines().last().unwrap_or_default()
+                ),
+            };
+            println!("{hint}");
+            return;
+        }
+    }
+}
+
+/** each environment's locked packages, one line of TOML per package. a
+change to any field changes the line, and so the folder counts as
+changed. no lockfile reads as no packages. */
+fn locked_by_environment() -> BTreeMap<Environment, BTreeSet<String>> {
+    by_environment(
+        Lockfile::load()
+            .map(|lock| lock.packages)
+            .unwrap_or_default(),
+    )
+}
+
+fn by_environment(packages: Vec<LockedPackage>) -> BTreeMap<Environment, BTreeSet<String>> {
+    let mut locked: BTreeMap<Environment, BTreeSet<String>> = BTreeMap::new();
+    for package in packages {
+        if let Ok(line) = toml::to_string(&package) {
+            locked.entry(package.context()).or_default().insert(line);
+        }
+    }
+    locked
 }
 
 const PUBLISHED_PLACE: &str = "Published place (universe and place IDs)";
@@ -38,7 +204,13 @@ fn init() -> Result<(), Error> {
     just gets filled in, so `open`'s "run `embr studio init`" advice always
     works */
     let occupied = match document.table("studio") {
-        Ok(table) => table.is_some_and(|table| !table.is_empty()),
+        /* `sync` and the Azul keys say nothing about what to open, so a
+        table with only those still gets the place filled in */
+        Ok(table) => table.is_some_and(|table| {
+            ["universe", "place", "file"]
+                .iter()
+                .any(|key| table.contains_key(key))
+        }),
         Err(_) => true,
     };
     if occupied {
@@ -415,6 +587,43 @@ mod tests {
         assert_eq!(
             parse_id("99999999999999999999"),
             Err("That ID is too large".to_string())
+        );
+    }
+
+    #[test]
+    fn a_folder_counts_as_changed_when_its_locked_packages_change() {
+        let lock = |text: &str| -> Vec<LockedPackage> {
+            toml::from_str::<Lockfile>(text).unwrap().packages
+        };
+        let entry = |name: &str, version: &str, context: &str| {
+            format!(
+                "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nenvironment = \"roblox\"\ncontext = \"{context}\"\nindex = \"https://example.com/index\"\ntype = \"workspace\"\npath = \"x\"\n"
+            )
+        };
+        let before = by_environment(lock(&format!(
+            "version = 2\n{}{}",
+            entry("acme/a", "1.0.0", "roblox"),
+            entry("acme/b", "1.0.0", "server")
+        )));
+        let after = by_environment(lock(&format!(
+            "version = 2\n{}{}",
+            entry("acme/a", "1.1.0", "roblox"),
+            entry("acme/b", "1.0.0", "server")
+        )));
+
+        // the roblox folder changed and the server folder did not
+        assert_ne!(
+            before.get(&Environment::Roblox),
+            after.get(&Environment::Roblox)
+        );
+        assert_eq!(
+            before.get(&Environment::Server),
+            after.get(&Environment::Server)
+        );
+        // no lockfile yet: every installed folder is new
+        assert_ne!(
+            by_environment(Vec::new()).get(&Environment::Roblox),
+            after.get(&Environment::Roblox)
         );
     }
 

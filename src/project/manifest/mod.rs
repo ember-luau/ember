@@ -594,12 +594,35 @@ pub struct Studio {
     /// path to a .rbxl/.rbxlx place file, relative to ember.toml.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /** the tool that syncs the project with Studio. unset, embr reads the
+    disk, see [`crate::project::azul::sync_tool`]. */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncTool>,
+    /// the folder Azul mirrors Studio into, Azul's `syncDir`. "sync" when unset.
+    #[serde(rename = "sync-dir", skip_serializing_if = "Option::is_none")]
+    pub sync_dir: Option<String>,
+    /// the Studio folder the roblox packages go to, "ReplicatedStorage.Packages" when unset.
+    #[serde(rename = "roblox-packages", skip_serializing_if = "Option::is_none")]
+    pub roblox_packages: Option<String>,
+    /// the Studio folder the server packages go to, "ServerStorage.Packages" when unset.
+    #[serde(rename = "server-packages", skip_serializing_if = "Option::is_none")]
+    pub server_packages: Option<String>,
     /** anything else written under [studio]. the table gets hand-edited a lot and
     a typo'd key would otherwise read as "unconfigured", so `target()` reports
     these. only there, though. `deny_unknown_fields` would let a [studio] typo
     fail unrelated commands. */
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
+}
+
+/// the tool that syncs a project with Roblox Studio, `sync` under [studio].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncTool {
+    /// the files are the source and `rojo serve` sends them to Studio.
+    Rojo,
+    /// Studio is the source and Azul mirrors it to disk. embr pushes the packages.
+    Azul,
 }
 
 /// a validated [studio] table, the one thing `embr studio open` should open.
@@ -898,19 +921,36 @@ pub fn workspace_version_req(
     })
 }
 
-/// a GitHub-released binary tool, written in ember.toml as the single string "owner/repo@version" under [tools], the key being the alias.
+/// the prefix of a tool that npm publishes, as in `npm:azul-sync@2.4.0`.
+pub const NPM_PREFIX: &str = "npm:";
+
+/** a pinned tool, written in ember.toml as the single string
+"owner/repo@version" under [tools], the key being the alias. a tool that
+npm publishes is "npm:package@version". */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
-    /// "owner/repo" GitHub repository.
+    /// "owner/repo" GitHub repository, or "npm:" and the npm package name.
     pub repository: String,
     /// exact release version, no leading 'v'.
     pub version: String,
 }
 
 impl Tool {
-    /// parses an "owner/repo@version" tool spec.
+    /// parses an "owner/repo@version" or "npm:package@version" tool spec.
     pub fn parse(spec: &str) -> Result<Self, Error> {
         let invalid = || Error::InvalidToolSpec(spec.to_string());
+
+        if let Some(package) = spec.trim().strip_prefix(NPM_PREFIX) {
+            return match split_npm_spec(package) {
+                Some((name, Some(version))) if !version.is_empty() && !version.contains('@') => {
+                    Ok(Tool {
+                        repository: format!("{NPM_PREFIX}{name}"),
+                        version: version.to_string(),
+                    })
+                }
+                _ => Err(invalid()),
+            };
+        }
 
         let (repository, version) = spec.trim().split_once('@').ok_or_else(invalid)?;
         if version.is_empty() || version.contains('@') {
@@ -940,6 +980,38 @@ impl Tool {
             _ => Err(Error::InvalidToolSpec(repository.to_string())),
         }
     }
+}
+
+impl Tool {
+    /// the npm package of a tool that npm publishes, None for a GitHub tool.
+    pub fn npm_package(&self) -> Option<&str> {
+        self.repository.strip_prefix(NPM_PREFIX)
+    }
+}
+
+/** splits "name@version" or "@scope/name@version" into the npm package name
+and the version, None when the spec gives no version. None for the whole
+spec when the name is not one npm accepts. the name check also keeps the
+name safe as a storage folder: no `..`, no backslash, one `/` at most. */
+pub fn split_npm_spec(spec: &str) -> Option<(&str, Option<&str>)> {
+    let (name, version) = match spec.rfind('@') {
+        Some(at) if at > 0 => (&spec[..at], Some(&spec[at + 1..])),
+        _ => (spec, None),
+    };
+    let part = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with(['.', '_'])
+            && part
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c))
+    };
+    let valid = match name.strip_prefix('@') {
+        Some(scoped) => scoped
+            .split_once('/')
+            .is_some_and(|(scope, package)| part(scope) && part(package)),
+        None => part(name),
+    };
+    valid.then_some((name, version))
 }
 
 impl fmt::Display for Tool {
@@ -1876,6 +1948,44 @@ mod tests {
         assert_eq!(tool.repository, "JohnnyMorganz/StyLua");
         assert_eq!(tool.version, "2.0.0");
         assert_eq!(tool.to_string(), "JohnnyMorganz/StyLua@2.0.0");
+    }
+
+    #[test]
+    fn parses_npm_tool_specs() {
+        let tool = Tool::parse(" npm:azul-sync@2.4.0 ").unwrap();
+        assert_eq!(tool.repository, "npm:azul-sync");
+        assert_eq!(tool.version, "2.4.0");
+        assert_eq!(tool.npm_package(), Some("azul-sync"));
+        assert_eq!(tool.to_string(), "npm:azul-sync@2.4.0");
+
+        // a scoped package keeps its scope, the last '@' starts the version
+        let tool = Tool::parse("npm:@acme/cli@1.0.0").unwrap();
+        assert_eq!(tool.npm_package(), Some("@acme/cli"));
+        assert_eq!(tool.version, "1.0.0");
+
+        // a GitHub tool has no npm package
+        assert_eq!(
+            Tool::parse("rojo-rbx/rojo@7.4.4").unwrap().npm_package(),
+            None
+        );
+
+        for spec in [
+            "npm:azul-sync",
+            "npm:azul-sync@",
+            "npm:@acme/cli",
+            "npm:@1.0.0",
+            "npm:Azul@1.0.0",
+            "npm:../evil@1.0.0",
+            "npm:a/b@1.0.0",
+            "npm:@acme/a/b@1.0.0",
+            "npm:a\\b@1.0.0",
+            "npm:.hidden@1.0.0",
+        ] {
+            assert!(
+                matches!(Tool::parse(spec), Err(Error::InvalidToolSpec(_))),
+                "spec {spec:?} should be rejected"
+            );
+        }
     }
 
     #[test]
