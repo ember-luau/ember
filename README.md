@@ -62,13 +62,9 @@ embr self install     # still worth running: tool shims live in ~/.ember/bin
 
 ### Arch Linux (AUR)
 
-```sh
-yay -S embr-bin    # or: paru -S embr-bin
-embr self install  # still worth running: tool shims live in ~/.ember/bin
-```
-
-The package puts `embr` in `/usr/bin`, and pacman updates it with each
-release.
+Not available yet. The AUR takes no new accounts for now, so the package
+`embr-bin` is not on the AUR, and the release skips its AUR push. On Arch,
+use the release binary or cargo.
 
 ### Homebrew (macOS and Linux)
 
