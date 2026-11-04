@@ -4,9 +4,6 @@
 class Embr < Formula
   desc "Package manager for Luau: publish, discover, and install packages"
   homepage "https://emberpm.dev"
-  # Homebrew reads a version from the url when the formula gives none, and
-  # finds 86.64 in "x86_64". The test then fails on `embr --version`.
-  version "@VERSION@"
   license "MIT"
 
   on_macos do
