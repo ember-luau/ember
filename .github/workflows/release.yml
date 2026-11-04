@@ -251,6 +251,10 @@ jobs:
   homebrew:
     name: Homebrew
     needs: checksums
+    # The tap gets stable releases only. Homebrew also reads no version
+    # from a prerelease url: it finds 86.64 in "x86_64", and the test
+    # fails. A dry run tests the latest stable release.
+    if: github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.checksums.outputs.version }}
