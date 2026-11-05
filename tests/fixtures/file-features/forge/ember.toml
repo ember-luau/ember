@@ -11,6 +11,7 @@ main = "src/init.luau"
 traits = ["bin"]
 bin = []
 lifecycles = []
+hooks = []
 
 [feature-files.traits]
 entry = "src/traits"
@@ -23,3 +24,7 @@ files = ["src/bin"]
 [feature-files.lifecycles]
 entry = "src/lifecycles"
 files = ["src/lifecycles/**"]
+
+[feature-files.hooks]
+entry = "src/hooks"
+files = ["src/hooks"]

@@ -133,14 +133,15 @@ pub(crate) fn feature_filter(feature: &FileFeature) -> Result<PathFilter, Error>
 entry is a packed module that its own feature owns, a file belongs to one
 feature at most, and no feature owns ember.toml or the main entry. install
 deletes the files of a feature that is off, so each check keeps it from
-deleting a file that the package always needs. */
+deleting a file that the package always needs. Ok holds each feature with
+its entry file and its files, for `--dry-run`. */
 pub fn check_file_features(
     root: &Path,
     manifest: &Manifest,
     files: &[PathBuf],
-) -> Result<(), Error> {
+) -> Result<Vec<OwnedFiles>, Error> {
     if manifest.feature_files.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let refuse = |message: String| Err(Error::FeaturesInvalid(message));
     let owners = manifest
@@ -188,9 +189,18 @@ pub fn check_file_features(
             ));
         }
     }
+    let mut owned = Vec::new();
     for (name, feature, filter) in &owners {
         match module_file(&feature.entry) {
-            Some(entry) if filter.matches(&entry) => {}
+            Some(entry) if filter.matches(&entry) => owned.push(OwnedFiles {
+                name: name.to_string(),
+                entry,
+                files: files
+                    .iter()
+                    .filter(|file| filter.matches(file))
+                    .cloned()
+                    .collect(),
+            }),
             Some(entry) => {
                 return refuse(format!(
                     "feature-files.{name}: the entry {} is not in the files of the feature",
@@ -205,7 +215,17 @@ pub fn check_file_features(
             }
         }
     }
-    Ok(())
+    Ok(owned)
+}
+
+/// one file feature as publish packs it, see [`check_file_features`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct OwnedFiles {
+    pub name: String,
+    /// the packed file of the entry module.
+    pub entry: PathBuf,
+    /// the packed files that the feature owns, the entry among them.
+    pub files: Vec<PathBuf>,
 }
 
 /** Packs the selected files into a gzipped tar. Entry paths are
@@ -560,12 +580,26 @@ mod tests {
             check_file_features(&base, &manifest, &files).map_err(|error| error.to_string())
         };
         let traits = "[feature-files.traits]\nentry = \"src/traits\"\nfiles = [\"src/traits\"]\n";
-        assert_eq!(check(""), Ok(()));
+        assert_eq!(check(""), Ok(Vec::new()));
         assert_eq!(
             check(&format!(
                 "{traits}[feature-files.bin]\nentry = \"./src/bin.luau\"\nfiles = [\"src/bin.*\"]\n"
             )),
-            Ok(())
+            Ok(vec![
+                OwnedFiles {
+                    name: "bin".to_string(),
+                    entry: PathBuf::from("src/bin.luau"),
+                    files: vec![PathBuf::from("src/bin.luau")],
+                },
+                OwnedFiles {
+                    name: "traits".to_string(),
+                    entry: PathBuf::from("src/traits/init.luau"),
+                    files: vec![
+                        PathBuf::from("src/traits/Trait.luau"),
+                        PathBuf::from("src/traits/init.luau"),
+                    ],
+                },
+            ])
         );
         let refused = |message: &str| Err(format!("Invalid features in ember.toml: {message}"));
         for (tables, message) in [

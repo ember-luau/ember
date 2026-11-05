@@ -61,6 +61,10 @@ pub struct FeaturePart {
     pub entry: String,
     /// what to restate about the entry, written against `binding`.
     pub exports: Exports,
+    /** false when the entry ends in `return nil` or returns nothing, as an
+    Alloy module with no exports does. such a part adds no fields, and its
+    type stays out of the intersection, where `nil` would leave no type. */
+    pub returns_value: bool,
 }
 
 /** body of a generated link file. requires the stored package and restates its
@@ -153,16 +157,21 @@ fn restate(
 
 /** the end of a link file that joins file features: one new table with
 the fields of the main module and of each feature entry, typed as the
-intersection of their types. a key that two parts return, or a part that
-returns no table, is an error at load, since only the running code knows
-every key. the new table keeps the main module's metatable, so a callable
-module stays callable. */
+intersection of their types. a part that returns nil adds nothing: a
+feature can plug itself into the core when it loads. Lune's require gives
+`true` for such a module, as Lua's does, so `true` adds nothing too. a
+key that two parts
+return, or a part that returns a value that is no table, is an error at
+load, since only the running code knows every key. the new table keeps the
+main module's metatable, so a callable module stays callable. */
 fn merge_contents(parts: &[FeaturePart]) -> String {
     let mut listed = vec![format!("{{ \"the main module\", {MODULE_BINDING} }}")];
     let mut typed = vec![format!("typeof({MODULE_BINDING})")];
     for part in parts {
         listed.push(format!("{{ \"feature {}\", {} }}", part.name, part.binding));
-        typed.push(format!("typeof({})", part.binding));
+        if part.returns_value {
+            typed.push(format!("typeof({})", part.binding));
+        }
     }
     format!(
         "
@@ -171,6 +180,9 @@ local merged: {{ [any]: any }} = {{}}
 local owners: {{ [any]: string }} = {{}}
 for _, part in parts do
 \tlocal from: string, value: any = part[1], part[2]
+\tif value == nil or value == true then
+\t\tcontinue
+\tend
 \tif type(value) ~= \"table\" then
 \t\terror(from .. \" returns a \" .. type(value) .. \", so the link file cannot merge it\")
 \tend
@@ -256,6 +268,7 @@ pub fn feature_parts(
             binding,
             entry,
             exports,
+            returns_value: on_parse_thread(&source, returns_value).unwrap_or(true),
         });
     }
     parts
@@ -654,6 +667,23 @@ fn alloy_line(
             "export {{ {} }} from \"{root}/{module}\"\n",
             names.join(", ")
         )
+    })
+}
+
+/** whether `source` ends in a return of a value. no `return`, a bare
+`return` and `return nil` give false. None = the source does not parse. */
+fn returns_value(source: &str) -> Option<bool> {
+    use full_moon::ast::{Expression, LastStmt};
+
+    let ast = full_moon::parse(source).ok()?;
+    let Some(LastStmt::Return(statement)) = ast.nodes().last_stmt() else {
+        return Some(false);
+    };
+    let mut returned = statement.returns().iter();
+    Some(match (returned.next(), returned.next()) {
+        (None, _) => false,
+        (Some(Expression::Symbol(symbol)), None) => trimmed(symbol) != "nil",
+        _ => true,
     })
 }
 
@@ -2902,13 +2932,34 @@ export type Wrapped<T = number, U = Child> = { T | U }
             "init.luau",
             "return { Trait = Trait, Shape = 1 }\n",
         );
+        // an entry that exports nothing gets no line, not an empty `export { }`
+        write_package(
+            &base.join("lib/hooks"),
+            "init.aly",
+            "print(\"plugged in\")\n",
+        );
+        write_package(
+            &base.join("out/hooks"),
+            "init.luau",
+            "print(\"plugged in\") return nil\n",
+        );
         let mut joined = types.clone();
-        joined.features = vec![FeaturePart {
-            name: "traits".to_string(),
-            binding: "feature_traits".to_string(),
-            entry: "out/traits".to_string(),
-            exports: type_lines(["export type Trait = feature_traits.Trait"]),
-        }];
+        joined.features = vec![
+            FeaturePart {
+                name: "hooks".to_string(),
+                binding: "feature_hooks".to_string(),
+                entry: "out/hooks".to_string(),
+                exports: Exports::default(),
+                returns_value: false,
+            },
+            FeaturePart {
+                name: "traits".to_string(),
+                binding: "feature_traits".to_string(),
+                entry: "out/traits".to_string(),
+                exports: type_lines(["export type Trait = feature_traits.Trait"]),
+                returns_value: true,
+            },
+        ];
         assert_eq!(
             alloy_link_contents(&base, "./.ember/a_b", "out/shapes", &joined).as_deref(),
             Some(
@@ -3096,6 +3147,9 @@ local merged: { [any]: any } = {}
 local owners: { [any]: string } = {}
 for _, part in parts do
 \tlocal from: string, value: any = part[1], part[2]
+\tif value == nil or value == true then
+\t\tcontinue
+\tend
 \tif type(value) ~= \"table\" then
 \t\terror(from .. \" returns a \" .. type(value) .. \", so the link file cannot merge it\")
 \tend
@@ -3135,6 +3189,64 @@ return (merged :: any) :: typeof(module) & typeof(feature_bin) & typeof(feature_
             "return require(\"./.ember/acme_forge/src\")\n"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /** a feature entry that returns nil, as an Alloy module with no
+    exports does, loads for its effects. the merge skips it, and its type
+    stays out of the intersection, where `nil` would leave no type. */
+    #[test]
+    fn a_feature_that_returns_nil_loads_and_adds_nothing() {
+        let base = forge("nil-part");
+        let manifest = fs::read_to_string(base.join("ember.toml")).unwrap();
+        fs::write(
+            base.join("ember.toml"),
+            manifest.replace("lifecycles = []", "lifecycles = []\nhooks = []")
+                + "\n[feature-files.hooks]\nentry = \"src/hooks\"\nfiles = [\"src/hooks\"]\n",
+        )
+        .unwrap();
+        write_package(
+            &base,
+            "src/hooks/init.luau",
+            "print(\"plugged in\") return nil\n",
+        );
+        let mut main = Exports::default();
+        let enabled = ["bin".to_string(), "hooks".to_string()];
+        main.features = feature_parts(&base, &enabled, &main, "acme/forge", &mut |_| {});
+        let returns: Vec<_> = main
+            .features
+            .iter()
+            .map(|part| (part.name.as_str(), part.returns_value))
+            .collect();
+        assert_eq!(returns, [("bin", true), ("hooks", false)]);
+        let link = link_contents_at("./.ember/acme_forge", "src", &main, RequireStyle::String);
+        assert!(
+            link.contains("local feature_hooks = require(\"./.ember/acme_forge/src/hooks\")\n"),
+            "{link}"
+        );
+        assert!(
+            link.contains("\tif value == nil or value == true then\n\t\tcontinue\n\tend\n"),
+            "{link}"
+        );
+        assert!(
+            link.ends_with("return (merged :: any) :: typeof(module) & typeof(feature_bin)\n"),
+            "{link}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_return_of_nothing_is_no_value() {
+        for (source, value) in [
+            ("return nil\n", Some(false)),
+            ("print(1)\nreturn\n", Some(false)),
+            ("print(1)\n", Some(false)),
+            ("return {}\n", Some(true)),
+            ("return true\n", Some(true)),
+            ("return nil, 1\n", Some(true)),
+            ("return {\n", None),
+        ] {
+            assert_eq!(returns_value(source), value, "{source}");
+        }
     }
 
     #[test]

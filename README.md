@@ -637,8 +637,11 @@ files = ["src/bin/**"]
   the link file requires the main module and each enabled entry, restates
   the types of each, and copies the fields of each part into one new
   table. That table keeps the metatable of the main module. A part that
-  returns no table, or a key that two parts return, is an error when the
-  link file loads. A type that two parts export keeps the type of the
+  returns nil adds no fields and no type, so a feature can plug itself into
+  the core and export nothing. Lune gives `true` for such a module, and the
+  link file skips `true` too. A part that returns another value that is no
+  table, or a key that two parts return, is an error when the link file
+  loads. A type that two parts export keeps the type of the
   first part, and install warns.
 - luau-lsp reads the result as the intersection of the part types, so
   `require("@packages/forge").Trait` has its type.
@@ -646,10 +649,20 @@ files = ["src/bin/**"]
   install deletes that file when the feature is off. A package with
   `script.Parent` requires keeps each feature folder inside the folder of
   the main module, because install rewrites those requires only there.
+  A feature that plugs itself into the core makes that step safe to run
+  twice: the luau CLI keeps no result of `nil`, so it runs such a module
+  again for each link file that requires it.
+- `embr publish --dry-run` prints each feature with its entry, the count
+  of its files, and the files.
 
-An older embr ignores `feature-files`. It installs every file and links
-only the main entry, so `require` gives the main module alone. The
-features still resolve, because each one is in `[features]`.
+File features need embr 1.0.0-rc.3 or later, to install and to publish.
+An older embr turns every file feature off and says nothing about it. It
+installs every file, but its link file returns the main module alone, so
+`require("@packages/forge").Trait` is nil. The feature still resolves,
+because it is in `[features]`, so the game meets the error of the package
+for a missing feature when it runs. An older embr also drops
+`[feature-files]` when it publishes, because it writes the packed
+ember.toml from the keys that it knows.
 
 ## Path and git dependencies
 

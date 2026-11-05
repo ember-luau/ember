@@ -84,6 +84,22 @@ fn file_features_install_link_and_show() {
     let home = base.join("home");
     fs::create_dir_all(&home).unwrap();
     copy(&fixtures(), &base);
+    // --dry-run names the entry and the files of each feature
+    let dry = embr(
+        &base.join("forge"),
+        &home,
+        &["publish", "--local", "--dry-run"],
+    );
+    assert!(
+        dry.contains(
+            "Feature traits: entry src/traits/init.luau, 2 files:\n  src/traits/Trait.luau\n  src/traits/init.luau\n"
+        ),
+        "{dry}"
+    );
+    assert!(
+        dry.contains("Feature bin: entry src/bin/init.luau, 1 file:\n"),
+        "{dry}"
+    );
     for package in ["forge", "kit"] {
         embr(&base.join(package), &home, &["publish", "--local"]);
     }
@@ -98,6 +114,7 @@ fn file_features_install_link_and_show() {
         "src/traits/init.luau",
         "src/traits/Trait.luau",
         "src/bin/init.luau",
+        "src/hooks/init.luau",
     ] {
         assert!(store.join(kept).is_file(), "{kept}");
     }
@@ -109,8 +126,8 @@ fn file_features_install_link_and_show() {
         "{:?}",
         archive_files(&archive)
     );
-    // traits turns bin on, and the lock records both
-    assert_eq!(features_of(&game, "acme/forge"), ["bin", "traits"]);
+    // traits turns bin on, and the lock records each enabled feature
+    assert_eq!(features_of(&game, "acme/forge"), ["bin", "hooks", "traits"]);
 
     // one link file joins the main module and each enabled entry
     let link = fs::read_to_string(game.join("packages/luau/forge.luau")).unwrap();
@@ -118,6 +135,8 @@ fn file_features_install_link_and_show() {
         "local module = require(\"./.ember/acme_forge/src\")\n",
         "local feature_bin = require(\"./.ember/acme_forge/src/bin\")\n",
         "local feature_traits = require(\"./.ember/acme_forge/src/traits\")\n",
+        // hooks returns nil, so it loads but adds no fields and no type
+        "local feature_hooks = require(\"./.ember/acme_forge/src/hooks\")\n",
         "export type World = module.World\n",
         "export type Trait = feature_traits.Trait\n",
         "return (merged :: any) :: typeof(module) & typeof(feature_bin) & typeof(feature_traits)\n",
@@ -141,7 +160,7 @@ fn file_features_install_link_and_show() {
     {
         Ok(output) => assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "one\ttwo\tbin\tbin\tnil\n",
+            "one\ttwo\tbin\tbin\tnil\t1\n",
             "{output:?}"
         ),
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
@@ -149,7 +168,10 @@ fn file_features_install_link_and_show() {
 
     // the commands show file features as features
     let tree = embr(&game, &home, &["tree"]);
-    assert!(tree.contains("acme/forge@1.0.0 [bin, traits]"), "{tree}");
+    assert!(
+        tree.contains("acme/forge@1.0.0 [bin, hooks, traits]"),
+        "{tree}"
+    );
     let info = embr(&game, &home, &["info", "acme/forge", "--index", "local"]);
     assert!(
         info.contains("traits      bin (files: src/traits; entry: src/traits)"),
@@ -176,7 +198,7 @@ fn file_features_install_link_and_show() {
             "--index",
             "local",
             "--features",
-            "traits,lifecycles",
+            "traits,hooks,lifecycles",
         ],
     );
     embr(&game, &home, &["install"]);
@@ -188,7 +210,7 @@ fn file_features_install_link_and_show() {
     );
     assert_eq!(
         features_of(&game, "acme/forge"),
-        ["bin", "lifecycles", "traits"]
+        ["bin", "hooks", "lifecycles", "traits"]
     );
     let _ = fs::remove_dir_all(&base);
 }
