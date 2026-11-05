@@ -1,0 +1,143 @@
+# Posts an embed to Discord for each push, and for each pull request
+# that opens, closes, or merges. It follows the Alloy repositories'
+# discord.yml, in Ember's colours. The webhook comes from the
+# DISCORD_WEBHOOK secret, which announce.yml also uses for release notes.
+# A repository without the secret posts nothing.
+#
+# pull_request_target runs with the base repository's secrets, so a
+# pull request from a fork also posts. The job never checks out the
+# pull request's code, and the payload reaches the script as data, so
+# no text from the pull request runs as code.
+name: Discord
+
+on:
+  push:
+    branches: ["**"]
+  pull_request_target:
+    types: [opened, closed]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        with:
+          script: |
+            if (!process.env.WEBHOOK) {
+              return
+            }
+
+            // The Discord server's icon, as announce.yml uses it, and the
+            // Ember mark from the site.
+            const ICON = 'https://raw.githubusercontent.com/ember-luau/ember/master/assets/discord-icon.png'
+            const MARK = 'https://emberpm.dev/ember.png'
+            // #F23C1B, the Ember accent.
+            const EMBER = 0xf23c1b
+
+            const e = context.payload
+            const repo = e.repository
+            const cut = (text, n) => (text.length > n ? `${text.slice(0, n - 3).trimEnd()}...` : text)
+            // `#12` and `owner/repo#12` link to what they name, so `Fixes
+            // #12` opens the issue it closes.
+            const linked = (text) =>
+              text.replace(
+                /(^|[^\w/[])((?:([\w.-]+)\/([\w.-]+))?#(\d+))\b/g,
+                (_, lead, ref, owner, name, n) =>
+                  `${lead}[${ref}](https://github.com/${owner ? `${owner}/${name}` : repo.full_name}/issues/${n})`,
+              )
+            const person = (user) => ({ name: user.login, url: user.html_url, icon_url: user.avatar_url })
+            const footer = { text: `${repo.full_name} · emberpm.dev`, icon_url: ICON }
+            let embed
+
+            if (context.eventName === 'push') {
+              // A deleted branch pushes no commits.
+              const commits = e.commits ?? []
+
+              if (commits.length === 0) {
+                return
+              }
+
+              const branch = e.ref.replace('refs/heads/', '')
+              const head = (c) => c.message.split('\n')[0]
+              const lines = commits
+                .slice(-10)
+                .map((c) => `[\`${c.id.slice(0, 7)}\`](${c.url}) ${linked(cut(head(c), 72))} - ${c.author.username ?? c.author.name}`)
+
+              if (commits.length > 10) {
+                lines.unshift(`*${commits.length - 10} earlier commits not shown*`)
+              }
+
+              const one = commits.length === 1 ? commits[0] : null
+
+              embed = {
+                author: person(e.sender),
+                title: cut(
+                  one
+                    ? `[${repo.name}:${branch}] ${one.id.slice(0, 7)} ${head(one)}`
+                    : `[${repo.name}:${branch}] ${commits.length} new commits`,
+                  256,
+                ),
+                url: one ? one.url : e.compare,
+                description: one ? linked(cut(one.message.replace(/\r/g, '').trim(), 1000)) : lines.join('\n'),
+                color: EMBER,
+                footer,
+                timestamp: e.head_commit?.timestamp ?? new Date().toISOString(),
+              }
+            } else {
+              const pr = e.pull_request
+              const state =
+                e.action === 'closed' ? (pr.merged ? 'merged' : 'closed') : pr.draft ? 'draft' : e.action
+              // Warm colours for the states that move work forward, grey
+              // and a deep red for the ones that do not.
+              const [label, color] = {
+                opened: ['Opened', EMBER],
+                draft: ['Opened as a draft', 0x71717a],
+                merged: ['Merged', 0xf59e0b],
+                closed: ['Closed without merging', 0x991b1b],
+              }[state] ?? [state, 0x71717a]
+              const by =
+                state === 'merged' && pr.merged_by ? ` by [${pr.merged_by.login}](${pr.merged_by.html_url})` : ''
+              const body = (pr.body ?? '').replace(/\r/g, '').trim()
+              const fields = [
+                { name: 'Branch', value: `\`${pr.head.label}\` -> \`${pr.base.ref}\`` },
+                { name: 'Diff', value: `\`\`\`diff\n+ ${pr.additions}\n- ${pr.deletions}\n\`\`\``, inline: true },
+                { name: 'Files', value: `\`\`\`\n${pr.changed_files}\n\`\`\``, inline: true },
+                { name: 'Commits', value: `\`\`\`\n${pr.commits}\n\`\`\``, inline: true },
+              ]
+
+              if (pr.labels.length > 0) {
+                fields.push({ name: 'Labels', value: pr.labels.map((l) => `\`${l.name}\``).join(' ') })
+              }
+
+              embed = {
+                author: person(pr.user),
+                title: cut(`[${repo.name}] #${pr.number} ${pr.title}`, 256),
+                url: pr.html_url,
+                description: `**${label}**${by}${body ? `\n>>> ${linked(cut(body, 350))}` : ''}`,
+                color,
+                fields,
+                thumbnail: { url: MARK },
+                footer,
+                timestamp: pr.merged_at ?? pr.closed_at ?? pr.updated_at,
+              }
+            }
+
+            // No mention in a title or a commit message pings anyone.
+            const res = await fetch(process.env.WEBHOOK, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                username: 'Ember',
+                avatar_url: ICON,
+                allowed_mentions: { parse: [] },
+                embeds: [embed],
+              }),
+            })
+
+            if (!res.ok) {
+              core.setFailed(`Discord answered ${res.status}: ${await res.text()}`)
+            }
