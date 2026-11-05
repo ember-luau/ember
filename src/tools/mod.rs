@@ -6,7 +6,7 @@ for tools that npm publishes. */
 pub mod archive;
 pub mod npm;
 pub mod shim;
-mod shorthands;
+pub(crate) mod shorthands;
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 adds more (`shorthands`), but never one of these. anything else must be
 "owner/repo". */
 const SHORTHANDS: &[(&str, &str)] = &[
+    ("alloy", "alloy-luau/alloy"),
     ("create-chief-project", "ryancundiff/create-chief-project"),
     ("darklua", "seaofvoices/darklua"),
     ("lest", "lest-luau/lest"),

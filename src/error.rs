@@ -277,6 +277,11 @@ pub enum Error {
     #[error("Invalid tool spec '{0}': expected 'owner/repo@version' or 'npm:package@version'")]
     InvalidToolSpec(String),
 
+    #[error(
+        "'{0}' is not a tool shorthand that embr knows; use 'owner/repo' or 'npm:package', and --version for a version"
+    )]
+    UnknownToolShorthand(String),
+
     #[error("No release asset of {tool}@{version} matches this platform")]
     NoMatchingAsset { tool: String, version: String },
 

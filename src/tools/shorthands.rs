@@ -1,7 +1,8 @@
 /*! the tool shorthands that the registry adds to the built-in ones.
 
 `GET /v1/shorthands` gives every name and its target. embr keeps the answer
-in ~/.ember/shorthands.json and asks again when the file is a day old. a
+in ~/.ember/shorthands.json and asks again when the file is a day old, or
+when it is five minutes old and does not have the name. a
 failed or slow request uses the old file, then no registry names at all.
 it prints one line and never fails the command. the built-in list in
 `super::SHORTHANDS` always wins, so the registry cannot re-point one. */
@@ -12,10 +13,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// how long the kept list is fresh.
 const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/** how old the kept list may be when it does not have a name. an older list
+is asked again once, so a shorthand that a developer adds works at once,
+and a typo asks the registry at most once in this time. */
+const MISS_TTL: Duration = Duration::from_secs(5 * 60);
 
 /** the longest a refresh may take. a command waits this long at most for a
 name the built-ins do not know. */
@@ -41,13 +48,27 @@ pub fn is_name(name: &str) -> bool {
 /// the registry's target for `name`, from a list read once a run.
 #[cfg(not(test))]
 pub fn lookup(name: &str) -> Option<String> {
-    static LIST: std::sync::OnceLock<Shorthands> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| match crate::sys::paths::shorthands_file() {
-        Ok(file) => load(&crate::net::registry::api_url(), &file, TTL),
-        Err(_) => Shorthands::new(),
-    })
-    .get(&name.to_ascii_lowercase())
-    .cloned()
+    static KEPT: OnceLock<Shorthands> = OnceLock::new();
+    static AGAIN: OnceLock<Shorthands> = OnceLock::new();
+    let file = crate::sys::paths::shorthands_file().ok()?;
+    find(name, &crate::net::registry::api_url(), &file, &KEPT, &AGAIN)
+}
+
+/** `name` in the kept list. on a miss, `name` in a list at most `MISS_TTL`
+old, which asks the registry again when the kept one is older. each cell
+loads once, so one run asks at most twice. */
+fn find(
+    name: &str,
+    api: &str,
+    file: &Path,
+    kept: &OnceLock<Shorthands>,
+    again: &OnceLock<Shorthands>,
+) -> Option<String> {
+    let key = name.to_ascii_lowercase();
+    kept.get_or_init(|| load(api, file, TTL))
+        .get(&key)
+        .or_else(|| again.get_or_init(|| load(api, file, MISS_TTL)).get(&key))
+        .cloned()
 }
 
 /** unit tests never ask the real registry. `load` has its own tests on a
@@ -179,6 +200,38 @@ mod tests {
         assert_eq!(read(&file).unwrap()["azul"], "npm:azul-sync");
         // the new file is fresh
         assert!(index::stamp_fresh(&file, TTL));
+        let _ = fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_name_that_the_kept_list_lacks_asks_again_once() {
+        let file = file_in("embr-test-shorthands-miss");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"shorthands":{"rojo":"rojo-rbx/rojo"}}"#).unwrap();
+        let answer = r#"{"shorthands":{"rojo":"rojo-rbx/rojo","selene":"Kampfkarren/selene"}}"#;
+        let (api, log) = mock::serve(move |_| mock::reply("200 OK", answer));
+
+        // a list younger than MISS_TTL: a miss asks nothing
+        let (kept, again) = (OnceLock::new(), OnceLock::new());
+        assert_eq!(find("selene", &api, &file, &kept, &again), None);
+        assert_eq!(log.lock().unwrap().len(), 0);
+
+        // an older list, fresh for TTL: a hit asks nothing, a miss asks once
+        age(&file, MISS_TTL + Duration::from_secs(60));
+        let (kept, again) = (OnceLock::new(), OnceLock::new());
+        assert_eq!(
+            find("Rojo", &api, &file, &kept, &again).unwrap(),
+            "rojo-rbx/rojo"
+        );
+        assert_eq!(log.lock().unwrap().len(), 0);
+        assert_eq!(
+            find("selene", &api, &file, &kept, &again).unwrap(),
+            "Kampfkarren/selene"
+        );
+        assert_eq!(find("typo", &api, &file, &kept, &again), None);
+        assert_eq!(log.lock().unwrap().len(), 1);
+        // the new answer replaced the file
+        assert_eq!(read(&file).unwrap()["selene"], "Kampfkarren/selene");
         let _ = fs::remove_dir_all(file.parent().unwrap());
     }
 

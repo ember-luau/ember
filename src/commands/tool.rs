@@ -154,6 +154,9 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     if let Some(spec) = name.strip_prefix(NPM_PREFIX) {
         return add_npm(spec, version, global);
     }
+    if tools::shorthands::is_name(&name) {
+        return Err(Error::UnknownToolShorthand(name));
+    }
     let (owner, repo) = Tool::split_repository(&name)?;
 
     /* the repo short name becomes the alias key and its bin shim, a repo
