@@ -86,6 +86,12 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
             toml::Value::try_from(&manifest.features)?,
         );
     }
+    if !manifest.feature_files.is_empty() {
+        entry.insert(
+            "feature-files".into(),
+            toml::Value::try_from(&manifest.feature_files)?,
+        );
+    }
 
     let index_path = root.join("index").join(scope).join(name);
     let mut entries: toml::Table = match fs::read_to_string(&index_path) {
@@ -365,6 +371,33 @@ mod tests {
             .collect();
         aliases.sort();
         assert_eq!(aliases, ["core", "icons", "trace"]);
+        // a package with no file features writes no `feature-files`
+        assert!(entry.get("feature-files").is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /** `[feature-files]` goes to the entry as the manifest gives it, so
+    `embr info` and the site show which files each feature owns. */
+    #[test]
+    fn a_local_publish_keeps_feature_files() {
+        let root = std::env::temp_dir().join("embr-test-local-registry-feature-files");
+        let _ = fs::remove_dir_all(&root);
+        let forge = manifest(
+            "[package]\nname = \"me/forge\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\n\
+             [features]\ntraits = [\"bin\"]\nbin = []\n\n\
+             [feature-files.traits]\nentry = \"src/traits\"\nfiles = [\"src/traits\"]\n\n\
+             [feature-files.bin]\nentry = \"src/bin\"\nfiles = [\"src/bin/**\"]\n",
+        );
+        publish_in(&root, &forge, b"forge").unwrap();
+        let file = Index::local_at(root.join("index"))
+            .file("me/forge")
+            .unwrap()
+            .unwrap();
+        let owned = &file["1.0.0 roblox"]["feature-files"];
+        assert_eq!(owned["traits"]["entry"].as_str(), Some("src/traits"));
+        assert_eq!(owned["bin"]["files"][0].as_str(), Some("src/bin/**"));
+        assert_eq!(owned.as_table().unwrap().len(), 2);
         let _ = fs::remove_dir_all(&root);
     }
 

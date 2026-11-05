@@ -1,0 +1,25 @@
+[package]
+name = "acme/forge"
+version = "1.0.0"
+description = "A core module with three file features"
+
+[target]
+environment = "luau"
+main = "src/init.luau"
+
+[features]
+traits = ["bin"]
+bin = []
+lifecycles = []
+
+[feature-files.traits]
+entry = "src/traits"
+files = ["src/traits"]
+
+[feature-files.bin]
+entry = "src/bin"
+files = ["src/bin"]
+
+[feature-files.lifecycles]
+entry = "src/lifecycles"
+files = ["src/lifecycles/**"]

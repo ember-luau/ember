@@ -45,6 +45,22 @@ pub struct Exports {
     pub members: Vec<String>,
     /// true = a collection requires each member on its first read, false = all at once. see [`collection_contents`].
     pub lazy: bool,
+    /// the enabled file features that the link file joins to this module, see [`feature_parts`].
+    pub features: Vec<FeaturePart>,
+}
+
+/** one enabled file feature in a link file. its types come through its
+own binding, so two parts never share a name in the link file. */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeaturePart {
+    /// the feature's name, which the load error names.
+    pub name: String,
+    /// the local that holds the entry module, `feature_traits`.
+    pub binding: String,
+    /// the entry module, package-root-relative like an entry point.
+    pub entry: String,
+    /// what to restate about the entry, written against `binding`.
+    pub exports: Exports,
 }
 
 /** body of a generated link file. requires the stored package and restates its
@@ -89,11 +105,37 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: Requi
     if !exports.members.is_empty() {
         return collection_contents(&module_path, exports, require);
     }
-    if exports.types.is_empty() {
+    if exports.types.is_empty() && exports.features.is_empty() {
         return format!("return {}\n", require(&module_path));
     }
 
     let mut contents = format!("local {MODULE_BINDING} = {}\n", require(&module_path));
+    for part in &exports.features {
+        contents.push_str(&format!(
+            "local {} = {}\n",
+            part.binding,
+            require(&format!("{root}/{}", part.entry))
+        ));
+    }
+    restate(&mut contents, root, exports, &require);
+    for part in &exports.features {
+        restate(&mut contents, root, &part.exports, &require);
+    }
+    if exports.features.is_empty() {
+        contents.push_str("return module\n");
+    } else {
+        contents.push_str(&merge_contents(&exports.features));
+    }
+    contents
+}
+
+/// the imports, aliases and type lines of one module of a link file.
+fn restate(
+    contents: &mut String,
+    root: &str,
+    exports: &Exports,
+    require: &impl Fn(&str) -> String,
+) {
     /* the aliases below name these the way the source did, so the bindings
     have to exist here too, pointing at the same modules through the link
     file's own path */
@@ -103,16 +145,183 @@ pub fn link_contents_at(root: &str, entry: &str, exports: &Exports, style: Requi
             require(&format!("{root}/{path}"))
         ));
     }
-    for line in &exports.aliases {
+    for line in exports.aliases.iter().chain(&exports.types) {
         contents.push_str(line);
         contents.push('\n');
     }
-    for line in &exports.types {
-        contents.push_str(line);
-        contents.push('\n');
+}
+
+/** the end of a link file that joins file features: one new table with
+the fields of the main module and of each feature entry, typed as the
+intersection of their types. a key that two parts return, or a part that
+returns no table, is an error at load, since only the running code knows
+every key. the new table keeps the main module's metatable, so a callable
+module stays callable. */
+fn merge_contents(parts: &[FeaturePart]) -> String {
+    let mut listed = vec![format!("{{ \"the main module\", {MODULE_BINDING} }}")];
+    let mut typed = vec![format!("typeof({MODULE_BINDING})")];
+    for part in parts {
+        listed.push(format!("{{ \"feature {}\", {} }}", part.name, part.binding));
+        typed.push(format!("typeof({})", part.binding));
     }
-    contents.push_str("return module\n");
-    contents
+    format!(
+        "
+local parts: {{ {{ any }} }} = {{ {} }}
+local merged: {{ [any]: any }} = {{}}
+local owners: {{ [any]: string }} = {{}}
+for _, part in parts do
+\tlocal from: string, value: any = part[1], part[2]
+\tif type(value) ~= \"table\" then
+\t\terror(from .. \" returns a \" .. type(value) .. \", so the link file cannot merge it\")
+\tend
+\tfor key, field in pairs(value) do
+\t\tif owners[key] ~= nil then
+\t\t\terror(owners[key] .. \" and \" .. from .. \" both return the key \" .. tostring(key))
+\t\tend
+\t\towners[key] = from
+\t\tmerged[key] = field
+\tend
+end
+local meta = getmetatable({MODULE_BINDING} :: any)
+if type(meta) == \"table\" then
+\tsetmetatable(merged, meta)
+end
+return (merged :: any) :: {}
+",
+        listed.join(", "),
+        typed.join(" & ")
+    )
+}
+
+/** the enabled file features of the package at `dir`, as link-file parts
+in name order. `main` is what the link file restates about the main
+module. a type that `main` or an earlier part exports already stays out,
+since Luau refuses a second `export type` of one name, and `warn` says so.
+`name` is the package, for the warnings. */
+pub fn feature_parts(
+    dir: &Path,
+    enabled: &[String],
+    main: &Exports,
+    name: &str,
+    warn: &mut impl FnMut(String),
+) -> Vec<FeaturePart> {
+    let mut taken: Vec<String> = main
+        .types
+        .iter()
+        .map(|line| type_name(line).to_string())
+        .collect();
+    let mut bindings: Vec<String> = Vec::new();
+    let mut parts = Vec::new();
+    for (feature, owned) in file_features(dir) {
+        if !enabled.contains(&feature) {
+            continue;
+        }
+        let entry = normalize_entry(&owned.entry);
+        let Some(source) = entry_luau_source(dir, &entry) else {
+            warn(format!(
+                "warning: feature {feature} of {name} has no module at {}; the link file leaves it out",
+                owned.entry
+            ));
+            continue;
+        };
+        let mut binding = format!("feature_{}", feature.replace('-', "_"));
+        while bindings.contains(&binding) {
+            binding.push('_');
+        }
+        bindings.push(binding.clone());
+        let frame = RequireFrame::of(dir, &entry);
+        let exports = exported_types(&source, &frame).unwrap_or_else(|| {
+            warn(format!(
+                "warning: could not parse the entry of feature {feature} of {name}; its types are not re-exported"
+            ));
+            Exports::default()
+        });
+        let mut exports = rebound(exports, &binding);
+        let (kept, dropped): (Vec<String>, Vec<String>) = exports
+            .types
+            .into_iter()
+            .partition(|line| !taken.iter().any(|known| known == type_name(line)));
+        for line in &dropped {
+            let shown = type_name(line);
+            warn(format!(
+                "warning: feature {feature} of {name} exports the type {shown}, which an earlier part exports too; the link file keeps the first"
+            ));
+            let alias = format!("type __ember_{shown}_");
+            exports.aliases.retain(|line| !line.starts_with(&alias));
+        }
+        taken.extend(kept.iter().map(|line| type_name(line).to_string()));
+        exports.types = kept;
+        parts.push(FeaturePart {
+            name: feature,
+            binding,
+            entry,
+            exports,
+        });
+    }
+    parts
+}
+
+/// `Point` of `export type Point<T> = module.Point<T>`.
+fn type_name(line: &str) -> &str {
+    line.trim_start_matches("export type ")
+        .split(['<', ' '])
+        .next()
+        .unwrap_or_default()
+}
+
+/** `exports` written against `binding` in place of `module`. its imports
+get the binding as a prefix, so two parts that both bind `Types` do not
+shadow each other. */
+fn rebound(exports: Exports, binding: &str) -> Exports {
+    let renamed = |line: &str| {
+        exports
+            .imports
+            .iter()
+            .fold(line.to_string(), |line, (import, _)| {
+                rename_module(&line, import, &format!("{binding}_{import}"))
+            })
+    };
+    Exports {
+        // a type line names `module` once, on its right side
+        types: exports
+            .types
+            .iter()
+            .map(
+                |line| match line.rsplit_once(&format!(" = {MODULE_BINDING}.")) {
+                    Some((left, right)) => format!("{left} = {binding}.{right}"),
+                    None => line.clone(),
+                },
+            )
+            .collect(),
+        aliases: exports.aliases.iter().map(|line| renamed(line)).collect(),
+        imports: exports
+            .imports
+            .iter()
+            .map(|(import, path)| (format!("{binding}_{import}"), path.clone()))
+            .collect(),
+        ..Exports::default()
+    }
+}
+
+/// `text` with each `old.` that starts a name written as `new.`.
+fn rename_module(text: &str, old: &str, new: &str) -> String {
+    let needle = format!("{old}.");
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(&needle) {
+        let (before, after) = rest.split_at(at);
+        let starts_name = before
+            .chars()
+            .last()
+            .or_else(|| out.chars().last())
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'));
+        out.push_str(before);
+        out.push_str(if starts_name { new } else { old });
+        out.push('.');
+        rest = &after[needle.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /** body of a link file for a collection, a package with no entry module. it
@@ -377,12 +586,33 @@ export { Point, Shape, area } from "./.ember/scope_pkg/src"
 `dir` is the package on disk, `root` the same folder as the link file
 requires it, and `entry` the built module. Alloy has no `export *`, so the
 names come from what the built module returns and the types it exports.
-None = no Alloy source for the entry, or nothing to pass on. */
+each enabled file feature in `exports` adds one line for its own entry,
+without the names that an earlier line passes on. None = no Alloy source
+for the entry, or nothing to pass on. */
 pub fn alloy_link_contents(
     dir: &Path,
     root: &str,
     entry: &str,
     exports: &Exports,
+) -> Option<String> {
+    let mut taken = Vec::new();
+    let mut contents = alloy_line(dir, root, entry, exports, &mut taken)?;
+    for part in &exports.features {
+        if let Some(line) = alloy_line(dir, root, &part.entry, &part.exports, &mut taken) {
+            contents.push_str(&line);
+        }
+    }
+    (!contents.is_empty()).then_some(contents)
+}
+
+/** the `export { ... } from` line of one built module, without the names
+in `taken`, which it then adds to. None = no Alloy source for `entry`. */
+fn alloy_line(
+    dir: &Path,
+    root: &str,
+    entry: &str,
+    exports: &Exports,
+    taken: &mut Vec<String>,
 ) -> Option<String> {
     let folder = |key: &str, default: &str| {
         toml_string(dir, "alloy.toml", &["build", key])
@@ -409,18 +639,17 @@ pub fn alloy_link_contents(
     let built = fs::read_to_string(entry_source(dir, entry)?).ok()?;
     let mut names = on_parse_thread(&built, returned_keys).unwrap_or_default();
     for line in &exports.types {
-        let name = line
-            .trim_start_matches("export type ")
-            .split(['<', ' '])
-            .next()
-            .unwrap_or_default();
+        let name = type_name(line);
         if !names.iter().any(|known| known == name) {
             names.push(name.to_string());
         }
     }
     // `default` takes `export default`, which an `export { }` list can't name
-    names.retain(|name| !name.is_empty() && name != "default");
-    (!names.is_empty()).then(|| {
+    names.retain(|name| !name.is_empty() && name != "default" && !taken.contains(name));
+    taken.extend(names.iter().cloned());
+    Some(if names.is_empty() {
+        String::new()
+    } else {
         format!(
             "export {{ {} }} from \"{root}/{module}\"\n",
             names.join(", ")
@@ -1215,6 +1444,55 @@ pub fn features_off(dir: &Path, enabled: &[String]) -> std::collections::BTreeSe
     let is_alias = |alias: &str| aliases.is_some_and(|aliases| aliases.contains_key(alias));
     let enabled = enabled.iter().cloned().collect();
     features::off(&table, &enabled, &is_alias)
+}
+
+/** the `[feature-files]` of the package at `dir`, from its shipped
+ember.toml or lpm.toml. a manifest that is not there, or a table that does
+not parse, gives none: install then deletes nothing and links the main
+entry alone, as an older embr does. */
+pub fn file_features(dir: &Path) -> crate::project::manifest::features::FileFeatures {
+    OWN_MANIFESTS
+        .into_iter()
+        .find_map(|file| {
+            fs::read_to_string(dir.join(file))
+                .ok()?
+                .parse::<toml::Table>()
+                .ok()
+        })
+        .and_then(|table| table.get("feature-files")?.clone().try_into().ok())
+        .unwrap_or_default()
+}
+
+/** deletes from the package at `dir` the files of each file feature that
+`enabled` leaves off, and each folder that this empties. the manifests
+always stay. a feature whose globs do not compile keeps its files, since a
+file that stays costs less than one that goes by mistake. */
+pub fn remove_off_features(dir: &Path, enabled: &[String]) -> Result<(), Error> {
+    let off: Vec<_> = file_features(dir)
+        .into_iter()
+        .filter(|(name, _)| !enabled.contains(name))
+        .filter_map(|(_, feature)| crate::registry::pack::feature_filter(&feature).ok())
+        .collect();
+    if off.is_empty() {
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    crate::registry::pack::walk(dir, dir, &[], &mut files)?;
+    for file in files {
+        if crate::project::manifest::is_manifest(&file)
+            || !off.iter().any(|filter| filter.matches(&file))
+        {
+            continue;
+        }
+        fs::remove_file(dir.join(&file))?;
+        // a folder that the feature filled alone goes too
+        for folder in file.ancestors().skip(1) {
+            if folder.as_os_str().is_empty() || fs::remove_dir(dir.join(folder)).is_err() {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// a package's forest.json, if it ships one that parses.
@@ -2612,6 +2890,33 @@ export type Wrapped<T = number, U = Child> = { T | U }
         // outside `out`, the build wrote nothing there
         assert_eq!(link("outer/shapes"), None);
 
+        /* an enabled file feature adds a line for its own entry, without
+        a name that an earlier line passes on already */
+        write_package(
+            &base.join("lib/traits"),
+            "init.aly",
+            "export struct Trait end\n",
+        );
+        write_package(
+            &base.join("out/traits"),
+            "init.luau",
+            "return { Trait = Trait, Shape = 1 }\n",
+        );
+        let mut joined = types.clone();
+        joined.features = vec![FeaturePart {
+            name: "traits".to_string(),
+            binding: "feature_traits".to_string(),
+            entry: "out/traits".to_string(),
+            exports: type_lines(["export type Trait = feature_traits.Trait"]),
+        }];
+        assert_eq!(
+            alloy_link_contents(&base, "./.ember/a_b", "out/shapes", &joined).as_deref(),
+            Some(
+                "export { Shape } from \"./.ember/a_b/lib/shapes\"\n\
+                 export { Trait } from \"./.ember/a_b/lib/traits\"\n"
+            )
+        );
+
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2635,5 +2940,212 @@ export type Wrapped<T = number, U = Child> = { T | U }
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// a package with three file features, the shape alloy/forge takes.
+    fn forge(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("embr-test-file-features-{name}"));
+        let _ = fs::remove_dir_all(&base);
+        write_package(
+            &base,
+            "ember.toml",
+            "[package]\nname = \"acme/forge\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\n\
+             [features]\ntraits = [\"bin\"]\nbin = []\nlifecycles = []\n\n\
+             [feature-files.traits]\nentry = \"src/traits\"\nfiles = [\"src/traits\"]\n\n\
+             [feature-files.bin]\nentry = \"src/bin.luau\"\nfiles = [\"src/bin.luau\", \"./src/bin\"]\n\n\
+             [feature-files.lifecycles]\nentry = \"src/lifecycles\"\nfiles = [\"src/lifecycles/**\"]\n",
+        );
+        write_package(
+            &base,
+            "src/init.luau",
+            "export type World = { id: number }\nreturn { world = 1 }\n",
+        );
+        write_package(
+            &base,
+            "src/traits/init.luau",
+            "local Types = require(\"@self/Types\")\n\
+             export type Trait<T = Types.Default> = { value: T }\n\
+             export type World = string\n\
+             return { trait = true }\n",
+        );
+        write_package(
+            &base,
+            "src/traits/Types.luau",
+            "export type Default = number\nreturn nil\n",
+        );
+        write_package(&base, "src/bin.luau", "return { bin = true }\n");
+        write_package(&base, "src/bin/helper.luau", "return nil\n");
+        write_package(
+            &base,
+            "src/lifecycles/init.luau",
+            "return { start = true }\n",
+        );
+        write_package(&base, "src/lifecycles/deep/step.luau", "return nil\n");
+        base
+    }
+
+    /** install deletes the files of each feature that is off, and the
+    folders that this empties, and keeps everything else. */
+    #[test]
+    fn the_files_of_a_feature_that_is_off_go() {
+        let base = forge("filter");
+        remove_off_features(&base, &["traits".to_string(), "bin".to_string()]).unwrap();
+        assert!(!base.join("src/lifecycles").exists());
+        for kept in [
+            "ember.toml",
+            "src/init.luau",
+            "src/traits/init.luau",
+            "src/traits/Types.luau",
+            "src/bin.luau",
+            "src/bin/helper.luau",
+        ] {
+            assert!(base.join(kept).is_file(), "{kept}");
+        }
+        remove_off_features(&base, &[]).unwrap();
+        assert!(!base.join("src/traits").exists());
+        assert!(!base.join("src/bin.luau").exists());
+        assert!(base.join("src/init.luau").is_file());
+        // a package without the table loses nothing
+        let plain = forge("filter-plain");
+        fs::write(
+            plain.join("ember.toml"),
+            "[package]\nname = \"acme/plain\"\n",
+        )
+        .unwrap();
+        remove_off_features(&plain, &[]).unwrap();
+        assert!(plain.join("src/lifecycles/init.luau").is_file());
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&plain);
+    }
+
+    /** each enabled feature is one part with its own binding. a type that
+    the main module exports already stays out with a warning, and the
+    imports of a part get its binding as a prefix. */
+    #[test]
+    fn enabled_features_become_link_parts() {
+        let base = forge("parts");
+        let main = type_lines(["export type World = module.World"]);
+        let mut warnings = Vec::new();
+        let enabled = ["traits".to_string(), "bin".to_string()];
+        let parts = feature_parts(&base, &enabled, &main, "acme/forge", &mut |w| {
+            warnings.push(w)
+        });
+        assert_eq!(
+            warnings,
+            [
+                "warning: feature traits of acme/forge exports the type World, which an earlier part exports too; the link file keeps the first"
+            ]
+        );
+        let names: Vec<_> = parts
+            .iter()
+            .map(|part| {
+                (
+                    part.name.as_str(),
+                    part.binding.as_str(),
+                    part.entry.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("bin", "feature_bin", "src/bin"),
+                ("traits", "feature_traits", "src/traits")
+            ]
+        );
+        assert_eq!(
+            parts[1].exports,
+            Exports {
+                types: vec![
+                    "export type Trait<T = __ember_Trait_T> = feature_traits.Trait<T>".to_string()
+                ],
+                imports: vec![(
+                    "feature_traits_Types".to_string(),
+                    "src/traits/Types".to_string()
+                )],
+                aliases: vec!["type __ember_Trait_T = feature_traits_Types.Default".to_string()],
+                ..Exports::default()
+            }
+        );
+        assert!(feature_parts(&base, &[], &main, "acme/forge", &mut |_| {}).is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** with file features on, the link file requires each entry, restates
+    each part's types and merges the values into one table. with none on,
+    it is the link file of today. */
+    #[test]
+    fn a_link_with_file_features_merges_the_parts() {
+        let base = forge("link");
+        let mut main = type_lines(["export type World = module.World"]);
+        let enabled = ["traits".to_string(), "bin".to_string()];
+        main.features = feature_parts(&base, &enabled, &main, "acme/forge", &mut |_| {});
+        assert_eq!(
+            link_contents_at("./.ember/acme_forge", "src", &main, RequireStyle::String),
+            "local module = require(\"./.ember/acme_forge/src\")
+local feature_bin = require(\"./.ember/acme_forge/src/bin\")
+local feature_traits = require(\"./.ember/acme_forge/src/traits\")
+export type World = module.World
+local feature_traits_Types = require(\"./.ember/acme_forge/src/traits/Types\")
+type __ember_Trait_T = feature_traits_Types.Default
+export type Trait<T = __ember_Trait_T> = feature_traits.Trait<T>
+
+local parts: { { any } } = { { \"the main module\", module }, { \"feature bin\", feature_bin }, { \"feature traits\", feature_traits } }
+local merged: { [any]: any } = {}
+local owners: { [any]: string } = {}
+for _, part in parts do
+\tlocal from: string, value: any = part[1], part[2]
+\tif type(value) ~= \"table\" then
+\t\terror(from .. \" returns a \" .. type(value) .. \", so the link file cannot merge it\")
+\tend
+\tfor key, field in pairs(value) do
+\t\tif owners[key] ~= nil then
+\t\t\terror(owners[key] .. \" and \" .. from .. \" both return the key \" .. tostring(key))
+\t\tend
+\t\towners[key] = from
+\t\tmerged[key] = field
+\tend
+end
+local meta = getmetatable(module :: any)
+if type(meta) == \"table\" then
+\tsetmetatable(merged, meta)
+end
+return (merged :: any) :: typeof(module) & typeof(feature_bin) & typeof(feature_traits)
+"
+        );
+        // an instance-require tree requires each part by its chain
+        let instance =
+            link_contents_at("./.ember/acme_forge", "src", &main, RequireStyle::Instance);
+        assert!(
+            instance.contains(&format!(
+                "local feature_bin = require({})\n",
+                requires::instance_chain("./.ember/acme_forge/src/bin")
+            )),
+            "{instance}"
+        );
+        // no feature on, no types: the compact link of today
+        assert_eq!(
+            link_contents_at(
+                "./.ember/acme_forge",
+                "src",
+                &Exports::default(),
+                RequireStyle::String
+            ),
+            "return require(\"./.ember/acme_forge/src\")\n"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn module_renames_touch_whole_names_only() {
+        assert_eq!(
+            rename_module("Types.A | MyTypes.B | Types.C", "Types", "f_Types"),
+            "f_Types.A | MyTypes.B | f_Types.C"
+        );
+        assert_eq!(
+            rename_module("{ x: Types.A }", "Types", "f_Types"),
+            "{ x: f_Types.A }"
+        );
     }
 }

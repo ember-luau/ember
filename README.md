@@ -591,6 +591,66 @@ installs no gated dependency, also not one that a `default` feature turns
 on, and it never fails on one. The package then runs as with every feature
 off.
 
+### File features
+
+A file feature owns a set of the package's files and has its own entry
+module. Install leaves the files of a feature that is off out of the
+package, and the one link file joins the main module and the entry of
+each enabled feature:
+
+```toml
+[target]
+environment = "roblox"
+main = "src/init.luau"
+
+[features]
+traits = ["bin"]
+bin = []
+
+[feature-files.traits]
+entry = "src/traits"
+files = ["src/traits"]
+
+[feature-files.bin]
+entry = "src/bin"
+files = ["src/bin/**"]
+```
+
+- Each `[feature-files.<name>]` table has `entry`, a module path like
+  `main`, and `files`, paths or globs like `includes`. A plain path covers
+  its folder. The table takes no other key.
+- Each file feature also has a `[features]` entry of the same name. That
+  entry is what a project and `default` turn on, and its list turns on
+  other features, so `traits` above turns `bin` on.
+- `embr publish` checks the files. The entry must ship and be one of the
+  files of its feature. A file belongs to one feature at most. No feature
+  can own ember.toml or the main entry.
+- The archive holds every file, and the index entry gets the table as
+  `feature-files`. Install reads the files of each feature from the
+  ember.toml in the archive, so `--locked`, git and path sources work the
+  same, and `ember.lock` gets no new key.
+- After extraction, install deletes the files of each feature that is off
+  from the copy under `.ember/`. The archive cache keeps the whole archive,
+  and the hash check runs on the whole archive. A workspace member or a
+  path folder is your own folder, so install deletes nothing there.
+- With no file feature on, the link file does not change. With some on,
+  the link file requires the main module and each enabled entry, restates
+  the types of each, and copies the fields of each part into one new
+  table. That table keeps the metatable of the main module. A part that
+  returns no table, or a key that two parts return, is an error when the
+  link file loads. A type that two parts export keeps the type of the
+  first part, and install warns.
+- luau-lsp reads the result as the intersection of the part types, so
+  `require("@packages/forge").Trait` has its type.
+- The main module must not require a file of a file feature, because
+  install deletes that file when the feature is off. A package with
+  `script.Parent` requires keeps each feature folder inside the folder of
+  the main module, because install rewrites those requires only there.
+
+An older embr ignores `feature-files`. It installs every file and links
+only the main entry, so `require` gives the main module alone. The
+features still resolve, because each one is in `[features]`.
+
 ## Path and git dependencies
 
 A path dependency is a folder on this computer. A git dependency is a

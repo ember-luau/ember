@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::project::azul;
+use crate::project::manifest::features::FileFeature;
 use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest, SyncTool, is_manifest};
+use crate::project::package;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
@@ -94,9 +96,7 @@ impl PathFilter {
                     .literal_separator(true)
                     .build()
                     .map_err(|error| {
-                        Error::ManifestInvalid(format!(
-                            "invalid includes/excludes glob '{entry}': {error}"
-                        ))
+                        Error::ManifestInvalid(format!("invalid glob '{entry}': {error}"))
                     })?;
                 globs.add(glob);
             } else {
@@ -116,6 +116,96 @@ impl PathFilter {
     pub(crate) fn matches(&self, file: &Path) -> bool {
         self.paths.iter().any(|path| file.starts_with(path)) || self.globs.is_match(file)
     }
+}
+
+/** the files that `feature` owns, as a filter. a leading `./` goes, so
+`./src/x` names the same folder as `src/x`. */
+pub(crate) fn feature_filter(feature: &FileFeature) -> Result<PathFilter, Error> {
+    let files: Vec<String> = feature
+        .files
+        .iter()
+        .map(|file| file.replace('\\', "/").trim_start_matches("./").to_string())
+        .collect();
+    PathFilter::new(&files)
+}
+
+/** the checks on `[feature-files]` that need the packed `files`: each
+entry is a packed module that its own feature owns, a file belongs to one
+feature at most, and no feature owns ember.toml or the main entry. install
+deletes the files of a feature that is off, so each check keeps it from
+deleting a file that the package always needs. */
+pub fn check_file_features(
+    root: &Path,
+    manifest: &Manifest,
+    files: &[PathBuf],
+) -> Result<(), Error> {
+    if manifest.feature_files.is_empty() {
+        return Ok(());
+    }
+    let refuse = |message: String| Err(Error::FeaturesInvalid(message));
+    let owners = manifest
+        .feature_files
+        .iter()
+        .map(|(name, feature)| Ok((name, feature, feature_filter(feature)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    // the packed file of a module path, None when no packed file is that module
+    let module_file = |entry: &str| {
+        let source = package::entry_source(root, &package::normalize_entry(entry))?;
+        let source = source.strip_prefix(root).ok()?.to_path_buf();
+        files.contains(&source).then_some(source)
+    };
+    let main = manifest
+        .target()
+        .and_then(|target| target.main.clone())
+        .or_else(|| package::entry_point(root));
+    let Some(main) = main.as_deref().and_then(module_file) else {
+        return refuse(
+            "feature-files needs a main module that ships; set `main` under [target]".to_string(),
+        );
+    };
+    for file in files {
+        let mut owned = owners
+            .iter()
+            .filter(|(_, _, filter)| filter.matches(file))
+            .map(|(name, _, _)| name);
+        let Some(first) = owned.next() else {
+            continue;
+        };
+        let shown = tar_path(file);
+        if let Some(second) = owned.next() {
+            return refuse(format!(
+                "{shown} is in feature-files.{first} and feature-files.{second}; a file belongs to one feature at most"
+            ));
+        }
+        if is_manifest(file) {
+            return refuse(format!(
+                "feature-files.{first} owns {shown}, which always installs"
+            ));
+        }
+        if *file == main {
+            return refuse(format!(
+                "feature-files.{first} owns the main entry {shown}, which always installs"
+            ));
+        }
+    }
+    for (name, feature, filter) in &owners {
+        match module_file(&feature.entry) {
+            Some(entry) if filter.matches(&entry) => {}
+            Some(entry) => {
+                return refuse(format!(
+                    "feature-files.{name}: the entry {} is not in the files of the feature",
+                    tar_path(&entry)
+                ));
+            }
+            None => {
+                return refuse(format!(
+                    "feature-files.{name}: the entry '{}' names no module that ships",
+                    feature.entry
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /** Packs the selected files into a gzipped tar. Entry paths are
@@ -445,6 +535,72 @@ mod tests {
             ]
         );
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /** publish refuses a `[feature-files]` that would make install delete
+    a file the package needs, or that names no packed module. */
+    #[test]
+    fn file_features_are_checked_against_the_packed_files() {
+        let base = std::env::temp_dir().join("embr-test-pack-file-features");
+        let _ = fs::remove_dir_all(&base);
+        write(&base, "ember.toml", "");
+        write(&base, "src/init.luau", "return {}");
+        write(&base, "src/traits/init.luau", "return {}");
+        write(&base, "src/traits/Trait.luau", "return {}");
+        write(&base, "src/bin.luau", "return {}");
+
+        let check = |tables: &str| {
+            let manifest = parse_manifest(&format!(
+                "[package]\nname = \"acme/forge\"\nversion = \"1.0.0\"\n\
+                 [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\
+                 [features]\ntraits = []\nbin = []\n{tables}"
+            ));
+            let files = packed_files(&base, &manifest).unwrap();
+            check_file_features(&base, &manifest, &files).map_err(|error| error.to_string())
+        };
+        let traits = "[feature-files.traits]\nentry = \"src/traits\"\nfiles = [\"src/traits\"]\n";
+        assert_eq!(check(""), Ok(()));
+        assert_eq!(
+            check(&format!(
+                "{traits}[feature-files.bin]\nentry = \"./src/bin.luau\"\nfiles = [\"src/bin.*\"]\n"
+            )),
+            Ok(())
+        );
+        let refused = |message: &str| Err(format!("Invalid features in ember.toml: {message}"));
+        for (tables, message) in [
+            (
+                format!(
+                    "{traits}[feature-files.bin]\nentry = \"src/bin\"\nfiles = [\"src/bin.luau\", \"src/traits/T*\"]\n"
+                ),
+                "src/traits/Trait.luau is in feature-files.bin and feature-files.traits; a file belongs to one feature at most",
+            ),
+            (
+                "[feature-files.bin]\nentry = \"src/bin\"\nfiles = [\"src/bin.luau\", \"src/init.luau\"]\n".to_string(),
+                "feature-files.bin owns the main entry src/init.luau, which always installs",
+            ),
+            (
+                "[feature-files.bin]\nentry = \"src/bin\"\nfiles = [\"*\"]\n".to_string(),
+                "feature-files.bin owns ember.toml, which always installs",
+            ),
+            (
+                "[feature-files.traits]\nentry = \"src/bin\"\nfiles = [\"src/traits\"]\n".to_string(),
+                "feature-files.traits: the entry src/bin.luau is not in the files of the feature",
+            ),
+            (
+                "[feature-files.traits]\nentry = \"src/trait\"\nfiles = [\"src/traits\"]\n".to_string(),
+                "feature-files.traits: the entry 'src/trait' names no module that ships",
+            ),
+        ] {
+            assert_eq!(check(&tables), refused(message), "{tables}");
+        }
+
+        // with no main module, a feature has nothing to join
+        fs::remove_file(base.join("src/init.luau")).unwrap();
+        assert_eq!(
+            check(traits),
+            refused("feature-files needs a main module that ships; set `main` under [target]")
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

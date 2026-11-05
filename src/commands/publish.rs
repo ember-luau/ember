@@ -289,6 +289,7 @@ fn publish_target(
     }
 
     let files = pack::packed_files(root, manifest)?;
+    pack::check_file_features(root, manifest, &files)?;
     /* binary .rbxm models ship as they are, and the registry scans them.
     it refuses .rbxmx, so this says so before any upload */
     if let Some(xml) = files.iter().find(|file| {
