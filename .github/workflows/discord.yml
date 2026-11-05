@@ -1,8 +1,8 @@
 # Posts an embed to Discord for each push, and for each pull request
 # that opens, closes, or merges. It follows the Alloy repositories'
 # discord.yml, in Ember's colours. The webhook comes from the
-# DISCORD_WEBHOOK secret, which announce.yml also uses for release notes.
-# A repository without the secret posts nothing.
+# CHANGES_WEBHOOK secret. Release notes go to RELEASE_WEBHOOK, through
+# announce.yml. A repository without the secret posts nothing.
 #
 # pull_request_target runs with the base repository's secrets, so a
 # pull request from a fork also posts. The job never checks out the
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/github-script@v7
         env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          WEBHOOK: ${{ secrets.CHANGES_WEBHOOK }}
         with:
           script: |
             if (!process.env.WEBHOOK) {
