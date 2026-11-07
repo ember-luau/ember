@@ -821,6 +821,46 @@ mod tests {
         assert_eq!(url, "https://cdn.luaupm.com/chief/core/0.1.0.tar.gz");
     }
 
+    /** an entry with `feature-files` resolves as one without: install
+    reads the files of each feature from the archive's ember.toml, so the
+    reader needs nothing from the key, and the features stay features. */
+    #[test]
+    fn an_entry_with_feature_files_resolves_with_its_features() {
+        let index = TempIndex::new("feature-files", r#"github_oauth_id = "Ov23abc""#);
+        index.write_package(
+            "acme/forge",
+            r#"
+            ["1.0.0 roblox"]
+            name = "acme/forge"
+            version = "1.0.0"
+            target = "roblox"
+            download = "https://cdn.emberpm.dev/acme/forge/1.0.0/roblox.tar.gz"
+
+            ["1.0.0 roblox".features]
+            traits = ["bin"]
+            bin = []
+
+            ["1.0.0 roblox".feature-files.traits]
+            entry = "src/traits"
+            files = ["src/traits"]
+            "#,
+        );
+        let config = load_config(&index.root).unwrap();
+        let resolved = resolve(
+            &index.root,
+            "https://github.com/ember-luau/index",
+            &config,
+            "acme/forge",
+            &semver::VersionReq::STAR,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(resolved.version, semver::Version::new(1, 0, 0));
+        assert_eq!(resolved.features["traits"], ["bin"]);
+        assert!(resolved.dependencies.is_empty());
+    }
+
     /** the ember registry writes the archive's hex SHA-256 as `sha256`. a
     pesde entry has none. a value of another shape refuses the install, so
     a bad entry never falls back to no check. */

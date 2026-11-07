@@ -1,0 +1,6 @@
+[target]
+environment = "luau"
+
+[dependencies]
+forge = { name = "acme/forge", version = "^1.0.0", index = "local", features = ["traits", "hooks"] }
+kit = { name = "acme/kit", version = "^1.0.0", index = "local" }

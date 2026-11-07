@@ -11,10 +11,28 @@ the same rules read an ember.toml and an index entry. `is_alias` says which
 names are dependency aliases, since an alias can be a scoped `scope/name`
 link key and so can hold a `/`. */
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// a `[features]` table: feature name -> what it turns on.
 pub type Features = BTreeMap<String, Vec<String>>;
+
+/** what one file feature owns, `[feature-files.<name>]`. install deletes
+these files from the store copy when the feature is off, and the link file
+joins `entry` to the main module when it is on. the feature itself is the
+`[features]` entry of the same name, so an older embr, which ignores this
+table, still resolves it. */
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileFeature {
+    /// the module the link file requires, package-relative like `[target] main`.
+    pub entry: String,
+    /// paths and globs, package-relative, the syntax of `[target] includes`.
+    pub files: Vec<String>,
+}
+
+/// a `[feature-files]` table: feature name -> the files it owns.
+pub type FileFeatures = BTreeMap<String, FileFeature>;
 
 /// the key that lists the features that are on unless a dependent opts out.
 pub const DEFAULT: &str = "default";
@@ -107,6 +125,48 @@ pub fn check(features: &Features, aliases: &BTreeSet<&str>) -> Result<(), String
         ));
     }
     Ok(())
+}
+
+/** the checks on a package's own `[feature-files]` that need no files:
+each name is a feature of `features` other than `default`, and each path
+stays inside the package. `embr publish` checks the files themselves, see
+`registry::pack::check_file_features`. */
+pub fn check_files(files: &FileFeatures, features: &Features) -> Result<(), String> {
+    for (name, owned) in files {
+        if name == DEFAULT {
+            return Err("feature-files.default: default lists features and owns no files".into());
+        }
+        if !features.contains_key(name) {
+            return Err(format!(
+                "feature-files.{name}: '{name}' is not in [features]; add `{name} = []` there"
+            ));
+        }
+        if owned.files.is_empty() {
+            return Err(format!(
+                "feature-files.{name}: `files` is empty; give the paths or globs that the feature owns"
+            ));
+        }
+        for path in std::iter::once(&owned.entry).chain(&owned.files) {
+            if let Some(reason) = outside(path) {
+                return Err(format!("feature-files.{name}: the path '{path}' {reason}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// why `path` is no package-relative path, None when it is one.
+fn outside(path: &str) -> Option<&'static str> {
+    let path = path.replace('\\', "/");
+    if path.trim_start_matches("./").trim_matches('/').is_empty() {
+        Some("is empty")
+    } else if path.starts_with('/') || path.chars().nth(1) == Some(':') {
+        Some("is absolute; use a path relative to the package root")
+    } else if path.split('/').any(|part| part == "..") {
+        Some("goes out of the package with '..'")
+    } else {
+        None
+    }
 }
 
 /// the first chain of features that turns its own start back on, if any.
@@ -370,6 +430,65 @@ mod tests {
         assert_eq!(enable(&features, ["icns"], true), Err("icns".to_string()));
         // a package with no table has no features, and the defaults are none
         assert!(enable(&Features::new(), [], true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_features_need_a_feature_and_paths_in_the_package() {
+        let features = table("default = [\"core\"]\ncore = []\ntraits = [\"bin\"]\nbin = []\n");
+        let files = |text: &str| -> FileFeatures { toml::from_str(text).unwrap() };
+        assert_eq!(
+            check_files(
+                &files(
+                    "traits = { entry = \"src/traits\", files = [\"src/traits\"] }\n\
+                        bin = { entry = \"src/bin/init.luau\", files = [\"src/bin/**\", \"./tools\"] }\n"
+                ),
+                &features
+            ),
+            Ok(())
+        );
+        for (text, error) in [
+            (
+                "ghost = { entry = \"src/ghost\", files = [\"src/ghost\"] }\n",
+                "feature-files.ghost: 'ghost' is not in [features]; add `ghost = []` there",
+            ),
+            (
+                "default = { entry = \"src/core\", files = [\"src/core\"] }\n",
+                "feature-files.default: default lists features and owns no files",
+            ),
+            (
+                "bin = { entry = \"src/bin\", files = [] }\n",
+                "feature-files.bin: `files` is empty; give the paths or globs that the feature owns",
+            ),
+            (
+                "bin = { entry = \"\", files = [\"src/bin\"] }\n",
+                "feature-files.bin: the path '' is empty",
+            ),
+            (
+                "bin = { entry = \"src/bin\", files = [\"/etc\"] }\n",
+                "feature-files.bin: the path '/etc' is absolute; use a path relative to the package root",
+            ),
+            (
+                "bin = { entry = \"C:\\\\bin\", files = [\"src/bin\"] }\n",
+                "feature-files.bin: the path 'C:\\bin' is absolute; use a path relative to the package root",
+            ),
+            (
+                "bin = { entry = \"src/bin\", files = [\"src/../../x\"] }\n",
+                "feature-files.bin: the path 'src/../../x' goes out of the package with '..'",
+            ),
+        ] {
+            assert_eq!(
+                check_files(&files(text), &features),
+                Err(error.to_string()),
+                "{text}"
+            );
+        }
+        // a key that the table does not take fails the parse
+        let typo = toml::from_str::<FileFeatures>("bin = { entri = \"src/bin\", files = [] }\n");
+        assert!(
+            typo.unwrap_err()
+                .to_string()
+                .contains("unknown field `entri`")
+        );
     }
 
     #[test]

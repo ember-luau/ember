@@ -103,6 +103,15 @@ pub struct Manifest {
     a feature lists by its alias installs only when that feature is on. */
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: features::Features,
+    /** the files and the entry module of each file feature, see
+    [`features::FileFeature`]. additive: an older embr ignores the table,
+    installs every file, and links the main entry alone. */
+    #[serde(
+        rename = "feature-files",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub feature_files: features::FileFeatures,
     /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
@@ -1409,6 +1418,8 @@ impl Manifest {
         }
         let aliases = self.dependencies.keys().map(String::as_str).collect();
         features::check(&self.features, &aliases).map_err(Error::FeaturesInvalid)?;
+        features::check_files(&self.feature_files, &self.features)
+            .map_err(Error::FeaturesInvalid)?;
         for (alias, dependency) in self.all_dependencies().chain(&self.peer_dependencies) {
             if let Some(feature) = dependency
                 .features()
@@ -3214,6 +3225,41 @@ mod tests {
         ] {
             assert_eq!(validated(&bad).unwrap_err().to_string(), why);
         }
+    }
+
+    /** `[feature-files]` parses, writes back, and goes through the
+    manifest check: each name is a feature, and an unknown key fails. */
+    #[test]
+    fn feature_files_parse_write_back_and_are_checked() {
+        let text = r#"
+            [features]
+            traits = ["bin"]
+            bin = []
+
+            [feature-files.traits]
+            entry = "src/traits"
+            files = ["src/traits"]
+            "#;
+        let manifest = validated(text).unwrap();
+        assert_eq!(manifest.feature_files["traits"].entry, "src/traits");
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("[feature-files.traits]"), "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.feature_files, manifest.feature_files);
+        // a manifest with none writes none
+        let plain = toml::to_string(&validated("[features]\nbin = []\n").unwrap()).unwrap();
+        assert!(!plain.contains("feature-files"), "{plain}");
+
+        assert_eq!(
+            validated(&text.replace("traits = [\"bin\"]", ""))
+                .unwrap_err()
+                .to_string(),
+            "Invalid features in ember.toml: feature-files.traits: 'traits' is not in [features]; add `traits = []` there"
+        );
+        let typo = validated(&text.replace("entry =", "main ="))
+            .unwrap_err()
+            .to_string();
+        assert!(typo.contains("unknown field `main`"), "{typo}");
     }
 
     /** a path or git entry parses as its own shape, also with the keys of

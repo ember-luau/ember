@@ -289,6 +289,7 @@ fn publish_target(
     }
 
     let files = pack::packed_files(root, manifest)?;
+    let owned = pack::check_file_features(root, manifest, &files)?;
     /* binary .rbxm models ship as they are, and the registry scans them.
     it refuses .rbxmx, so this says so before any upload */
     if let Some(xml) = files.iter().find(|file| {
@@ -330,6 +331,18 @@ fn publish_target(
         }
         if let Some(entry) = entry {
             println!("Entry: {entry}");
+        }
+        for feature in &owned {
+            let count = feature.files.len();
+            println!(
+                "Feature {}: entry {}, {count} file{}:",
+                feature.name,
+                pack::tar_path(&feature.entry),
+                if count == 1 { "" } else { "s" }
+            );
+            for file in &feature.files {
+                println!("  {}", file.display());
+            }
         }
         return Ok(());
     }

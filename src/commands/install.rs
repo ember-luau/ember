@@ -1586,6 +1586,9 @@ fn install_one(
     if let Some(patch) = &job.patch {
         apply_patch(&job.name, patch, staging)?;
     }
+    /* the files of a file feature that is off never reach the store. the
+    archive cache keeps the whole archive, and its hash was checked above */
+    package::remove_off_features(staging, &job.features)?;
 
     /* indices usually know the environment, otherwise ask the files,
     ember.toml then pesde.toml then wally.toml */
@@ -1632,6 +1635,7 @@ fn install_one(
                 &storage,
                 &entry,
                 &job.name,
+                &job.features,
                 lazy_collections(manifest, job.context),
                 &mut warner(progress),
             );
@@ -1735,6 +1739,7 @@ fn link_in_place(
                 member_dir,
                 &entry,
                 &job.name,
+                &job.features,
                 lazy_collections(manifest, job.context),
                 &mut warner(progress),
             );
@@ -1928,6 +1933,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
                         &dep.storage,
                         &entry,
                         &dependency,
+                        &dep.features,
                         package.lazy_collections,
                         &mut |_| {},
                     )
@@ -2043,15 +2049,25 @@ fn is_plain_file_name(alias: &str) -> bool {
 /** exported types have to be restated in the link file to survive the
 wrapper. an unparseable entry point still links, just without its types.
 an entry with no module is a collection, and its members go in instead,
-`lazy` as [`lazy_collections`] decides. */
+`lazy` as [`lazy_collections`] decides. the file features in `features`
+that the package has join the link, see [`package::feature_parts`]. */
 fn link_types(
     package_dir: &Path,
     entry: &str,
     name: &str,
+    features: &[String],
     lazy: bool,
     warn: &mut impl FnMut(String),
 ) -> package::Exports {
     let Some(source) = package::entry_luau_source(package_dir, entry) else {
+        if package::file_features(package_dir)
+            .keys()
+            .any(|feature| features.contains(feature))
+        {
+            warn(format!(
+                "warning: the entry of {name} is a folder of modules, so its link file leaves out the entries of its features"
+            ));
+        }
         return package::Exports {
             members: package::collection_members(package_dir, entry),
             lazy,
@@ -2059,12 +2075,14 @@ fn link_types(
         };
     };
     let frame = package::RequireFrame::of(package_dir, entry);
-    package::exported_types(&source, &frame).unwrap_or_else(|| {
+    let mut exports = package::exported_types(&source, &frame).unwrap_or_else(|| {
         warn(format!(
             "warning: could not parse the entry point of {name}; its types are not re-exported"
         ));
         package::Exports::default()
-    })
+    });
+    exports.features = package::feature_parts(package_dir, features, &exports, name, warn);
+    exports
 }
 
 /** whether a collection link in `context` requires each member on its first
@@ -4445,7 +4463,7 @@ mod tests {
             environment: Environment::Luau,
             sha256: String::new(),
             entry: Some("build".to_string()),
-            types: link_types(&storage, "build", &job.name, false, &mut |_| {}),
+            types: link_types(&storage, "build", &job.name, &[], false, &mut |_| {}),
         };
         let bar = Progress::hidden();
         let luau_link = "local module = require(\"./.ember/fixture_geometry/build\")\n\

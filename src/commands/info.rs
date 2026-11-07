@@ -172,6 +172,7 @@ fn local_document(name: &str, source: &DownloadSource, manifest: &Value) -> serd
             "requires": {},
             "dependencies": dependencies,
             "features": feature_table(manifest),
+            "feature_files": file_feature_table(manifest),
             "dev_dependencies": dev_dependencies,
         },
         "versions": [],
@@ -503,6 +504,7 @@ fn document(
             "requires": requires,
             "dependencies": dependencies,
             "features": feature_table(&shown.entry),
+            "feature_files": file_feature_table(&shown.entry),
             "dev_dependencies": dev_dependencies,
         },
         "versions": versions,
@@ -629,10 +631,22 @@ fn feature_table(entry: &Value) -> features::Features {
         .unwrap_or_default()
 }
 
+/** the entry's `[feature-files]` table. an index entry and a shipped
+ember.toml spell it the same, and a table that does not parse shows as
+none, as install reads it. */
+fn file_feature_table(entry: &Value) -> features::FileFeatures {
+    entry
+        .get("feature-files")
+        .cloned()
+        .and_then(|table| table.try_into().ok())
+        .unwrap_or_default()
+}
+
 /** the (feature, what it turns on) pairs of an entry. a default feature
-says so. */
+says so, and a file feature names its files and its entry. */
 fn features(entry: &Value) -> Vec<Spec> {
     let table = feature_table(entry);
+    let owned = file_feature_table(entry);
     let defaults = table.get(features::DEFAULT);
     table
         .iter()
@@ -642,6 +656,13 @@ fn features(entry: &Value) -> Vec<Spec> {
                 [] => "-".to_string(),
                 items => items.join(", "),
             };
+            if let Some(owned) = owned.get(name) {
+                text.push_str(&format!(
+                    " (files: {}; entry: {})",
+                    owned.files.join(", "),
+                    owned.entry
+                ));
+            }
             if defaults.is_some_and(|defaults| defaults.contains(name)) {
                 text.push_str(&" (default)".dark_grey().to_string());
             }
@@ -824,6 +845,10 @@ default = ["pretty"]
 pretty = ["icons", "Signal/fast"]
 plain = []
 
+["1.1.0 lune-alloy".feature-files.plain]
+entry = "src/plain"
+files = ["src/plain", "assets/plain/**"]
+
 ["1.1.0 lune-alloy".peer-dependencies.React]
 name = "jsdotlua/react"
 version = "^17.0.0"
@@ -903,6 +928,8 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
         );
         assert_eq!(document["shown"]["version"], "0.1.0");
         assert_eq!(document["shown"]["dependencies"], json!([]));
+        // a package with no file features has an empty table, as with features
+        assert_eq!(document["shown"]["feature_files"], json!({}));
     }
 
     #[test]
@@ -937,7 +964,7 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
                React   jsdotlua/react ^17.0.0 (peer)\n\
              \n\
              Features\n  \
-               plain   -\n  \
+               plain   - (files: src/plain, assets/plain/**; entry: src/plain)\n  \
                pretty  icons, Signal/fast (default)\n\
              \n\
              Dev dependencies\n  \
@@ -1114,6 +1141,9 @@ versions = "=1.0.0"
                         "default": ["pretty"],
                         "plain": [],
                         "pretty": ["icons", "Signal/fast"],
+                    },
+                    "feature_files": {
+                        "plain": { "entry": "src/plain", "files": ["src/plain", "assets/plain/**"] },
                     },
                     "dev_dependencies": [
                         dependency("testkit", "evaera/testkit", "^1.0.0", None),

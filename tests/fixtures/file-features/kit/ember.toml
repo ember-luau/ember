@@ -1,0 +1,10 @@
+[package]
+name = "acme/kit"
+version = "1.0.0"
+
+[target]
+environment = "luau"
+main = "src/init.luau"
+
+[dependencies]
+forge = { name = "acme/forge", version = "^1.0.0", index = "local" }

@@ -65,7 +65,9 @@ pub struct LockedPackage {
     /** its enabled features: the union over its dependents in this
     environment root, with the features those turn on. absent with none.
     the nested-link pass reads it to leave the gated dependencies that no
-    enabled feature lists without a link. */
+    enabled feature lists without a link. install reads it to delete the
+    files of each file feature that is off, and the archive's ember.toml
+    says which files those are, so the lock needs no key for them. */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
     #[serde(flatten)]
