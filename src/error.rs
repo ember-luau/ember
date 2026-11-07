@@ -417,6 +417,9 @@ pub enum Error {
     #[error("Invalid features in ember.toml: {0}")]
     FeaturesInvalid(String),
 
+    #[error("Invalid highlight rules in ember.toml: {0}")]
+    HighlightInvalid(String),
+
     /// a dependent asks a package for a feature that its [features] does not have.
     #[error("{package} has no feature '{feature}', which {by} asks for; {known}")]
     FeatureUnknown {

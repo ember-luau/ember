@@ -92,6 +92,9 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
             toml::Value::try_from(&manifest.feature_files)?,
         );
     }
+    if let Some(highlight) = &manifest.highlight {
+        entry.insert("highlight".into(), highlight.clone());
+    }
 
     let index_path = root.join("index").join(scope).join(name);
     let mut entries: toml::Table = match fs::read_to_string(&index_path) {
@@ -398,6 +401,28 @@ mod tests {
         assert_eq!(owned["traits"]["entry"].as_str(), Some("src/traits"));
         assert_eq!(owned["bin"]["files"][0].as_str(), Some("src/bin/**"));
         assert_eq!(owned.as_table().unwrap().len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /** `[highlight]` goes to the entry as the manifest gives it, so the
+    site reads the rules of each version from the package detail. */
+    #[test]
+    fn a_local_publish_keeps_highlight() {
+        let root = std::env::temp_dir().join("embr-test-local-registry-highlight");
+        let _ = fs::remove_dir_all(&root);
+        let blocks = manifest(
+            "[package]\nname = \"me/blocks\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\n\
+             [[highlight.rules]]\nlanguages = [\"alx\"]\ntype = \"keyword\"\nwords = [\"#if\"]\n",
+        );
+        publish_in(&root, &blocks, b"blocks").unwrap();
+        let file = Index::local_at(root.join("index"))
+            .file("me/blocks")
+            .unwrap()
+            .unwrap();
+        let rules = &file["1.0.0 roblox"]["highlight"]["rules"];
+        assert_eq!(rules[0]["words"][0].as_str(), Some("#if"));
+        assert_eq!(rules[0]["type"].as_str(), Some("keyword"));
         let _ = fs::remove_dir_all(&root);
     }
 

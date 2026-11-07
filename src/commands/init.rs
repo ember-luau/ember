@@ -537,6 +537,7 @@ fn package_manifest(
         peer_dependencies: Default::default(),
         features: Default::default(),
         feature_files: Default::default(),
+        highlight: None,
         overrides: Default::default(),
         patches: Default::default(),
         tools: Default::default(),

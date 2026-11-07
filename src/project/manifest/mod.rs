@@ -1,5 +1,6 @@
 pub mod edit;
 pub mod features;
+pub mod highlight;
 mod inherit;
 
 use crate::error::Error;
@@ -112,6 +113,12 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub feature_files: features::FileFeatures,
+    /** syntax rules for the code blocks on the package's page on the Ember
+    site, see [`highlight`]. kept as TOML so that a key from a later embr
+    still reads; `embr publish` checks it. additive: an older embr ignores
+    the table, and drops it when it publishes. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<toml::Value>,
     /// replacements for dependencies of dependencies. see [`Override`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, Override>,
@@ -3225,6 +3232,32 @@ mod tests {
         ] {
             assert_eq!(validated(&bad).unwrap_err().to_string(), why);
         }
+    }
+
+    /** `[highlight]` stays as TOML: it parses with keys that this embr
+    does not know, it writes back as it was, and a manifest with none
+    writes none. publish checks it, not the read. */
+    #[test]
+    fn highlight_parses_and_writes_back() {
+        let text = r##"
+            [[highlight.rules]]
+            languages = ["alx"]
+            type = "keyword"
+            before = '\{'
+            words = ["#if", "/if"]
+            later = "a key of a later embr"
+            "##;
+        let manifest = validated(text).unwrap();
+        let written = toml::to_string(&manifest).unwrap();
+        assert!(written.contains("[[highlight.rules]]"), "{written}");
+        let reparsed: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.highlight, manifest.highlight);
+        assert_eq!(
+            manifest.highlight.as_ref().unwrap()["rules"][0]["before"].as_str(),
+            Some("\\{")
+        );
+        let plain = toml::to_string(&validated("[features]\nbin = []\n").unwrap()).unwrap();
+        assert!(!plain.contains("highlight"), "{plain}");
     }
 
     /** `[feature-files]` parses, writes back, and goes through the
