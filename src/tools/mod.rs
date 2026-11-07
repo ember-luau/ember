@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::net::http;
 use crate::net::http::responses::Release;
-use crate::project::manifest::{EMBER_PREFIX, Tool};
+use crate::project::manifest::{EMBER_PREFIX, Tool, split_package_name};
 use crate::sys::{hash, paths};
 use std::env;
 use std::fs;
@@ -87,6 +87,14 @@ pub fn tool_root(repository: &str) -> Result<PathBuf, Error> {
         Some(name) => tools.join("ember").join(name.replace('/', "+")),
         None => tools.join(repository.replace('/', "_")),
     })
+}
+
+/** the Ember name to ask first for a bare GitHub owner/repo. lowercase,
+since Ember names are, and a pin lives under the GitHub owner in lowercase.
+None when Ember cannot hold the name, a '.' in it say. */
+pub fn ember_candidate(repository: &str) -> Option<String> {
+    let lower = repository.to_ascii_lowercase();
+    split_package_name(&lower).is_ok().then_some(lower)
 }
 
 /// the release of `version`, from Ember for an `ember:` tool, else from GitHub.
@@ -279,6 +287,27 @@ pub fn ensure_stored(
         &mut |_, _| {},
     )?
     .0)
+}
+
+/** the stored executable that answers for `repository` with no request:
+`version` when it is stored, or with no version the latest that a fresh
+stamp names. `stale` takes a stamp of any age, the offline answer. */
+pub fn cached(
+    repository: &str,
+    version: Option<&str>,
+    stale: bool,
+) -> Result<Option<PathBuf>, Error> {
+    let stamp = latest_stamp(repository)?;
+    let version = match version {
+        Some(version) => Some(version.to_string()),
+        None if stale => stamped_version(&stamp),
+        None => fresh_latest_version(&stamp),
+    };
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let stored = stored_executable(repository, &version)?;
+    Ok(stored_is_usable(&stored).then_some(stored))
 }
 
 /** the stored executable for a repo's latest release, asking GitHub at

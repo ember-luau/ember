@@ -282,15 +282,13 @@ fn locate(
     }
     Tool::split_repository(name)?;
 
-    /* Ember names are lowercase, and a pin lives under the GitHub owner in
-    lowercase, so JohnnyMorganz/StyLua finds johnnymorganz/stylua */
+    // JohnnyMorganz/StyLua finds the pin johnnymorganz/stylua
     let lower = name.to_ascii_lowercase();
     let on_ember = format!("{EMBER_PREFIX}{lower}");
     let ember_first = match index {
         Some(ToolIndex::Ember) => return Ok((on_ember, ember(&lower, version)?)),
         Some(ToolIndex::Github) => false,
-        // a name that Ember cannot hold, with a '.' say, is not on Ember
-        None => !from_shorthand && split_package_name(&lower).is_ok(),
+        None => !from_shorthand && tools::ember_candidate(name).is_some(),
     };
     if ember_first {
         match ember(&lower, version) {
