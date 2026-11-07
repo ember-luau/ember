@@ -344,7 +344,7 @@ pub fn remove_notice(token: &str, name: &str, id: &str) -> Result<(), Error> {
 
 /** one call an owner makes, with `body` as JSON or with no body. returns
 the answer's body. */
-fn owner_call(
+pub(crate) fn owner_call(
     api: &str,
     token: &str,
     action: &'static str,
@@ -365,7 +365,34 @@ fn owner_call(
         Some(json) => request.send_json(json),
         None => request.call(),
     };
+    owner_answer(action, response)
+}
 
+/** PUTs `bytes` at `path` as an owner, with their SHA-256 in
+`x-ember-sha256` so the API can refuse a body that changed on the way. the
+bulk agent, since a tool asset may be 100 MB on a slow uplink. */
+pub(crate) fn owner_upload(
+    api: &str,
+    token: &str,
+    action: &'static str,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let response = http::bulk_agent()
+        .put(&format!("{api}{path}"))
+        .set("User-Agent", http::USER_AGENT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/octet-stream")
+        .set("x-ember-sha256", &crate::sys::hash::sha256_hex(bytes))
+        .send_bytes(bytes);
+    owner_answer(action, response).map(drop)
+}
+
+/// the body of an owner's call, or its refusal with the API's message.
+fn owner_answer(
+    action: &'static str,
+    response: Result<ureq::Response, ureq::Error>,
+) -> Result<String, Error> {
     match response {
         Ok(response) => Ok(response.into_string()?),
         Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {

@@ -1,24 +1,31 @@
-use std::{collections::BTreeMap, env::consts::EXE_SUFFIX, fs};
+use std::{collections::BTreeMap, env::consts::EXE_SUFFIX, fs, path::PathBuf};
 
 use crate::{
     error::Error,
-    net::github::GithubAPI,
+    net::{github::GithubAPI, http::responses::Release, registry},
     project::manifest::{
-        NPM_PREFIX, Tool,
+        EMBER_PREFIX, NPM_PREFIX, Tool,
         edit::{ManifestDoc, Scope},
-        split_npm_spec,
+        split_npm_spec, split_package_name,
     },
     sys::paths,
     tools, ui,
 };
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use semver::Version;
+
+/// the index that `tool add` takes an owner/repo from.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum ToolIndex {
+    Ember,
+    Github,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum ToolCommand {
     /// Use a tool in the current project
     Add {
-        /// Name of the tool, e.g. owner/repo, or npm:package for a tool that npm publishes
+        /// Name of the tool: owner/repo, ember:scope/name, or npm:package for a tool that npm publishes
         name: String,
 
         /// Specific version to add
@@ -28,6 +35,36 @@ pub enum ToolCommand {
         /// Add to the global tools file, usable anywhere
         #[arg(short, long)]
         global: bool,
+
+        /// Take an owner/repo from this index only. Without it, Ember first, then GitHub
+        #[arg(long, value_enum)]
+        index: Option<ToolIndex>,
+    },
+
+    /// Publish a version of a tool to Ember, from tool.toml
+    Publish {
+        /// Files to upload as the version's assets
+        files: Vec<PathBuf>,
+
+        /// Path to tool.toml
+        #[arg(long, value_name = "PATH", default_value = "tool.toml")]
+        manifest: PathBuf,
+
+        /// Version to publish, in place of the one in tool.toml
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Markdown file with the release notes
+        #[arg(long, value_name = "FILE")]
+        notes: Option<PathBuf>,
+
+        /// Mark the version as a prerelease
+        #[arg(long)]
+        prerelease: bool,
+
+        /// Check everything and upload nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Remove a tool from the current project
@@ -77,7 +114,20 @@ pub fn run(command: ToolCommand) -> Result<(), Error> {
             name,
             version,
             global,
-        } => add(name, version, global),
+            index,
+        } => add(name, version, global, index),
+        ToolCommand::Publish {
+            files,
+            manifest,
+            version,
+            notes,
+            prerelease,
+            dry_run,
+        } => {
+            let plan =
+                tools::ember::plan(&manifest, &files, version, notes.as_deref(), prerelease)?;
+            publish(&plan, dry_run)
+        }
         ToolCommand::Remove { name, global } => remove(name, global),
         ToolCommand::Update => update(),
         ToolCommand::Delete { name, version } => delete(name, version),
@@ -148,28 +198,47 @@ fn sweep_tool_store(tools_dir: &std::path::Path) -> (u64, Vec<(String, std::io::
     (freed, skipped)
 }
 
-fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error> {
+fn add(
+    name: String,
+    version: Option<String>,
+    global: bool,
+    index: Option<ToolIndex>,
+) -> Result<(), Error> {
     let github = GithubAPI::new();
-    let name = tools::expand_shorthand(&name);
+    let shorthand = tools::shorthand_repository(&name);
+    let from_shorthand = shorthand.is_some();
+    let name = shorthand.unwrap_or(name);
     if let Some(spec) = name.strip_prefix(NPM_PREFIX) {
         return add_npm(spec, version, global);
     }
     if tools::shorthands::is_name(&name) {
         return Err(Error::UnknownToolShorthand(name));
     }
-    let (owner, repo) = Tool::split_repository(&name)?;
+
+    // resolve the release first so a bad name/version never touches the file
+    let version = version
+        .as_deref()
+        .map(|version| version.trim_start_matches('v'));
+    let (repository, release) = locate(
+        &name,
+        version,
+        index,
+        from_shorthand,
+        tools::ember::release,
+        |repository, version| match version {
+            Some(version) => github.get_release(repository, version),
+            None => github.get_latest_release(repository),
+        },
+    )?;
 
     /* the repo short name becomes the alias key and its bin shim, a repo
     named embr or embx would shadow embr's own binaries there */
+    let repo = repository
+        .rsplit_once('/')
+        .map_or(repository.as_str(), |(_, repo)| repo);
     if tools::is_reserved_alias(repo) {
         return Err(Error::ReservedToolAlias(repo.to_string()));
     }
-
-    // resolve the release first so a bad name/version never touches the file
-    let release = match &version {
-        Some(version) => github.get_release(&name, version.trim_start_matches('v'))?,
-        None => github.get_latest_release(&name)?,
-    };
 
     /* global tools live in ~/.ember/tools.toml, created on first use, and
     resolve in any directory. project tools only inside their project */
@@ -178,17 +247,86 @@ fn add(name: String, version: Option<String>, global: bool) -> Result<(), Error>
     /* alias key defaults to the repo short name. the bin shim takes the
     same name, which is what `delete` relies on when removing it */
     let version = release.tag_name.trim_start_matches('v');
-    manifest.table_or_create("tools")?[repo] =
-        toml_edit::value(format!("{owner}/{repo}@{version}"));
+    manifest.table_or_create("tools")?[repo] = toml_edit::value(format!("{repository}@{version}"));
     manifest.save()?;
 
     if global {
-        ui::print_success(&format!("Added global tool {name}@{version}"));
+        ui::print_success(&format!("Added global tool {repository}@{version}"));
     } else {
-        ui::print_success(&format!("Added tool {name}@{version} to ember.toml"));
+        ui::print_success(&format!("Added tool {repository}@{version} to ember.toml"));
     }
     println!("Run `embr install` to install it");
 
+    Ok(())
+}
+
+/** the repository that `name` pins under, and its release. `ember:` asks
+Ember. a bare owner/repo asks Ember first and GitHub when Ember has no such
+tool, unless `index` names one index. a shorthand's bare target stays on
+GitHub, as it was before Ember listed tools. */
+fn locate(
+    name: &str,
+    version: Option<&str>,
+    index: Option<ToolIndex>,
+    from_shorthand: bool,
+    ember: impl Fn(&str, Option<&str>) -> Result<Release, Error>,
+    github: impl Fn(&str, Option<&str>) -> Result<Release, Error>,
+) -> Result<(String, Release), Error> {
+    if let Some(spec) = name.strip_prefix(EMBER_PREFIX) {
+        let (spec, pinned) = match spec.split_once('@') {
+            Some((spec, pinned)) => (spec, Some(pinned)),
+            None => (spec, None),
+        };
+        let release = ember(spec, version.or(pinned))?;
+        return Ok((format!("{EMBER_PREFIX}{spec}"), release));
+    }
+    Tool::split_repository(name)?;
+
+    /* Ember names are lowercase, and a pin lives under the GitHub owner in
+    lowercase, so JohnnyMorganz/StyLua finds johnnymorganz/stylua */
+    let lower = name.to_ascii_lowercase();
+    let on_ember = format!("{EMBER_PREFIX}{lower}");
+    let ember_first = match index {
+        Some(ToolIndex::Ember) => return Ok((on_ember, ember(&lower, version)?)),
+        Some(ToolIndex::Github) => false,
+        // a name that Ember cannot hold, with a '.' say, is not on Ember
+        None => !from_shorthand && split_package_name(&lower).is_ok(),
+    };
+    if ember_first {
+        match ember(&lower, version) {
+            Err(Error::EmberToolMissing(_)) => {}
+            found => return Ok((on_ember, found?)),
+        }
+    }
+    Ok((name.to_string(), github(name, version)?))
+}
+
+/** uploads a checked version to Ember with the `embr publish` login, or
+with `dry_run` stops after the checks. */
+fn publish(plan: &tools::ember::Plan, dry_run: bool) -> Result<(), Error> {
+    println!(
+        "Publishing {}@{} with {} file{}",
+        plan.name,
+        plan.version,
+        plan.uploads.len(),
+        ui::plural(plan.uploads.len())
+    );
+    if dry_run {
+        for upload in &plan.uploads {
+            println!(
+                "  {} ({:.1} MiB)",
+                upload.name,
+                upload.size as f64 / (1024.0 * 1024.0)
+            );
+        }
+        ui::print_success("Dry run: every check passed, nothing uploaded");
+        return Ok(());
+    }
+    crate::commands::yank::as_owner(|token| {
+        tools::ember::publish(&registry::api_url(), token, plan)
+    })?;
+    ui::print_success(&format!("Published tool {}@{}", plan.name, plan.version));
+    println!("https://emberpm.dev/tool/{}", plan.name);
     Ok(())
 }
 
@@ -314,8 +452,7 @@ fn update() -> Result<(), Error> {
 
         let latest = match tool.npm_package() {
             Some(package) => tools::npm::latest(package)?,
-            None => github
-                .get_latest_release(&tool.repository)?
+            None => tools::get_latest_release(&tool.repository, &github)?
                 .tag_name
                 .trim_start_matches('v')
                 .to_string(),
@@ -382,12 +519,17 @@ fn list(json: bool) -> Result<(), Error> {
             /* github owners can never contain '_', so the first '_' in the
             directory name splits owner from repo */
             let dir_name = entry.file_name().to_string_lossy().into_owned();
-            // npm tools sit one level down, a '+' in place of a scope's '/'
-            if dir_name == "npm" {
+            // npm and Ember tools sit one level down, a '+' in place of the '/'
+            let prefix = match dir_name.as_str() {
+                "npm" => Some(NPM_PREFIX),
+                "ember" => Some(EMBER_PREFIX),
+                _ => None,
+            };
+            if let Some(prefix) = prefix {
                 for package in fs::read_dir(entry.path())? {
                     let package = package?;
                     let name = package.file_name().to_string_lossy().replace('+', "/");
-                    stored.push((format!("{NPM_PREFIX}{name}"), package.path()));
+                    stored.push((format!("{prefix}{name}"), package.path()));
                 }
                 continue;
             }
@@ -506,11 +648,15 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
             _ => return Err(Error::InvalidToolSpec(name.clone())),
         },
         None => {
-            let (owner, repo) = Tool::split_repository(&name)?;
-            (
-                paths::tools_dir()?.join(format!("{owner}_{repo}")),
-                Some(repo.to_string()),
-            )
+            let repo = match name.strip_prefix(EMBER_PREFIX) {
+                Some(ember) => {
+                    split_package_name(ember)
+                        .map_err(|_| Error::InvalidToolSpec(name.clone()))?
+                        .1
+                }
+                None => Tool::split_repository(&name)?.1,
+            };
+            (tools::tool_root(&name)?, Some(repo.to_string()))
         }
     };
     let version = version
@@ -555,6 +701,141 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn release(version: &str) -> Release {
+        Release {
+            tag_name: version.to_string(),
+            assets: Vec::new(),
+            draft: false,
+        }
+    }
+
+    /** `locate` with an Ember that holds `on_ember` and a GitHub that holds
+    everything. gives what it found, and every ask as "index name version". */
+    fn locate_in(
+        on_ember: &[&str],
+        name: &str,
+        version: Option<&str>,
+        index: Option<ToolIndex>,
+        from_shorthand: bool,
+    ) -> (Result<String, String>, Vec<String>) {
+        let asked = RefCell::new(Vec::new());
+        let ask = |index: &str, name: &str, version: Option<&str>| {
+            asked
+                .borrow_mut()
+                .push(format!("{index} {name} {}", version.unwrap_or("latest")));
+        };
+        let found = locate(
+            name,
+            version,
+            index,
+            from_shorthand,
+            |name, version| {
+                ask("ember", name, version);
+                if on_ember.contains(&name) {
+                    Ok(release(version.unwrap_or("2.0.0")))
+                } else {
+                    Err(Error::EmberToolMissing(name.to_string()))
+                }
+            },
+            |name, version| {
+                ask("github", name, version);
+                Ok(release(version.unwrap_or("1.0.0")))
+            },
+        );
+        let found = found
+            .map(|(repository, release)| format!("{repository}@{}", release.tag_name))
+            .map_err(|error| error.to_string());
+        (found, asked.into_inner())
+    }
+
+    #[test]
+    fn a_bare_name_asks_ember_first_then_github() {
+        let pins = ["johnnymorganz/stylua"];
+        // Ember has it: the manifest gets the ember: form, lowercase
+        assert_eq!(
+            locate_in(&pins, "JohnnyMorganz/StyLua", None, None, false),
+            (
+                Ok("ember:johnnymorganz/stylua@2.0.0".to_string()),
+                vec!["ember johnnymorganz/stylua latest".to_string()]
+            )
+        );
+        // Ember answers 404: GitHub, as the user wrote it
+        assert_eq!(
+            locate_in(&pins, "Acme/Tool", Some("1.2.0"), None, false),
+            (
+                Ok("Acme/Tool@1.2.0".to_string()),
+                vec![
+                    "ember acme/tool 1.2.0".to_string(),
+                    "github Acme/Tool 1.2.0".to_string()
+                ]
+            )
+        );
+        // a name that Ember cannot hold goes to GitHub at once
+        let (found, asked) = locate_in(&pins, "acme/tool.nvim", None, None, false);
+        assert_eq!(found.unwrap(), "acme/tool.nvim@1.0.0");
+        assert_eq!(asked, ["github acme/tool.nvim latest"]);
+    }
+
+    #[test]
+    fn index_forces_one_index_with_no_fallback() {
+        let pins = ["johnnymorganz/stylua"];
+        let (found, asked) = locate_in(
+            &pins,
+            "johnnymorganz/stylua",
+            None,
+            Some(ToolIndex::Github),
+            false,
+        );
+        assert_eq!(found.unwrap(), "johnnymorganz/stylua@1.0.0");
+        assert_eq!(asked, ["github johnnymorganz/stylua latest"]);
+
+        let (found, asked) = locate_in(&pins, "acme/tool", None, Some(ToolIndex::Ember), false);
+        assert!(matches!(found, Err(ref error) if error.contains("acme/tool")));
+        assert_eq!(asked, ["ember acme/tool latest"]);
+    }
+
+    #[test]
+    fn ember_names_and_shorthand_targets_pick_their_index() {
+        // an ember: name, or a shorthand whose target is one, asks only Ember
+        let (found, asked) = locate_in(&["acme/lint"], "ember:acme/lint@1.1.0", None, None, true);
+        assert_eq!(found.unwrap(), "ember:acme/lint@1.1.0");
+        assert_eq!(asked, ["ember acme/lint 1.1.0"]);
+        // --version wins over the @version of the name
+        let (found, _) = locate_in(
+            &["acme/lint"],
+            "ember:acme/lint@1.1.0",
+            Some("1.2.0"),
+            None,
+            false,
+        );
+        assert_eq!(found.unwrap(), "ember:acme/lint@1.2.0");
+        // and Ember's 404 is the answer, no GitHub fallback
+        let (found, asked) = locate_in(&[], "ember:acme/none", None, None, false);
+        assert!(found.is_err());
+        assert_eq!(asked, ["ember acme/none latest"]);
+
+        // a bare shorthand target stays GitHub
+        let (found, asked) = locate_in(&["rojo-rbx/rojo"], "rojo-rbx/rojo", None, None, true);
+        assert_eq!(found.unwrap(), "rojo-rbx/rojo@1.0.0");
+        assert_eq!(asked, ["github rojo-rbx/rojo latest"]);
+    }
+
+    /** any other Ember answer is not a 404: a tool without the cli tag is
+    refused, and GitHub is not asked. */
+    #[test]
+    fn a_refusal_from_ember_is_no_fallback() {
+        let found = locate(
+            "acme/plugin",
+            None,
+            None,
+            false,
+            |name, _| Err(Error::NotCliTool(name.to_string())),
+            |_, _| panic!("GitHub must not be asked"),
+        );
+        assert!(matches!(found, Err(Error::NotCliTool(_))));
+    }
 
     #[test]
     fn sweeping_the_store_removes_tools_and_stamps() {

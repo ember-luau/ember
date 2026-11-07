@@ -7,7 +7,7 @@ network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
-use crate::project::manifest::{NPM_PREFIX, Tool};
+use crate::project::manifest::{EMBER_PREFIX, NPM_PREFIX, Tool, split_package_name};
 use crate::sys::{paths, process};
 use crate::tools;
 use clap::Args;
@@ -23,11 +23,12 @@ What <SPEC> can be, first match winning:
                     rojo, stylua, ...      ones the registry adds; the same
                                            list `embr tool add` accepts
   a repository      JohnnyMorganz/StyLua   any GitHub repo with releases
+  an Ember tool     ember:acme/tool        a tool on the Ember registry
 Add @version for an exact release: stylua@2.0.2.
 
 Unpinned names without @version run the latest release. That answer is
 cached and re-checked at the index TTL cadence (EMBER_INDEX_TTL_SECS,
-default 300s); --refresh asks GitHub now, and does nothing for pinned or
+default 300s); --refresh asks again now, and does nothing for pinned or
 @version specs, those are already exact. Binaries live under
 ~/.ember/tools and are reused; no manifest is touched.
 
@@ -54,7 +55,7 @@ pub struct ExecuteArgs {
     )]
     pub command: Vec<OsString>,
 
-    /// Ask GitHub for the latest release even if a cached answer is fresh
+    /// Ask GitHub or Ember for the latest release even if a cached answer is fresh
     #[arg(long)]
     pub refresh: bool,
 }
@@ -136,7 +137,9 @@ fn parse_spec(raw: &str) -> Result<Spec, Error> {
     if name.is_empty() {
         return Err(invalid());
     }
-    if name.contains('/') {
+    if let Some(ember) = name.strip_prefix(EMBER_PREFIX) {
+        split_package_name(ember).map_err(|_| invalid())?;
+    } else if name.contains('/') {
         Tool::split_repository(name).map_err(|_| invalid())?;
     }
 
@@ -200,6 +203,13 @@ mod tests {
         let parsed = spec("JohnnyMorganz/StyLua@2.0.2");
         assert_eq!(parsed.name, "JohnnyMorganz/StyLua");
         assert_eq!(parsed.version.as_deref(), Some("2.0.2"));
+
+        // an Ember tool runs from Ember, latest or exact
+        let parsed = spec("ember:acme/lint@1.0.0");
+        assert_eq!(parsed.name, "ember:acme/lint");
+        assert_eq!(parsed.version.as_deref(), Some("1.0.0"));
+        let (repository, version) = pick(&spec("ember:acme/lint"), None).unwrap();
+        assert_eq!((repository.as_str(), version), ("ember:acme/lint", None));
     }
 
     #[test]
@@ -215,6 +225,9 @@ mod tests {
             "/repo",
             "a/b/c",
             "owner/repo@",
+            "ember:Acme/lint",
+            "ember:acme",
+            "ember:../lint",
         ] {
             assert!(
                 matches!(parse_spec(raw), Err(Error::ExecuteSpecInvalid(_))),

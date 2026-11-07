@@ -274,13 +274,37 @@ pub enum Error {
     #[error("No tool exists with name '{0}'")]
     ToolMissing(String),
 
-    #[error("Invalid tool spec '{0}': expected 'owner/repo@version' or 'npm:package@version'")]
+    #[error(
+        "Invalid tool spec '{0}': expected 'owner/repo@version', 'ember:scope/name@version' or 'npm:package@version'"
+    )]
     InvalidToolSpec(String),
 
     #[error(
-        "'{0}' is not a tool shorthand that embr knows; use 'owner/repo' or 'npm:package', and --version for a version"
+        "'{0}' is not a tool shorthand that embr knows; use 'owner/repo', 'ember:scope/name' or 'npm:package', and --version for a version"
     )]
     UnknownToolShorthand(String),
+
+    #[error("No tool named {0} is on Ember")]
+    EmberToolMissing(String),
+
+    /// a tool on Ember without the `cli` tag. its page has the downloads.
+    #[error("'{0}' is not a command-line tool; see https://emberpm.dev/tool/{0}")]
+    NotCliTool(String),
+
+    /// a downloaded tool asset whose SHA-256 is not the one that Ember lists.
+    #[error(
+        "The asset {asset} of {tool} does not match its sha256\n  expected sha256 {expected}\n  received sha256 {received}\nembr did not store it"
+    )]
+    ToolAssetMismatch {
+        tool: String,
+        asset: String,
+        expected: String,
+        received: String,
+    },
+
+    /// tool.toml, or a file of `embr tool publish`, breaks a rule of the Ember API.
+    #[error("{0}")]
+    ToolPublishInvalid(String),
 
     #[error("No release asset of {tool}@{version} matches this platform")]
     NoMatchingAsset { tool: String, version: String },
