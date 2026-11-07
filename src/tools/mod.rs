@@ -1,9 +1,11 @@
 /*! GitHub-released binaries a project pins by version. this module stores
 and installs them. `archive` picks and unpacks the right release asset,
 `shim` maps an alias to one of the stored binaries. `npm` does the same
-for tools that npm publishes. */
+for tools that npm publishes. `ember` turns a tool on the Ember registry
+into the release shape of the GitHub path. */
 
 pub mod archive;
+pub mod ember;
 pub mod npm;
 pub mod shim;
 pub(crate) mod shorthands;
@@ -12,8 +14,8 @@ use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::net::http;
 use crate::net::http::responses::Release;
-use crate::project::manifest::Tool;
-use crate::sys::paths;
+use crate::project::manifest::{EMBER_PREFIX, Tool, split_package_name};
+use crate::sys::{hash, paths};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,9 +74,43 @@ pub fn is_reserved_alias(alias: &str) -> bool {
 '_', so the first '_' always marks the owner/repo split when reading the
 folder name back. */
 pub fn storage_dir(repository: &str, version: &str) -> Result<PathBuf, Error> {
-    Ok(paths::tools_dir()?
-        .join(repository.replace('/', "_"))
-        .join(version))
+    Ok(tool_root(repository)?.join(version))
+}
+
+/** the folder of every stored version of one tool. an Ember tool sits in
+~/.ember/tools/ember/{scope}+{name}: a scope may hold '_', so the GitHub
+form could not be read back, and a GitHub folder always has a '_', so none
+is called `ember`. a package name never holds '+'. */
+pub fn tool_root(repository: &str) -> Result<PathBuf, Error> {
+    let tools = paths::tools_dir()?;
+    Ok(match repository.strip_prefix(EMBER_PREFIX) {
+        Some(name) => tools.join("ember").join(name.replace('/', "+")),
+        None => tools.join(repository.replace('/', "_")),
+    })
+}
+
+/** the Ember name to ask first for a bare GitHub owner/repo. lowercase,
+since Ember names are, and a pin lives under the GitHub owner in lowercase.
+None when Ember cannot hold the name, a '.' in it say. */
+pub fn ember_candidate(repository: &str) -> Option<String> {
+    let lower = repository.to_ascii_lowercase();
+    split_package_name(&lower).is_ok().then_some(lower)
+}
+
+/// the release of `version`, from Ember for an `ember:` tool, else from GitHub.
+fn get_release(repository: &str, version: &str, github: &GithubAPI) -> Result<Release, Error> {
+    match repository.strip_prefix(EMBER_PREFIX) {
+        Some(name) => ember::release(name, Some(version)),
+        None => github.get_release(repository, version),
+    }
+}
+
+/// the latest release, from Ember for an `ember:` tool, else from GitHub.
+pub fn get_latest_release(repository: &str, github: &GithubAPI) -> Result<Release, Error> {
+    match repository.strip_prefix(EMBER_PREFIX) {
+        Some(name) => ember::release(name, None),
+        None => github.get_latest_release(repository),
+    }
 }
 
 /// where a tool's executable sits once installed.
@@ -131,7 +167,7 @@ pub fn install_tool(
         return Ok(false);
     }
 
-    let release = github.get_release(&tool.repository, &tool.version)?;
+    let release = get_release(&tool.repository, &tool.version, github)?;
     install_release(alias, &tool.repository, &release, on_bytes)
 }
 
@@ -176,6 +212,19 @@ pub fn store_release(
             version: version.to_string(),
         })?;
     let bytes = http::get_bytes_with(&asset.browser_download_url, &[], on_bytes)?;
+    /* before anything reaches disk, so a bad download leaves nothing
+    behind. GitHub lists no hash, an upload to Ember does */
+    if let Some(expected) = &asset.sha256 {
+        let received = hash::sha256_hex(&bytes);
+        if !received.eq_ignore_ascii_case(expected) {
+            return Err(Error::ToolAssetMismatch {
+                tool: format!("{repository}@{version}"),
+                asset: asset.name.clone(),
+                expected: expected.clone(),
+                received,
+            });
+        }
+    }
 
     /* extract into a staging sibling first so a failed install never
     leaves a half-written storage dir behind, same dance as install.rs.
@@ -230,7 +279,7 @@ pub fn ensure_stored(
     if stored_is_usable(&stored) {
         return Ok(stored);
     }
-    let release = github.get_release(repository, version)?;
+    let release = get_release(repository, version, github)?;
     Ok(store_release(
         repository,
         &release,
@@ -238,6 +287,27 @@ pub fn ensure_stored(
         &mut |_, _| {},
     )?
     .0)
+}
+
+/** the stored executable that answers for `repository` with no request:
+`version` when it is stored, or with no version the latest that a fresh
+stamp names. `stale` takes a stamp of any age, the offline answer. */
+pub fn cached(
+    repository: &str,
+    version: Option<&str>,
+    stale: bool,
+) -> Result<Option<PathBuf>, Error> {
+    let stamp = latest_stamp(repository)?;
+    let version = match version {
+        Some(version) => Some(version.to_string()),
+        None if stale => stamped_version(&stamp),
+        None => fresh_latest_version(&stamp),
+    };
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let stored = stored_executable(repository, &version)?;
+    Ok(stored_is_usable(&stored).then_some(stored))
 }
 
 /** the stored executable for a repo's latest release, asking GitHub at
@@ -255,7 +325,7 @@ pub fn ensure_latest(
         return ensure_stored(repository, &version, github);
     }
 
-    let release = match github.get_latest_release(repository) {
+    let release = match get_latest_release(repository, github) {
         Ok(release) => release,
         /* offline or rate-limited past the TTL, a stale answer whose
         binaries are still stored beats dying. the stamp is left as-is,
@@ -298,9 +368,7 @@ pub fn ensure_latest(
 with the file's mtime marking when GitHub was last asked. lives beside the
 version dirs, whose readers all skip non-directories. */
 fn latest_stamp(repository: &str) -> Result<PathBuf, Error> {
-    Ok(paths::tools_dir()?
-        .join(repository.replace('/', "_"))
-        .join(".latest"))
+    Ok(tool_root(repository)?.join(".latest"))
 }
 
 /** the stamped version if the stamp is younger than the TTL, None
@@ -386,6 +454,7 @@ pub(crate) fn make_executable(_path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::http::mock;
 
     #[test]
     fn a_stored_archive_counts_as_a_cache_miss() {
@@ -414,6 +483,60 @@ mod tests {
         let dir = storage_dir("rojo-rbx/rojo", "7.4.4").unwrap();
         assert!(dir.starts_with(paths::tools_dir().unwrap()));
         assert!(dir.ends_with(Path::new("tools").join("rojo-rbx_rojo").join("7.4.4")));
+
+        // Ember keeps its own folder, apart from a GitHub repo of the same name
+        let dir = storage_dir("ember:rojo-rbx/rojo", "7.4.4").unwrap();
+        assert!(
+            dir.ends_with(
+                Path::new("tools")
+                    .join("ember")
+                    .join("rojo-rbx+rojo")
+                    .join("7.4.4")
+            )
+        );
+        assert_eq!(
+            stored_executable("ember:acme/tool", "1.0.0").unwrap(),
+            storage_dir("ember:acme/tool", "1.0.0")
+                .unwrap()
+                .join(executable_name("tool"))
+        );
+    }
+
+    /** an asset whose SHA-256 is not the one that Ember lists fails the
+    install, and nothing of it is stored. */
+    #[test]
+    fn an_asset_that_does_not_match_its_sha256_is_not_stored() {
+        let (cdn, _) = mock::serve(|_| mock::reply("200 OK", "not the tool"));
+        let to_cdn = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {cdn}/tools/acme/sha-test/1.0.0/tool.zip\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (api, api_log) = mock::serve(move |_| to_cdn.clone());
+        let asset = format!("tool-{}-{}.zip", env::consts::OS, env::consts::ARCH);
+        let release = Release {
+            tag_name: "0.0.0-embr-test".to_string(),
+            assets: vec![http::responses::Asset {
+                name: asset.clone(),
+                browser_download_url: format!(
+                    "{api}/v1/tools/acme/sha-test/versions/0.0.0-embr-test/assets/{asset}"
+                ),
+                sha256: Some(hash::sha256_hex(b"the real tool")),
+            }],
+            draft: false,
+        };
+
+        let refused = store_release("ember:acme/sha-test", &release, "sha-test", &mut |_, _| {});
+        let Err(Error::ToolAssetMismatch {
+            expected, received, ..
+        }) = refused
+        else {
+            panic!("a wrong hash fails: {:?}", refused.err());
+        };
+        assert_eq!(expected, hash::sha256_hex(b"the real tool"));
+        assert_eq!(received, hash::sha256_hex(b"not the tool"));
+        // the redirect was followed, and no folder was made
+        assert_eq!(api_log.lock().unwrap().len(), 1);
+        assert!(!tool_root("ember:acme/sha-test").unwrap().exists());
     }
 
     /** regression. JohnnyMorganz/StyLua ships `stylua.exe`, and the repo's
@@ -497,6 +620,7 @@ mod tests {
             match name {
                 "rojo" => Some("evil/rojo".to_string()),
                 "azul" => Some("npm:azul-sync".to_string()),
+                "lint" => Some("ember:acme/lint".to_string()),
                 _ => None,
             }
         };
@@ -517,14 +641,24 @@ mod tests {
             resolve_shorthand("azul", registry).as_deref(),
             Some("npm:azul-sync")
         );
+        // an Ember target passes through as it is, `tool add` sends it to Ember
+        assert_eq!(
+            resolve_shorthand("lint", registry).as_deref(),
+            Some("ember:acme/lint")
+        );
         assert_eq!(resolve_shorthand("wally", registry), None);
-        assert_eq!(*asked.borrow(), ["azul", "wally"]);
+        assert_eq!(*asked.borrow(), ["azul", "lint", "wally"]);
 
         // a full name is never a shorthand
-        for full in ["acme/tool", "npm:azul-sync", "rojo@7.4.4"] {
+        for full in [
+            "acme/tool",
+            "npm:azul-sync",
+            "ember:acme/lint",
+            "rojo@7.4.4",
+        ] {
             assert_eq!(resolve_shorthand(full, registry), None, "{full}");
         }
-        assert_eq!(asked.borrow().len(), 2);
+        assert_eq!(asked.borrow().len(), 3);
     }
 
     #[test]

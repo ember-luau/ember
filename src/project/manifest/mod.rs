@@ -1142,21 +1142,43 @@ pub fn workspace_version_req(
 /// the prefix of a tool that npm publishes, as in `npm:azul-sync@2.4.0`.
 pub const NPM_PREFIX: &str = "npm:";
 
+/// the prefix of a tool on the Ember registry, as in `ember:acme/tool@1.0.0`.
+pub const EMBER_PREFIX: &str = "ember:";
+
 /** a pinned tool, written in ember.toml as the single string
 "owner/repo@version" under [tools], the key being the alias. a tool that
-npm publishes is "npm:package@version". */
+npm publishes is "npm:package@version", a tool on Ember is
+"ember:scope/name@version". a bare owner/repo stays GitHub, so old
+manifests keep their meaning. */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
-    /// "owner/repo" GitHub repository, or "npm:" and the npm package name.
+    /// "owner/repo" GitHub repository, "npm:" and the npm package name, or "ember:scope/name".
     pub repository: String,
     /// exact release version, no leading 'v'.
     pub version: String,
 }
 
 impl Tool {
-    /// parses an "owner/repo@version" or "npm:package@version" tool spec.
+    /// parses an "owner/repo@version", "ember:scope/name@version" or "npm:package@version" tool spec.
     pub fn parse(spec: &str) -> Result<Self, Error> {
         let invalid = || Error::InvalidToolSpec(spec.to_string());
+
+        /* the name rules of a package keep the name safe as a storage
+        folder, and Ember only takes semver versions */
+        if let Some(name) = spec.trim().strip_prefix(EMBER_PREFIX) {
+            return match name.split_once('@') {
+                Some((name, version))
+                    if split_package_name(name).is_ok()
+                        && semver::Version::parse(version).is_ok() =>
+                {
+                    Ok(Tool {
+                        repository: format!("{EMBER_PREFIX}{name}"),
+                        version: version.to_string(),
+                    })
+                }
+                _ => Err(invalid()),
+            };
+        }
 
         if let Some(package) = spec.trim().strip_prefix(NPM_PREFIX) {
             return match split_npm_spec(package) {
@@ -1204,6 +1226,11 @@ impl Tool {
     /// the npm package of a tool that npm publishes, None for a GitHub tool.
     pub fn npm_package(&self) -> Option<&str> {
         self.repository.strip_prefix(NPM_PREFIX)
+    }
+
+    /// the "scope/name" of a tool on Ember, None for any other tool.
+    pub fn ember_name(&self) -> Option<&str> {
+        self.repository.strip_prefix(EMBER_PREFIX)
     }
 }
 
@@ -2549,6 +2576,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_ember_tool_specs() {
+        let tool = Tool::parse(" ember:acme/tool_x@1.2.0-rc.1 ").unwrap();
+        assert_eq!(tool.repository, "ember:acme/tool_x");
+        assert_eq!(tool.version, "1.2.0-rc.1");
+        assert_eq!(tool.ember_name(), Some("acme/tool_x"));
+        assert_eq!(tool.npm_package(), None);
+        assert_eq!(tool.to_string(), "ember:acme/tool_x@1.2.0-rc.1");
+        // the same text reads back to the same tool
+        assert_eq!(Tool::parse(&tool.to_string()).unwrap(), tool);
+
+        // a bare owner/repo stays GitHub, an old manifest keeps its meaning
+        assert_eq!(Tool::parse("acme/tool@1.0.0").unwrap().ember_name(), None);
+
+        for spec in [
+            "ember:acme/tool",
+            "ember:acme/tool@",
+            "ember:acme/tool@v1.0.0",
+            "ember:acme/tool@1.0",
+            "ember:acme/tool@1.0.0@2.0.0",
+            "ember:Acme/tool@1.0.0",
+            "ember:acme@1.0.0",
+            "ember:acme/a/b@1.0.0",
+            "ember:../evil@1.0.0",
+            "ember:acme/to.ol@1.0.0",
+        ] {
+            assert!(
+                matches!(Tool::parse(spec), Err(Error::InvalidToolSpec(_))),
+                "spec {spec:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_invalid_tool_specs() {
         for spec in [
             "norepo@1.0",
@@ -2592,6 +2652,14 @@ mod tests {
         );
         let parsed: Tools = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.stylua, tools.stylua);
+
+        let parsed: Tools =
+            toml::from_str(r#"stylua = "ember:johnnymorganz/stylua@2.0.2""#).unwrap();
+        assert_eq!(parsed.stylua.ember_name(), Some("johnnymorganz/stylua"));
+        assert_eq!(
+            toml::to_string(&parsed).unwrap().trim(),
+            r#"stylua = "ember:johnnymorganz/stylua@2.0.2""#
+        );
     }
 
     #[test]

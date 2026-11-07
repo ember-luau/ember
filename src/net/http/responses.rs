@@ -1,4 +1,4 @@
-//! Shapes of the GitHub responses embr deserializes.
+//! Shapes of the GitHub responses embr deserializes. a tool on Ember becomes the same shape, see `tools::ember`.
 
 use serde::Deserialize;
 
@@ -14,6 +14,9 @@ pub struct Release {
 pub struct Asset {
     pub name: String,
     pub browser_download_url: String,
+    /// the lowercase hex SHA-256 that Ember lists for an upload. GitHub sends none.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[cfg(test)]

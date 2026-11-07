@@ -1,5 +1,5 @@
-/*! `embr execute`, alias `x`. downloads a GitHub-released executable if
-needed and hands the terminal to it, npx-style. `embx` is this command under
+/*! `embr execute`, alias `x`. downloads a released executable from Ember or
+GitHub if needed and hands the terminal to it, npx-style. `embx` is this command under
 its own name. `self install` drops a copy of embr called embx beside the
 tool shims, and main routes that argv[0] here. nothing is ever written to
 a manifest. repeat runs inside the TTL come from ~/.ember/tools with zero
@@ -7,12 +7,13 @@ network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
-use crate::project::manifest::{NPM_PREFIX, Tool};
+use crate::project::manifest::{EMBER_PREFIX, NPM_PREFIX, Tool, split_package_name};
 use crate::sys::{paths, process};
 use crate::tools;
 use clap::Args;
 use std::env;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 const AFTER_LONG_HELP: &str = "\
 What <SPEC> can be, first match winning:
@@ -22,19 +23,21 @@ What <SPEC> can be, first match winning:
   a shorthand       create-chief-project,  the names embr knows, then the
                     rojo, stylua, ...      ones the registry adds; the same
                                            list `embr tool add` accepts
-  a repository      JohnnyMorganz/StyLua   any GitHub repo with releases
+  a repository      JohnnyMorganz/StyLua   the tool on Ember, else the
+                                           GitHub repo's releases
+  an Ember tool     ember:acme/tool        a tool on the Ember registry
 Add @version for an exact release: stylua@2.0.2.
 
 Unpinned names without @version run the latest release. That answer is
 cached and re-checked at the index TTL cadence (EMBER_INDEX_TTL_SECS,
-default 300s); --refresh asks GitHub now, and does nothing for pinned or
+default 300s); --refresh asks again now, and does nothing for pinned or
 @version specs, those are already exact. Binaries live under
 ~/.ember/tools and are reused; no manifest is touched.
 
 Everything after <SPEC> is passed to the executable, hyphens included;
 embr's own flags go before it. The exit code is the executable's.
 
-embx runs code fetched from GitHub by name, the same trust decision as
+embx runs code fetched from Ember or GitHub by name, the same trust decision as
 installing a dependency.
 
 Examples:
@@ -54,7 +57,7 @@ pub struct ExecuteArgs {
     )]
     pub command: Vec<OsString>,
 
-    /// Ask GitHub for the latest release even if a cached answer is fresh
+    /// Ask GitHub or Ember for the latest release even if a cached answer is fresh
     #[arg(long)]
     pub refresh: bool,
 }
@@ -95,14 +98,66 @@ pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
     }
 
     let github = GithubAPI::new();
-    let stored = match &version {
-        Some(version) => tools::ensure_stored(&repository, version, &github)?,
-        None => tools::ensure_latest(&repository, &github, args.refresh)?,
+    let ensure = |repository: &str| match &version {
+        Some(version) => tools::ensure_stored(repository, version, &github),
+        None => tools::ensure_latest(repository, &github, args.refresh),
+    };
+    // a pin and a shorthand name their index, an owner/repo typed here does not
+    let explicit = pinned.is_none() && spec.name.contains('/');
+    let stored = if explicit && !repository.starts_with(EMBER_PREFIX) {
+        ember_first(
+            &repository,
+            |repository, stale| {
+                // --refresh asks again, but offline a stale copy still runs
+                if args.refresh && !stale {
+                    Ok(None)
+                } else {
+                    tools::cached(repository, version.as_deref(), stale)
+                }
+            },
+            ensure,
+        )?
+    } else {
+        ensure(&repository)?
     };
 
     let mut executable = std::process::Command::new(&stored);
     executable.args(command);
     process::exec(executable)
+}
+
+/** runs an owner/repo from Ember when Ember has the tool, else from GitHub,
+the order of `tool add`. a copy that either index left stored, or a fresh
+answer about the latest, runs with no request, so a loop of embx runs
+stays offline. when Ember cannot answer, a stored copy from GitHub still
+runs. `cached` takes a repository and whether a stale answer counts. */
+fn ember_first(
+    name: &str,
+    cached: impl Fn(&str, bool) -> Result<Option<PathBuf>, Error>,
+    ensure: impl Fn(&str) -> Result<PathBuf, Error>,
+) -> Result<PathBuf, Error> {
+    let Some(lower) = tools::ember_candidate(name) else {
+        return ensure(name);
+    };
+    let ember = format!("{EMBER_PREFIX}{lower}");
+    for repository in [ember.as_str(), name] {
+        if let Some(stored) = cached(repository, false)? {
+            return Ok(stored);
+        }
+    }
+    match ensure(&ember) {
+        Err(Error::EmberToolMissing(_)) => ensure(name),
+        Err(Error::Http(error)) => match cached(name, true)? {
+            Some(stored) => {
+                eprintln!(
+                    "warning: could not ask Ember for {name} ({error}); running the copy from GitHub"
+                );
+                Ok(stored)
+            }
+            None => Err(Error::Http(error)),
+        },
+        found => found,
+    }
 }
 
 /// a parsed <SPEC>, what to run and, when given, which exact version.
@@ -136,7 +191,9 @@ fn parse_spec(raw: &str) -> Result<Spec, Error> {
     if name.is_empty() {
         return Err(invalid());
     }
-    if name.contains('/') {
+    if let Some(ember) = name.strip_prefix(EMBER_PREFIX) {
+        split_package_name(ember).map_err(|_| invalid())?;
+    } else if name.contains('/') {
         Tool::split_repository(name).map_err(|_| invalid())?;
     }
 
@@ -200,6 +257,13 @@ mod tests {
         let parsed = spec("JohnnyMorganz/StyLua@2.0.2");
         assert_eq!(parsed.name, "JohnnyMorganz/StyLua");
         assert_eq!(parsed.version.as_deref(), Some("2.0.2"));
+
+        // an Ember tool runs from Ember, latest or exact
+        let parsed = spec("ember:acme/lint@1.0.0");
+        assert_eq!(parsed.name, "ember:acme/lint");
+        assert_eq!(parsed.version.as_deref(), Some("1.0.0"));
+        let (repository, version) = pick(&spec("ember:acme/lint"), None).unwrap();
+        assert_eq!((repository.as_str(), version), ("ember:acme/lint", None));
     }
 
     #[test]
@@ -215,12 +279,87 @@ mod tests {
             "/repo",
             "a/b/c",
             "owner/repo@",
+            "ember:Acme/lint",
+            "ember:acme",
+            "ember:../lint",
         ] {
             assert!(
                 matches!(parse_spec(raw), Err(Error::ExecuteSpecInvalid(_))),
                 "spec {raw:?} should be rejected"
             );
         }
+    }
+
+    /** `ember_first` with Ember holding `on_ember`, GitHub holding everything,
+    and `stored` already on disk as (repository, stale only). gives the
+    repository that ran, and each `ensure` in order. */
+    fn run_first(
+        name: &str,
+        on_ember: &[&str],
+        stored: &[(&str, bool)],
+        offline: bool,
+    ) -> (Result<String, String>, Vec<String>) {
+        let ensured = std::cell::RefCell::new(Vec::new());
+        let ran = ember_first(
+            name,
+            |repository, stale| {
+                Ok(stored
+                    .iter()
+                    .find(|(found, stale_only)| *found == repository && (stale || !stale_only))
+                    .map(|(found, _)| PathBuf::from(found)))
+            },
+            |repository| {
+                ensured.borrow_mut().push(repository.to_string());
+                match repository.strip_prefix(EMBER_PREFIX) {
+                    Some(_) if offline => {
+                        Err(Error::Http(crate::net::http::error::HttpError::RateLimited))
+                    }
+                    Some(ember) if !on_ember.contains(&ember) => {
+                        Err(Error::EmberToolMissing(ember.to_string()))
+                    }
+                    _ => Ok(PathBuf::from(repository)),
+                }
+            },
+        );
+        let ran = ran
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|error| error.to_string());
+        (ran, ensured.into_inner())
+    }
+
+    #[test]
+    fn an_owner_repo_runs_from_ember_first_then_github() {
+        // Ember has it, as the lowercase pin: GitHub is never asked
+        let (ran, ensured) = run_first(
+            "JohnnyMorganz/StyLua",
+            &["johnnymorganz/stylua"],
+            &[],
+            false,
+        );
+        assert_eq!(ran.unwrap(), "ember:johnnymorganz/stylua");
+        assert_eq!(ensured, ["ember:johnnymorganz/stylua"]);
+
+        // Ember answers 404: GitHub, as the user wrote it
+        let (ran, ensured) = run_first("Acme/Tool", &[], &[], false);
+        assert_eq!(ran.unwrap(), "Acme/Tool");
+        assert_eq!(ensured, ["ember:acme/tool", "Acme/Tool"]);
+
+        // a name that Ember cannot hold goes to GitHub at once
+        let (ran, ensured) = run_first("acme/tool.nvim", &["acme/tool.nvim"], &[], false);
+        assert_eq!(ran.unwrap(), "acme/tool.nvim");
+        assert_eq!(ensured, ["acme/tool.nvim"]);
+
+        // a copy stored from GitHub runs with no request to either index
+        let (ran, ensured) = run_first("acme/tool", &["acme/tool"], &[("acme/tool", false)], false);
+        assert_eq!(ran.unwrap(), "acme/tool");
+        assert!(ensured.is_empty());
+
+        // Ember cannot answer: a stale copy from GitHub runs, else the error
+        let (ran, _) = run_first("acme/tool", &[], &[("acme/tool", true)], true);
+        assert_eq!(ran.unwrap(), "acme/tool");
+        let (ran, ensured) = run_first("acme/tool", &[], &[], true);
+        assert!(ran.is_err());
+        assert_eq!(ensured, ["ember:acme/tool"]);
     }
 
     #[test]

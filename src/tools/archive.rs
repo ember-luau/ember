@@ -302,6 +302,7 @@ mod tests {
             .map(|name| Asset {
                 name: name.to_string(),
                 browser_download_url: format!("https://example.com/{name}"),
+                sha256: None,
             })
             .collect()
     }
