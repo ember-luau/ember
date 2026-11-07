@@ -816,6 +816,60 @@ model at publish and refuses:
 - an XML model (`.rbxmx`). `embr publish` stops on it before the upload;
 - a package with models but fewer than 10 lines of code.
 
+## Highlight rules for the site
+
+A package can add syntax colours to the code blocks on its page on
+[emberpm.dev](https://emberpm.dev). This is for a language extension, such
+as an Alloy ingot, that adds syntax of its own. Each rule gives a token
+type and a list of words or a pattern:
+
+```toml
+[[highlight.rules]]
+languages = ["alx"]
+type = "keyword"
+before = '\{'
+words = ["#if", ":else", "/if", "#each", "/each"]
+```
+
+- `languages` names the site grammars that the rule extends: `luau` (also
+  for ```` ```lua ````), `aly` (also for ```` ```alloy ````), `alx`, `loom`
+  and `luwu`.
+- `type` is a token type of the Alloy semantic token legend, which is the
+  LSP's standard list: `keyword`, `macro`, `function`, `type`, `variable`,
+  `string`, `number`, `operator`, `decorator` and the others. An ingot
+  sends the same names, so a rule can copy what the ingot sends. The site
+  gives each type the colour of the editor theme that it uses.
+- `words` is a list of words to match as they are. `match` is a pattern.
+  Give one of the two.
+- `before` is a pattern that must come just before the match. The site
+  does not colour it. Above, `{` stays plain and `#if` is a keyword.
+- The site applies the rules to the readme and to the files in the Source
+  tab of the version that has them.
+
+The patterns run in the browser of each visitor, so `embr publish` and the
+registry accept only a small part of regex:
+
+- Printable ASCII only. There is no `.`, no negated class, and no `\W`,
+  `\D` or `\s`. `\d`, `\w` and `\b` read ASCII only.
+- A group is `(?: )`. There is no capture, lookaround, flag,
+  backreference, `^` or `$`. Use `before` in place of a lookbehind.
+- Each repeat has an upper bound: `?`, `{n}` or `{n,m}`. `*`, `+` and
+  `{n,}` are refused. A repeated group cannot hold a repeat or a `|`.
+- One rule can try 256 ways at one place at most, so the work for each
+  character has a fixed limit. A `{1,32}` repeat is 32 ways, and two of
+  them in a row are 1024.
+- 32 rules at most. A pattern has 256 characters at most, a rule has 64
+  words at most, and a word has 64 characters at most. All the patterns
+  and words together have 4096 characters at most.
+- The table takes `rules` only, and a rule takes `languages`, `type`,
+  `match`, `words` and `before` only.
+
+The archive and the index entry keep the table as `highlight`. Install
+does not read it. `[highlight]` needs embr 1.0.0-rc.4 or later to publish.
+An older embr installs such a package with no change. It also publishes
+one with no error, but it drops `[highlight]`, because it writes the
+packed ember.toml from the keys that it knows.
+
 ## Editor files on install
 
 `embr install` keeps two editor files in step with the installed packages.
