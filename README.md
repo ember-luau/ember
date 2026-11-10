@@ -20,7 +20,7 @@
 ---
 
 The CLI for [emberpm.dev](https://emberpm.dev): install Luau packages from the
-ember registry (plus wally, pesde, and Forest indices), publish your own, pin your
+ember registry (plus wally, pesde, Forest, and LuaRocks indices), publish your own, pin your
 project's tools, and run its scripts — one manifest, one lockfile, one binary.
 
 ## Install

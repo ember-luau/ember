@@ -1,6 +1,7 @@
 pub mod forest;
 pub mod git;
 pub mod hidden;
+pub mod luarocks;
 pub mod pesde;
 pub mod wally;
 
@@ -35,6 +36,7 @@ fills in these URLs, and an index entry that names its dependency's index
 by one of them reads it as the URL, see [`named_index_url`]. */
 pub const KNOWN_INDICES: &[(&str, &str)] = &[
     ("forest", forest::API_URL),
+    ("luarocks", luarocks::API_URL),
     ("pesde", "https://github.com/pesde-pkg/index"),
     ("wally", "https://github.com/UpliftGames/wally-index"),
 ];
@@ -89,7 +91,8 @@ pub(crate) fn index_ttl() -> Duration {
 
 /** A package index, a git repo cached under ~/.ember/index-cache. Root
 config.json means wally, root config.toml means pesde. Forest's API is the
-one index that is no git repo, see [`forest::is_forest`]. */
+one index that is no git repo, see [`forest::is_forest`], and LuaRocks,
+which the ember API converts, see [`luarocks::is_luarocks`]. */
 pub struct Index {
     url: String,
     root: PathBuf,
@@ -102,6 +105,7 @@ enum Kind {
     Wally(wally::Config),
     Pesde(pesde::Config),
     Forest,
+    LuaRocks,
 }
 
 /// A concrete package version picked from an index.
@@ -227,11 +231,18 @@ impl Index {
             return Ok(Index::local_at(local::index_dir()?));
         }
         // nothing to clone, every resolve asks the API
-        if forest::is_forest(url) {
+        let api = if forest::is_forest(url) {
+            Some(Kind::Forest)
+        } else if luarocks::is_luarocks(url) {
+            Some(Kind::LuaRocks)
+        } else {
+            None
+        };
+        if let Some(kind) = api {
             return Ok(Index {
                 url: url.to_string(),
                 root: PathBuf::new(),
-                kind: Kind::Forest,
+                kind,
                 ttl_skipped: false,
             });
         }
@@ -283,7 +294,7 @@ impl Index {
     never publishes to wally, so only pesde-format configs are consulted. */
     pub fn github_oauth_id(&self) -> Option<&str> {
         match &self.kind {
-            Kind::Wally(_) | Kind::Forest => None,
+            Kind::Wally(_) | Kind::Forest | Kind::LuaRocks => None,
             Kind::Pesde(config) => config.github_oauth_id.as_deref(),
         }
     }
@@ -312,6 +323,7 @@ impl Index {
                 }
             }
             Kind::Forest => forest::resolve(&self.url, name, req),
+            Kind::LuaRocks => luarocks::resolve(&self.url, name, req),
         }
     }
 
@@ -320,7 +332,7 @@ impl Index {
     pub fn file(&self, name: &str) -> Result<Option<toml::Value>, Error> {
         match &self.kind {
             Kind::Pesde(_) => pesde::file(&self.root, &self.url, name).map(Some),
-            Kind::Wally(_) | Kind::Forest => Ok(None),
+            Kind::Wally(_) | Kind::Forest | Kind::LuaRocks => Ok(None),
         }
     }
 
@@ -330,7 +342,7 @@ impl Index {
     pub fn read(&self, name: &str) -> Result<(Vec<pesde::Candidate>, Option<String>), Error> {
         match &self.kind {
             Kind::Pesde(_) => pesde::read(&self.root, &self.url, name),
-            Kind::Wally(_) | Kind::Forest => Err(Error::IndexFetch {
+            Kind::Wally(_) | Kind::Forest | Kind::LuaRocks => Err(Error::IndexFetch {
                 url: self.url.clone(),
                 reason: "only a pesde-format index lists its versions this way".to_string(),
             }),

@@ -19,7 +19,7 @@ pub struct SearchArgs {
     /// Most packages to list, from 1 to 50, and from each registry with --all
     #[arg(long)]
     pub limit: Option<usize>,
-    /// Also search Wally, pesde, and Forest
+    /// Also search Wally, pesde, Forest, and LuaRocks
     #[arg(long)]
     pub all: bool,
     /// Print the results as one JSON document on stdout

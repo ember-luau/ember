@@ -638,7 +638,8 @@ fn resolve_once(
                 }
                 /* a package file's deprecations show in the install's
                 notice block. Forest has no file, so it says them here */
-                let deprecations = crate::registry::index::forest::is_forest(&index_url);
+                let deprecations = crate::registry::index::forest::is_forest(&index_url)
+                    || crate::registry::index::luarocks::is_luarocks(&index_url);
                 warn_on_marks(&name, &package, deprecations, warnings);
 
                 for dependency in &package.dependencies {
