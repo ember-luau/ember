@@ -172,7 +172,7 @@ fn tools() -> Value {
                         "enum": environments,
                         "description": "Return only the packages for this environment. \
                             roblox is Roblox code for the client or the server, and roblox_server is Roblox server code. \
-                            luau is portable Luau, which also runs in every other environment."
+                            luau is portable code, which runs in every environment of its language."
                     },
                     "language": {
                         "type": "string",

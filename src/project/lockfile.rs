@@ -316,6 +316,9 @@ mod tests {
         ]);
 
         let text = toml::to_string(&lockfile).unwrap();
+        // the portable environment keeps the name that older embr reads
+        assert!(text.contains("environment = \"luau\""), "{text}");
+        assert!(!text.contains("portable"), "{text}");
         let parsed: Lockfile = toml::from_str(&text).unwrap();
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.packages.len(), 2);

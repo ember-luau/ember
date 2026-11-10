@@ -508,7 +508,11 @@ pub enum Environment {
     Server,
     /// needs the Lune runtime
     Lune,
-    /// standalone Luau, runnable with the luau CLI
+    /** portable code: it runs on any runtime of its language. a manifest
+    writes `portable`; `luau`, the name before, still parses. lockfiles,
+    target IDs and the packages folder keep `luau`, so older embr reads
+    them. */
+    #[serde(alias = "portable")]
     Luau,
     /// needs the Lute runtime
     Lute,
@@ -542,6 +546,15 @@ impl Environment {
             Environment::Lute => "lute",
             Environment::Seal => "seal",
             Environment::Zune => "zune",
+        }
+    }
+
+    /** the name that a new manifest writes: `portable` for the portable
+    environment, else [`Environment::as_str`]. */
+    pub fn manifest_name(self) -> &'static str {
+        match self {
+            Environment::Luau => "portable",
+            other => other.as_str(),
         }
     }
 
@@ -590,7 +603,7 @@ impl Environment {
             "roblox" | "shared" => Ok(Environment::Roblox),
             "roblox_server" | "server" => Ok(Environment::Server),
             "lune" => Ok(Environment::Lune),
-            "luau" => Ok(Environment::Luau),
+            "luau" | "portable" => Ok(Environment::Luau),
             "lute" => Ok(Environment::Lute),
             "seal" => Ok(Environment::Seal),
             "zune" => Ok(Environment::Zune),

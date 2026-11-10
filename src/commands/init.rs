@@ -18,7 +18,7 @@ pub struct InitArgs {
     /// The language: luau, alloy, loom, or luwu
     #[arg(long, value_parser = parse_language)]
     pub language: Option<Language>,
-    /// Where the code runs: roblox, roblox_server, lune, lute, seal, zune, or luau for portable Luau
+    /// Where the code runs: roblox, roblox_server, lune, lute, seal, zune, or portable for any runtime of the language
     #[arg(long, value_parser = parse_environment)]
     pub environment: Option<Environment>,
     /// The package name, as scope/name
@@ -58,8 +58,7 @@ const LANGUAGES: [Language; 4] = [
 
 /** the environments a language can target, the first one the default.
 Alloy builds to plain Luau, so it can target what Luau can. Loom is a
-Roblox DSL. A Luwu host such as Seal runs Luwu, and embr gives Luwu code
-the portable Luau environment. */
+Roblox DSL. Luwu runs on Seal, or portable on any Luwu host. */
 fn environment_choices(language: Language) -> &'static [Environment] {
     match language {
         Language::Luau | Language::Alloy => &[
@@ -72,7 +71,7 @@ fn environment_choices(language: Language) -> &'static [Environment] {
             Environment::Luau,
         ],
         Language::Loom => &[Environment::Roblox, Environment::Server],
-        Language::Luwu => &[Environment::Luau],
+        Language::Luwu => &[Environment::Seal, Environment::Luau],
     }
 }
 
@@ -85,7 +84,7 @@ fn environment_label(environment: Environment) -> &'static str {
         Environment::Lute => "Lute",
         Environment::Seal => "Seal",
         Environment::Zune => "Zune",
-        Environment::Luau => "Portable Luau (any runtime)",
+        Environment::Luau => "Portable (any runtime of the language)",
     }
 }
 
@@ -121,7 +120,7 @@ environment = \"{environment}\"
 {language}
 [dependencies]
 ",
-        environment = environment.as_str(),
+        environment = environment.manifest_name(),
     )
 }
 
@@ -290,10 +289,10 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
             return Err(Error::InitArgs(format!(
                 "{} code does not run in {}; choose one of: {}",
                 language.title(),
-                environment.as_str(),
+                environment.manifest_name(),
                 choices
                     .iter()
-                    .map(|choice| choice.as_str())
+                    .map(|choice| choice.manifest_name())
                     .collect::<Vec<_>>()
                     .join(", ")
             )));
@@ -401,7 +400,7 @@ pub fn run(args: InitArgs) -> Result<(), Error> {
         visibility: None,
     };
     let manifest = package_manifest(package, environment, language, non_empty(main));
-    write_manifest(manifest_path, &toml::to_string(&manifest)?)
+    write_manifest(manifest_path, &package_toml(&manifest)?)
 }
 
 /// the package name: the flag, else the prompt, else the guess from git.
@@ -512,6 +511,13 @@ fn named(text: &str, name: &str) -> Result<String, Error> {
 }
 
 /// the manifest a `package` answer produces: the package and its one target.
+/** the TOML of a new package manifest. serde writes the portable
+environment as `luau`, the name that lockfiles keep; a new manifest
+writes `portable`. */
+fn package_toml(manifest: &Manifest) -> Result<String, Error> {
+    Ok(toml::to_string(manifest)?.replace("environment = \"luau\"", "environment = \"portable\""))
+}
+
 fn package_manifest(
     package: Package,
     environment: Environment,
@@ -721,6 +727,51 @@ mod tests {
     }
 
     #[test]
+    fn a_new_manifest_writes_portable_and_both_names_parse() {
+        let project = project_manifest(Environment::Luau, Language::Luwu);
+        assert!(project.contains("environment = \"portable\""), "{project}");
+        let manifest: Manifest = toml::from_str(&project).unwrap();
+        assert_eq!(manifest.target().unwrap().environment, Environment::Luau);
+        assert_eq!(parse_environment("portable"), Ok(Environment::Luau));
+        assert_eq!(parse_environment("luau"), Ok(Environment::Luau));
+        // Luwu runs on Seal, and its first choice is Seal
+        assert_eq!(environment_choices(Language::Luwu)[0], Environment::Seal);
+        let seal = project_manifest(Environment::Seal, Language::Luwu);
+        let manifest: Manifest = toml::from_str(&seal).unwrap();
+        let target = manifest.target().unwrap();
+        assert_eq!(
+            (target.environment, target.language),
+            (Environment::Seal, Language::Luwu)
+        );
+    }
+
+    #[test]
+    fn a_new_package_manifest_writes_portable() {
+        let package = Package {
+            name: "acme/color".to_string(),
+            version: "0.1.0".to_string(),
+            private: false,
+            description: None,
+            authors: Vec::new(),
+            repository: None,
+            homepage: None,
+            license: None,
+            logo: None,
+            visibility: None,
+        };
+        let text = package_toml(&package_manifest(
+            package,
+            Environment::Luau,
+            Language::Luwu,
+            None,
+        ))
+        .unwrap();
+        assert!(text.contains("environment = \"portable\""), "{text}");
+        let manifest: Manifest = toml::from_str(&text).unwrap();
+        assert_eq!(manifest.target().unwrap().environment, Environment::Luau);
+    }
+
+    #[test]
     fn each_language_offers_the_runtimes_it_can_target() {
         assert_eq!(
             environment_choices(Language::Luau).len(),
@@ -734,7 +785,10 @@ mod tests {
             environment_choices(Language::Loom),
             [Environment::Roblox, Environment::Server]
         );
-        assert_eq!(environment_choices(Language::Luwu), [Environment::Luau]);
+        assert_eq!(
+            environment_choices(Language::Luwu),
+            [Environment::Seal, Environment::Luau]
+        );
         // every choice round-trips through the --environment spelling
         for language in LANGUAGES {
             for &environment in environment_choices(language) {

@@ -79,18 +79,18 @@ impl Allow {
         }
     }
 
-    /// "Alloy or Luau packages for roblox or portable Luau", for the refusal.
+    /// "Alloy or Luau packages for roblox or portable", for the refusal.
     fn takes(&self) -> String {
         let languages = match self.language {
             Language::Luau => "Luau".to_string(),
             language => format!("{} or Luau", language.title()),
         };
-        let mut environments = vec![self.environment.to_string()];
+        let mut environments = vec![self.environment.manifest_name().to_string()];
         if matches!(self.environment, Environment::Server | Environment::Lune) {
             environments.push(Environment::Roblox.to_string());
         }
         if self.environment != Environment::Luau {
-            environments.push("portable Luau".to_string());
+            environments.push("portable".to_string());
         }
         let environments = match environments.as_slice() {
             [one] => one.clone(),
@@ -2447,13 +2447,13 @@ mod tests {
             alloy
                 .refusal("acme/fs@1.0.0".to_string(), Luau, Some(Environment::Lune))
                 .to_string(),
-            "This Alloy project for roblox takes Alloy or Luau packages for roblox or portable Luau; acme/fs@1.0.0 is a Luau package for lune. Set `target` on the dependency to take it on purpose"
+            "This Alloy project for roblox takes Alloy or Luau packages for roblox or portable; acme/fs@1.0.0 is a Luau package for lune. Set `target` on the dependency to take it on purpose"
         );
         assert_eq!(
             server
                 .refusal("acme/x@1.0.0".to_string(), Loom, Some(Environment::Roblox))
                 .to_string(),
-            "This Luau project for roblox_server takes Luau packages for roblox_server, roblox, or portable Luau; acme/x@1.0.0 is a Loom package for roblox"
+            "This Luau project for roblox_server takes Luau packages for roblox_server, roblox, or portable; acme/x@1.0.0 is a Loom package for roblox"
         );
     }
 
