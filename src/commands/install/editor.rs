@@ -44,12 +44,62 @@ pub(super) fn sync(
     packages: &[LockedPackage],
     warn: &mut impl FnMut(String),
 ) {
-    if manifest.config.aliases != Some(false)
+    let global = match crate::sys::paths::global_tools_file() {
+        Ok(path) => global_defaults(&path, warn),
+        Err(_) => Defaults::default(),
+    };
+    sync_with(manifest, &global, dir, packages, warn);
+}
+
+/** `aliases` and `definition-files` from `[config]` of the global
+manifest, ~/.ember/tools.toml. they are a person's editor setup, so they
+count in every project that sets no value of its own. */
+#[derive(serde::Deserialize, Default, Debug, PartialEq)]
+struct Defaults {
+    aliases: Option<bool>,
+    #[serde(rename = "definition-files")]
+    definition_files: Option<bool>,
+}
+
+/// the defaults in the global manifest at `path`. a file that does not read sets none, with a warning.
+fn global_defaults(path: &Path, warn: &mut impl FnMut(String)) -> Defaults {
+    #[derive(serde::Deserialize)]
+    struct Global {
+        #[serde(default)]
+        config: Defaults,
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return Defaults::default();
+    };
+    match toml::from_str::<Global>(&text) {
+        Ok(global) => global.config,
+        Err(error) => {
+            warn(format!(
+                "warning: embr reads no [config] from {}: {}",
+                path.display(),
+                error.message()
+            ));
+            Defaults::default()
+        }
+    }
+}
+
+/// [`sync`] with the global defaults given. a value in the project wins over a default.
+fn sync_with(
+    manifest: &Manifest,
+    global: &Defaults,
+    dir: &Path,
+    packages: &[LockedPackage],
+    warn: &mut impl FnMut(String),
+) {
+    let aliases = manifest.config.aliases.or(global.aliases);
+    let definition_files = manifest.config.definition_files.or(global.definition_files);
+    if aliases != Some(false)
         && let Err(message) = sync_aliases(dir, &wanted_aliases(manifest, packages))
     {
         warn(format!("warning: {message}"));
     }
-    if manifest.config.definition_files != Some(false)
+    if definition_files != Some(false)
         && let Err(reason) = sync_definitions(manifest, dir, packages)
     {
         warn(format!(
@@ -882,11 +932,55 @@ return {
         assert!(written.contains("aliases = false"), "{written}");
         assert!(written.contains("definition-files = false"), "{written}");
 
-        sync(&manifest(ROBLOX), &dir, &packages, &mut |message| {
+        let on = Defaults::default();
+        sync_with(&manifest(ROBLOX), &on, &dir, &packages, &mut |message| {
             panic!("{message}")
         });
         assert!(dir.join(LUAURC).exists());
         assert!(dir.join(SETTINGS).exists());
+    }
+
+    /// `[config]` in ~/.ember/tools.toml turns both off in a project that sets neither, and a project value wins.
+    #[test]
+    fn the_global_config_is_the_default_of_each_project() {
+        let dir = scratch("global-off");
+        let store = dir.join("packages/roblox/.ember/acme_types");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("types.d.luau"), "declare x: number\n").unwrap();
+        let packages = [locked("acme/types", Some("types"), Environment::Roblox)];
+
+        let tools = dir.join("tools.toml");
+        fs::write(
+            &tools,
+            "[tools]\n\n[config]\naliases = false\ndefinition-files = false\n",
+        )
+        .unwrap();
+        let global = global_defaults(&tools, &mut |message| panic!("{message}"));
+        assert_eq!(
+            global,
+            Defaults {
+                aliases: Some(false),
+                definition_files: Some(false)
+            }
+        );
+        sync_with(&manifest(ROBLOX), &global, &dir, &packages, &mut |m| {
+            panic!("{m}")
+        });
+        assert!(!dir.join(LUAURC).exists());
+        assert!(!dir.join(SETTINGS).exists());
+
+        let on = manifest(&format!("{ROBLOX}[config]\naliases = true\n"));
+        sync_with(&on, &global, &dir, &packages, &mut |m| panic!("{m}"));
+        assert!(dir.join(LUAURC).exists());
+        assert!(!dir.join(SETTINGS).exists());
+
+        let mut warned = Vec::new();
+        fs::write(&tools, "[config]\naliases = 3\n").unwrap();
+        assert_eq!(
+            global_defaults(&tools, &mut |m| warned.push(m)),
+            Defaults::default()
+        );
+        assert_eq!(warned.len(), 1, "{warned:?}");
     }
 
     /// the user's entries and comments stay, embr's entries for gone packages go.
