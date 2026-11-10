@@ -30,6 +30,6 @@ export function CopyField(props: { text: string, icon: string? }) -> Instance
   return <Frame ClassName="card w-full h-9 flex items-center gap-2 px-3">
     <Icon name={props.icon or 'terminal'} size={14} />
     <Frame ClassName="ghost h-full fill">{box}</Frame>
-    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600">Ctrl+C</TextLabel>
+    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600 font-sans">Ctrl+C</TextLabel>
   </Frame>
 end
