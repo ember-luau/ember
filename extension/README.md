@@ -14,8 +14,8 @@ scripts/build.sh
 ```
 
 `build.sh` runs `alloy build`, points the package requires at `Packages`,
-and writes `Ember.rbxm` with Rojo. Copy `Ember.rbxm` into the Studio
-plugins folder.
+and writes `Ember.rbxm` with Rojo. `scripts/build.sh --install` also
+copies it into the Studio plugins folder and replaces the old copy.
 
 ## Check
 
