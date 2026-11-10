@@ -11,9 +11,9 @@ messages go to stdout, so any log goes to stderr.
 use crate::error::Error;
 use crate::net::http::{self, error::HttpError};
 use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language, split_package_name};
-use crate::registry::index::forest;
 use crate::registry::index::pesde::{self, Candidate};
 use crate::registry::index::{Index, Refresh};
+use crate::registry::index::{forest, luarocks};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -37,9 +37,9 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "ember is a package manager for Luau and Roblox. \
-It installs packages from the ember registry, and also from Wally, pesde, and Forest. \
+It installs packages from the ember registry, and also from Wally, pesde, Forest, and LuaRocks. \
 search_packages finds packages in the ember registry by name or description, and filters them by environment or language. \
-search_all searches the ember, Wally, pesde, and Forest registries at the same time. \
+search_all searches the ember, Wally, pesde, Forest, and LuaRocks registries at the same time. \
 Use it when the ember registry has no good match, or to compare packages from all registries. \
 package_info shows the versions, deprecations, and dependencies of one ember package. \
 The tools only read. Each answer gives the `embr add` command that installs a package.";
@@ -471,13 +471,16 @@ pub(crate) enum Registry {
     Wally,
     Pesde,
     Forest,
+    #[serde(rename = "luarocks")]
+    LuaRocks,
 }
 
-const REGISTRIES: [Registry; 4] = [
+const REGISTRIES: [Registry; 5] = [
     Registry::Ember,
     Registry::Wally,
     Registry::Pesde,
     Registry::Forest,
+    Registry::LuaRocks,
 ];
 
 impl Registry {
@@ -488,6 +491,7 @@ impl Registry {
             Registry::Wally => "wally",
             Registry::Pesde => "pesde",
             Registry::Forest => "forest",
+            Registry::LuaRocks => "luarocks",
         }
     }
 }
@@ -665,6 +669,10 @@ fn fetch_at(api: &str, registry: Registry, query: &str) -> Result<(Vec<Hit>, usi
         )
         .and_then(|page: ForestPage| forest_hits(page.packages, forest_copy))
         .map(counted),
+        // the ember registry converts each rock, so it also answers the search
+        Registry::LuaRocks => http::get_json(&format!("{api}/v1/luarocks/search?q={encoded}"), &[])
+            .map(luarocks_hits)
+            .map(counted),
     };
     found.map_err(|error| error.to_string())
 }
@@ -779,6 +787,38 @@ fn pesde_hits(page: PesdePage) -> Vec<Hit> {
                 &package.version,
                 &environments,
                 &package.description,
+            )
+        })
+        .collect()
+}
+
+/// the ember registry's `GET /v1/luarocks/search`.
+#[derive(Deserialize)]
+struct RockPage {
+    results: Vec<RockRow>,
+}
+
+#[derive(Deserialize)]
+struct RockRow {
+    name: String,
+    version: String,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+/// a rock is portable Lua, named `rocks/<name>` in ember.
+fn luarocks_hits(page: RockPage) -> Vec<Hit> {
+    let portable = [Environment::Luau.to_string()];
+    page.results
+        .iter()
+        .map(|row| {
+            let name = format!("{}/{}", luarocks::SCOPE, row.name.to_lowercase());
+            registry_hit(
+                Registry::LuaRocks,
+                &name,
+                &row.version,
+                &portable,
+                &row.summary,
             )
         })
         .collect()
@@ -1352,6 +1392,7 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(2));
                 Ok((vec![hit("late/package".to_string())], 1))
             }
+            Registry::LuaRocks => Ok((vec![hit(format!("rocks/{query}"))], 1)),
         }
     }
 
@@ -1377,9 +1418,10 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "Matches in each registry's own order: ember 1 of 3, wally 10 of 30.\n\
+                "Matches in each registry's own order: ember 1 of 3, wally 10 of 30, luarocks 1 of 1.\n\
                  - ember acme/signal\n\
                  {wally}\
+                 - luarocks rocks/signal\n\
                  {INDEX_NOTE}\
                  Failed registries:\n\
                  - pesde: request failed: status code 503\n\
@@ -1449,6 +1491,7 @@ mod tests {
                     { "registry": "wally", "total": 30, "packages": [package("acme/signal1")], "error": null },
                     { "registry": "pesde", "total": null, "packages": [], "error": "request failed: status code 503" },
                     { "registry": "forest", "total": null, "packages": [], "error": "no answer in 300ms" },
+                    { "registry": "luarocks", "total": 1, "packages": [package("rocks/signal")], "error": null },
                 ]
             })
         );

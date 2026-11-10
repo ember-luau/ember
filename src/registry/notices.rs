@@ -271,7 +271,7 @@ pub fn items(
 on disk already, with no request: an install that resolved nothing must
 not reach the network for this. Forest keeps no package files. */
 fn open(url: &str, fetch: bool) -> Option<Index> {
-    if forest::is_forest(url) {
+    if forest::is_forest(url) || crate::registry::index::luarocks::is_luarocks(url) {
         return None;
     }
     let on_disk =

@@ -863,16 +863,25 @@ struct CraterDeclare {
 }
 
 /// the indices embr installs from, by the key ember.toml names each one.
-const EMBER_INDICES: [(&str, &str); 4] = [
+const EMBER_INDICES: [(&str, &str); 5] = [
     (EMBER_INDEX_NAME, DEFAULT_INDEX_URL),
     ("wally", WALLY_INDEX),
     ("pesde", PESDE_INDEX),
     ("forest", forest::API_URL),
+    ("luarocks", crate::registry::index::luarocks::API_URL),
 ];
 
 /// the ember.toml index key of an address, when embr installs from it.
 fn ember_index(url: &str) -> Option<&'static str> {
     let url = url.trim_end_matches('/');
+    /* crater names LuaRocks by its own site, `luarocks#rocks/x`, and ember
+    reads the same rocks through its API */
+    let bare = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    if url.eq_ignore_ascii_case("luarocks") || bare.eq_ignore_ascii_case("luarocks.org") {
+        return Some("luarocks");
+    }
     EMBER_INDICES
         .iter()
         .find(|(_, known)| url.eq_ignore_ascii_case(known))
@@ -1549,6 +1558,16 @@ TestEZ = "roblox/testez@0.4.1"
   "tools": { "rojo": "rojo-rbx/rojo@7.7.1" },
   "exclude": ["tests/"]
 }"#;
+
+    #[test]
+    fn a_crater_rock_installs_from_luarocks() {
+        let index_of = |name: &str| ember_index(name);
+        assert_eq!(
+            crater_dependency("luarocks#rocks/inspect@3.1.3", &index_of, None),
+            Some(("inspect".into(), "rocks/inspect".into(), "^3.1.3".into(), "luarocks"))
+        );
+        assert_eq!(ember_index("https://luarocks.org/"), Some("luarocks"));
+    }
 
     #[test]
     fn crater_moves_what_ember_has_a_place_for() {
