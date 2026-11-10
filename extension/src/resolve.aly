@@ -422,7 +422,7 @@ local function from_samples(name: string) -> { Release }
 end
 
 local function project_of(deps: { [string]: Spec }) -> Project
-  return { dependencies = deps, dev_dependencies = {}, overrides = {} }
+  return { dependencies = deps, dev_dependencies = {}, overrides = {}, scripts = {} }
 end
 
 @test namespace Resolve

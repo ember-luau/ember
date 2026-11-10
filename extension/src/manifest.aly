@@ -7,6 +7,7 @@
 
 import ScriptEditorService from '@game/ScriptEditorService'
 import ServerStorage from '@game/ServerStorage'
+import { commands_of, type Command } from './scripts'
 
 --- A dependency as the user writes it: `'scope/name'`, `'scope/name@^1.2'`,
 --- or a table with the other keys.
@@ -25,6 +26,8 @@ export type Project = {
   dependencies: { [string]: Spec },
   dev_dependencies: { [string]: Spec },
   overrides: { [string]: Spec },
+  --- Name -> its commands.
+  scripts: { [string]: { Command } },
 }
 
 -- The factory module. Its types are what the editor completes in the
@@ -51,7 +54,14 @@ export type Dependency = string | {
 	default_features: boolean?,
 }
 
+--- Luau code, a ModuleScript at "@game/Service/Path", or a function. Each
+--- one gets a print and a warn that tag its lines in a list.
+export type Command = string | ((print: (...any) -> (), warn: (...any) -> ()) -> ())
+
 export type Project = {
+	--- Name -> a command, or a list of commands that run at once. The
+	--- Ember panel runs them, and their output goes to the Output window.
+	scripts: { [string]: Command | { Command } }?,
 	--- Alias -> package. `require(ReplicatedStorage.Packages.<alias>)`.
 	dependencies: { [string]: Dependency }?,
 	--- Packages for tests and tools, under ServerStorage.DevPackages.
@@ -81,6 +91,9 @@ return Ember.project({
 	dependencies = {
 	},
 	dev_dependencies = {
+	},
+	scripts = {
+		hello = 'print("hello from", game.Name)',
 	},
 })
 ]==]
@@ -185,6 +198,28 @@ local function specs_of(table_name: string, value: unknown) -> { [string]: Spec 
   return specs
 end
 
+local function scripts_of(value: unknown) -> { [string]: { Command } }
+  local found: { [string]: { Command } } = {}
+
+  if value == nil then
+    return found
+  end
+
+  if not (value is table) then
+    error('scripts is a table of name = command', 0)
+  end
+
+  for name, entry in value do
+    if not (name is string) then
+      error('scripts: each key is a name', 0)
+    end
+
+    found[name] = commands_of(name, entry)
+  end
+
+  return found
+end
+
 --- Runs a fresh copy of the manifest, so an edit since the last read
 --- counts, and checks what it gives.
 export function read(manifest: ModuleScript) -> Project
@@ -204,6 +239,7 @@ export function read(manifest: ModuleScript) -> Project
         dependencies = specs_of('dependencies', value.dependencies),
         dev_dependencies = specs_of('dev_dependencies', value.dev_dependencies),
         overrides = specs_of('overrides', value.overrides),
+        scripts = scripts_of(value.scripts),
       }
 
       for alias in project.dependencies do

@@ -13,6 +13,7 @@ import { Notice } from './Notice'
 import { releases_of, resolve, type Release } from './resolve'
 import { BRAND } from './theme'
 import { Icon } from './Icon'
+import { ScriptList } from './ScriptList'
 
 --- The props of [ProjectView].
 export type ProjectViewProps = {
@@ -67,10 +68,24 @@ local function run_install(source: ModuleScript, progress: (string) -> ()) -> { 
   return lock
 end
 
+-- The names of a table, sorted.
+local function names_of<T>(map: { [string]: T }) -> { string }
+  const names: { string } = {}
+
+  for name in map do
+    table.insert(names, name)
+  end
+
+  table.sort(names)
+
+  return names
+end
+
 --- The Project tab.
 export function ProjectView(props: ProjectViewProps) -> Instance
   local current = $state(manifest.find())
   local deps: { Row } = $state([])
+  local script_names: { string } = $state([])
   local status = $state('')
   local problem = $state(nil :: string?)
   local busy = $state(false)
@@ -82,11 +97,14 @@ export function ProjectView(props: ProjectViewProps) -> Instance
 
     if found then
       match Result.pcall(manifest.read, found) with
-        case Ok(project) then deps = rows_of(project, manifest.read_lock(found))
+        case Ok(project) then
+          deps = rows_of(project, manifest.read_lock(found))
+          script_names = names_of(project.scripts)
         case Err(message) then problem = message
       end
     else
       deps = []
+      script_names = []
     end
   end
 
@@ -161,6 +179,10 @@ export function ProjectView(props: ProjectViewProps) -> Instance
     return DependencyList({ rows = deps, on_remove = remove })
   end
 
+  local function script_list() -> Instance
+    return ScriptList({ names = script_names, on_status = function(line: string) status = line end })
+  end
+
   return <ScrollingFrame
     ClassName="ghost w-full fill scroll-y canvas-auto scrollbar-4 flex-col gap-3 p-4"
     ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
@@ -192,6 +214,8 @@ export function ProjectView(props: ProjectViewProps) -> Instance
       {/if}
 
       {listed()}
+
+      {script_list()}
     {/if}
   </ScrollingFrame>
 end
