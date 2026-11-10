@@ -1,0 +1,48 @@
+--[[
+  A tool in the results: its name and latest version, its downloads, its
+  description, and its first tags. The whole card opens it.
+]]
+
+import { create } from '@packages/svelte-aly'
+import type { Tool } from './api'
+import { count } from './format'
+import { Icon } from './Icon'
+import { BRAND } from './theme'
+
+--- The props of [ToolCard].
+export type ToolCardProps = { tool: Tool, on_open: (Tool) -> () }
+
+--- A tool as a card of the results.
+export function ToolCard(props: ToolCardProps) -> Instance
+  const tool = props.tool
+  -- Three tags fit one line of the narrow panel.
+  const tags = table.move(tool.tags, 1, math.min(#tool.tags, 3), 1, {})
+
+  return <TextButton
+    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color"
+    Text=""
+    Activated={function() props.on_open(tool) end}
+  >
+    <Frame ClassName="ghost w-full h-5 flex items-center gap-2">
+      <Icon name="wrench" weight="duotone" size={16} color={BRAND} />
+      <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-zinc-100 truncate">{tool.scope}/{tool.name}</TextLabel>
+      {#if tool.latest}
+        <TextLabel ClassName="ghost w-auto h-5 text-xs font-mono text-zinc-500">v{tool.latest}</TextLabel>
+      {/if}
+      <Frame ClassName="ghost h-5 fill" />
+      <Icon name="download-simple" size={12} />
+      <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400">{count(tool.downloads)}</TextLabel>
+    </Frame>
+    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15]">
+      {tool.description}
+    </TextLabel>
+    <Frame ClassName="ghost w-full h-5 flex items-center gap-1.5">
+      {#each tags as tag (tag)}
+        <TextLabel ClassName="w-auto h-5 px-2 rounded-full bg-zinc-800 text-xs text-zinc-300">{tag}</TextLabel>
+      {/each}
+      {#if tool.source == 'github'}
+        <Icon name="github-logo" size={12} />
+      {/if}
+    </Frame>
+  </TextButton>
+end

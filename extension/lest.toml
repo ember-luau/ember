@@ -1,0 +1,8 @@
+# Written by `alloy test`. `lest` runs the suite; `alloy test` rewrites the specs.
+
+[suites.alloy]
+include = ["tests/**/*.spec.luau"]
+
+[settings]
+backend = "native"
+timeout_ms = 5000

@@ -1,0 +1,149 @@
+--[[
+  One package: the install command, its facts, its versions, and its
+  README. The versions and the README load after the view opens.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { package_versions, readme, type Package } from './api'
+import { CopyField } from './CopyField'
+import { ago_iso, count, rich } from './format'
+import * as manifest from './manifest'
+import { Icon } from './Icon'
+import { org_name } from './PackageCard'
+import { Spinner } from './Spinner'
+import { BRAND } from './theme'
+
+--- The props of [PackageDetail].
+export type PackageDetailProps = {
+  pkg: Package,
+  on_back: () -> (),
+  --- Shows the Project tab after the package goes into ember.luau.
+  on_added: () -> (),
+}
+
+--- The page of one package.
+export function PackageDetail(props: PackageDetailProps) -> Instance
+  const pkg = props.pkg
+  local versions: { string } = $state([])
+  local notes = $state('')
+  local loading = $state(true)
+  local added = $state(nil :: string?)
+
+  local function add()
+    task.spawn(function()
+      match Result.pcall(manifest.add, pkg.name, pkg.version) with
+        case Ok(_) then props.on_added()
+        case Err(message) then added = message
+      end
+    end)
+  end
+
+  $effect(function()
+    const job = task.spawn(function()
+      const found = Result.pcall(package_versions, pkg.name)
+      const text = readme(pkg.name, pkg.version)
+
+      versions = found:unwrap_or([])
+      notes = if text then rich(text) else 'This version has no README.'
+      loading = false
+    end)
+
+    return function() task.cancel(job) end
+  end)
+
+  -- The site has the full page, with the source and the stats.
+  const site = `https://emberpm.dev/package/{pkg.name}`
+  return <ScrollingFrame
+    ClassName="ghost w-full fill scroll-y canvas-auto scrollbar-4 flex-col gap-4 p-4"
+    ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
+    BorderSizePixel={0}
+  >
+    <TextButton ClassName="ghost w-auto h-6 flex items-center gap-1.5 no-auto-color" Text="" Activated={function() props.on_back() end}>
+      <Icon name="arrow-left" weight="bold" size={14} />
+      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-400 hover:text-zinc-100">Back</TextLabel>
+    </TextButton>
+
+    <Frame ClassName="ghost w-full h-auto flex-col gap-1.5">
+      <Frame ClassName="ghost w-full h-7 flex items-center gap-2">
+        <Icon name="package" weight="duotone" size={22} color={BRAND} />
+        <TextLabel ClassName="ghost w-auto h-7 text-lg font-bold text-zinc-100 truncate">{pkg.name}</TextLabel>
+        <TextLabel ClassName="w-auto h-5 px-2 rounded bg-zinc-800 text-xs font-mono text-zinc-300">v{pkg.version}</TextLabel>
+      </Frame>
+      <TextLabel ClassName="ghost w-full h-auto text-sm text-zinc-400 text-left text-wrap leading-[1.2]">
+        {pkg.description or 'No description.'}
+      </TextLabel>
+    </Frame>
+
+    <TextButton ClassName="w-full h-9 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors flex items-center justify-center gap-2 no-auto-color" Text="" Activated={add}>
+      <Icon name="plus" weight="bold" size={14} color={new Color3(1, 1, 1)} />
+      <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-white">Add to ember.luau</TextLabel>
+    </TextButton>
+    {#if added}
+      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap" Text={added} />
+    {/if}
+
+    <CopyField text={`embr add {pkg.name}`} />
+
+    <PackageFacts pkg={pkg} />
+
+    {#if loading}
+      <Spinner label="Loading the README" />
+    {:else}
+      {#if #versions > 0}
+        <Frame ClassName="ghost w-full h-auto flex-col gap-2">
+          <TextLabel ClassName="ghost w-full h-4 text-xs font-bold text-zinc-500 text-left">VERSIONS</TextLabel>
+          <Frame ClassName="ghost w-full h-auto flex flex-wrap gap-1.5">
+            {#each versions as version (version)}
+              <TextLabel ClassName="w-auto h-6 px-2 rounded-md bg-zinc-900 stroke stroke-zinc-800 text-xs font-mono text-zinc-300">{version}</TextLabel>
+            {/each}
+          </Frame>
+        </Frame>
+      {/if}
+
+      <Frame ClassName="card w-full h-auto p-4 flex-col">
+        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-300 text-left text-wrap leading-[1.3]" RichText={true}>
+          {notes}
+        </TextLabel>
+      </Frame>
+    {/if}
+
+    <CopyField text={site} icon="arrow-square-out" />
+  </ScrollingFrame>
+end
+
+--- The publisher, the org, the age, the language, and the downloads of a
+--- package, in one wrapping row.
+export function PackageFacts(props: { pkg: Package }) -> Instance
+  const pkg = props.pkg
+  const publishers = pkg.publishers or {}
+  const by = publishers[1]
+
+  return <Frame ClassName="ghost w-full h-auto flex flex-wrap gap-x-4 gap-y-1.5">
+      {#if by}
+        <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
+          <Icon name="user" size={12} />
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{by}</TextLabel>
+        </Frame>
+      {/if}
+      {#if pkg.org}
+        <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
+          <Icon name="buildings" size={12} />
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{org_name(pkg)}</TextLabel>
+        </Frame>
+      {/if}
+      <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
+        <Icon name="clock" size={12} />
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{ago_iso(pkg.published_at)}</TextLabel>
+      </Frame>
+      <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
+        <Icon name="code" size={12} />
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{pkg.language or 'luau'}</TextLabel>
+      </Frame>
+      {#if pkg.downloads}
+        <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
+          <Icon name="download-simple" size={12} />
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{count(pkg.downloads or 0)} downloads</TextLabel>
+        </Frame>
+      {/if}
+    </Frame>
+end

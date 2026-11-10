@@ -1,0 +1,154 @@
+--[[
+  The Ember panel: the search, the Packages and Tools switch, and the
+  results, or one package or tool when the user opens it. A search waits
+  for a pause in the typing, and an answer for an older search never
+  shows.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { search_packages, search_rocks, search_tools, type Package, type Tool } from './api'
+import { Header } from './Header'
+import { Notice } from './Notice'
+import { PackageCard } from './PackageCard'
+import { PackageDetail } from './PackageDetail'
+import { ProjectView } from './ProjectView'
+import { Spinner } from './Spinner'
+import { ToolCard } from './ToolCard'
+import { ToolDetail } from './ToolDetail'
+
+-- The pause after the last key before the search goes out.
+const PAUSE = 0.25
+
+-- Runs one search and hands its list to the setter of its tab. Gives
+-- the error message, or nil.
+local function search_into(
+  kind: string,
+  text: string,
+  set_tools: ({ Tool }) -> (),
+  set_packages: ({ Package }) -> ()
+) -> string?
+  match Result.pcall(function()
+    if kind == 'tools' then
+      set_tools(search_tools(text))
+    else
+      set_packages(with_rocks(search_packages(text), text))
+    end
+  end) with
+    case Ok(_) then return nil
+    case Err(message) then return message
+  end
+end
+
+-- LuaRocks rocks follow the Ember packages. A LuaRocks search that
+-- fails leaves the Ember results alone.
+local function with_rocks(found: { Package }, text: string) -> { Package }
+  match Result.pcall(search_rocks, text) with
+    case Ok(rocks) then
+      for _, rock in rocks do
+        table.insert(found, rock)
+      end
+    case Err(_) then
+  end
+
+  return found
+end
+
+--- The props of [App], from the plugin script.
+export type AppProps = {
+  --- Opens a script in Studio's editor.
+  open_script: (Instance) -> (),
+}
+
+--- The whole panel.
+export function App(props: AppProps) -> Instance
+  local query = $state('')
+  local tab = $state('packages')
+  local packages: { Package } = $state([])
+  local tools: { Tool } = $state([])
+  local loading = $state(true)
+  local problem = $state(nil :: string?)
+  local open_package = $state(nil :: Package?)
+  local open_tool = $state(nil :: Tool?)
+
+  -- A new text or tab cancels the search before it, also one that waits
+  -- on Ember, so an older answer never lands.
+  $effect(function()
+    const text, kind = query, tab
+    loading = true
+    problem = nil
+
+    const job = task.delay(if text == '' then 0 else PAUSE, function()
+      problem = search_into(kind, text, function(found) tools = found end, function(found) packages = found end)
+      loading = false
+    end)
+
+    return function() task.cancel(job) end
+  end)
+
+  local function show(next: string)
+    tab = next
+    open_package = nil
+    open_tool = nil
+  end
+
+  -- A view opens from the list and closes back to it, so a branch builds
+  -- once for each open. These calls read the state as plain values, and
+  -- the props stay plain types.
+  local function package_view() -> Instance
+    return PackageDetail({
+      pkg = open_package :: Package,
+      on_back = function() open_package = nil end,
+      on_added = function() show('project') end,
+    })
+  end
+
+  local function tool_view() -> Instance
+    return ToolDetail({ tool = open_tool :: Tool, on_back = function() open_tool = nil end })
+  end
+
+  local function problem_view() -> Instance
+    return Notice({ icon = 'warning', title = 'Ember did not answer', body = problem })
+  end
+
+  return <Frame ClassName="w-full h-full bg-zinc-950 flex-col">
+    <Header
+      tab={function() return tab end}
+      on_tab={show}
+      on_query={function(text: string) query = text end}
+    />
+
+    <Frame ClassName="w-full h-px bg-zinc-800" />
+
+    {#if tab == 'project'}
+      <ProjectView open_script={props.open_script} />
+    {:else if open_package}
+      {package_view()}
+    {:else if open_tool}
+      {tool_view()}
+    {:else}
+      <ScrollingFrame
+        ClassName="ghost w-full fill scroll-y canvas-auto scrollbar-4 flex-col gap-2 p-4"
+        ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
+        BorderSizePixel={0}
+      >
+        {#if problem}
+          {problem_view()}
+        {:else if loading}
+          <Spinner />
+        {:else if tab == 'tools'}
+          {#each tools as tool (tool.scope .. '/' .. tool.name)}
+            <ToolCard tool={tool} on_open={function(picked: Tool) open_tool = picked end} />
+          {:else}
+            <Notice icon="wrench" title="No tools match" body="Try another word, or browse with an empty search." />
+          {/each}
+        {:else}
+          {#each packages as pkg (pkg.name)}
+            <PackageCard pkg={pkg} on_open={function(picked: Package) open_package = picked end} />
+          {:else}
+            <Notice icon="package" title="No packages match" body="Try another word, or browse with an empty search." />
+          {/each}
+        {/if}
+      </ScrollingFrame>
+    {/if}
+  </Frame>
+end

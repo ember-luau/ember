@@ -1,0 +1,54 @@
+--[[
+  A package in the results: its name and version, its downloads, its
+  description, and the org that owns it. The whole card opens it.
+]]
+
+import { create } from '@packages/svelte-aly'
+import type { Org, Package } from './api'
+import { ago_iso, count } from './format'
+import { Icon } from './Icon'
+import { BRAND } from './theme'
+
+--- The props of [PackageCard].
+export type PackageCardProps = { pkg: Package, on_open: (Package) -> () }
+
+--- A package as a card of the results.
+export function PackageCard(props: PackageCardProps) -> Instance
+  const pkg = props.pkg
+  const facts = [ pkg.language or 'luau', pkg.target or 'roblox', ago_iso(pkg.published_at) ]
+
+  return <TextButton
+    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color"
+    Text=""
+    Activated={function() props.on_open(pkg) end}
+  >
+    <Frame ClassName="ghost w-full h-5 flex items-center gap-2">
+      <Icon name="package" weight="duotone" size={16} color={BRAND} />
+      <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-zinc-100 truncate">{pkg.name}</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-5 text-xs font-mono text-zinc-500">v{pkg.version}</TextLabel>
+      <Frame ClassName="ghost h-5 fill" />
+      {#if pkg.downloads}
+        <Icon name="download-simple" size={12} />
+        <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400">{count(pkg.downloads or 0)}</TextLabel>
+      {/if}
+    </Frame>
+    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15]">
+      {pkg.description or 'No description.'}
+    </TextLabel>
+    <Frame ClassName="ghost w-full h-4 flex items-center gap-1.5">
+      {#if pkg.org}
+        <Icon name="buildings" size={12} />
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{org_name(pkg)}</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600">·</TextLabel>
+      {/if}
+      <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500">{table.concat(facts, '  ·  ')}</TextLabel>
+    </Frame>
+  </TextButton>
+end
+
+--- The shown name of the org that owns a package or a tool, or `''`.
+export function org_name(owned: { org: Org? }) -> string
+  const org = owned.org
+
+  return if org then org.display_name or org.name else ''
+end

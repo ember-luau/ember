@@ -1,0 +1,36 @@
+--[[
+  One side of the Packages and Tools switch. The fill and the text tween
+  to the active colors, so the switch reads as one control.
+]]
+
+import { create, Easing, Tween, type TweenOptions } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+import { BRAND, MUTED, PANEL, RAISED, TEXT } from './theme'
+
+--- The props of [Tab].
+export type TabProps = {
+  label: string,
+  icon: string,
+  --- Whether the tab is on. A function, so the tab follows the switch.
+  active: () -> boolean,
+  on_select: () -> (),
+}
+
+const MOTION: TweenOptions = { duration = 0.15, easing = Easing.cubic_out }
+
+--- One tab of a two-way switch.
+export function Tab(props: TabProps) -> Instance
+  const fill = Tween.of(function() return if props.active() then RAISED else PANEL end, MOTION)
+  const ink = Tween.of(function() return if props.active() then TEXT else MUTED end, MOTION)
+  const mark = Tween.of(function() return if props.active() then BRAND else MUTED end, MOTION)
+
+  return <TextButton
+    ClassName="h-full fill rounded-md flex items-center justify-center gap-2 no-auto-color"
+    Text=""
+    BackgroundColor3={fill}
+    Activated={function() props.on_select() end}
+  >
+    <Icon name={props.icon} weight="bold" size={14} color={mark} />
+    <TextLabel ClassName="ghost w-auto h-4 text-xs font-bold" TextColor3={ink}>{props.label}</TextLabel>
+  </TextButton>
+end

@@ -1,0 +1,339 @@
+-- The place's manifest: `ServerStorage.ember`, a ModuleScript that the
+-- user edits in Studio's script editor. It calls `Ember.project` from its
+-- child module `Ember`, whose types give the editor's autocomplete. It is
+-- the ember.luau form of ember.toml, with the parts that a place can use:
+-- dependencies, dev dependencies, and overrides. The lock is a second
+-- child, `lock`, which the plugin writes after each install.
+
+import ScriptEditorService from '@game/ScriptEditorService'
+import ServerStorage from '@game/ServerStorage'
+
+--- A dependency as the user writes it: `'scope/name'`, `'scope/name@^1.2'`,
+--- or a table with the other keys.
+export type Spec = {
+  name: string,
+  version: string,
+  target: string,
+  entry: string?,
+  optional: boolean,
+  features: { string },
+  default_features: boolean,
+}
+
+--- The manifest, read and checked.
+export type Project = {
+  dependencies: { [string]: Spec },
+  dev_dependencies: { [string]: Spec },
+  overrides: { [string]: Spec },
+}
+
+-- The factory module. Its types are what the editor completes in the
+-- manifest; the plugin writes it again at each install, so an update of
+-- the plugin updates the types.
+const FACTORY = [==[--!strict
+-- Written by the Ember plugin. Edits here are lost at the next install.
+
+export type Dependency = string | {
+	--- The package, as "scope/name".
+	name: string,
+	--- A semver requirement, such as "^1.2.0". Nil or "^" is the newest.
+	version: string?,
+	--- "roblox" (the default) installs under ReplicatedStorage.Packages;
+	--- "roblox_server" under ServerStorage.Packages.
+	target: ("roblox" | "roblox_server")?,
+	--- The module to link, a path inside the package, such as "src/vow".
+	entry: string?,
+	--- Skip this dependency when it does not resolve.
+	optional: boolean?,
+	--- The features of the package to turn on.
+	features: { string }?,
+	--- False turns off the features the package turns on by default.
+	default_features: boolean?,
+}
+
+export type Project = {
+	--- Alias -> package. `require(ReplicatedStorage.Packages.<alias>)`.
+	dependencies: { [string]: Dependency }?,
+	--- Packages for tests and tools, under ServerStorage.DevPackages.
+	dev_dependencies: { [string]: Dependency }?,
+	--- "Alias.Sub" -> a dependency or an alias: what Sub of Alias gets.
+	overrides: { [string]: Dependency }?,
+}
+
+local Ember = {}
+
+--- The dependencies of this place. Edit them, then press Install in the
+--- Ember panel.
+function Ember.project(project: Project): Project
+	return project
+end
+
+return Ember
+]==]
+
+const TEMPLATE = [==[--!strict
+-- The dependencies of this place, for the Ember plugin. Add a package
+-- here, or press "Add to ember.luau" on its page in the panel, then press
+-- Install. The plugin writes ReplicatedStorage.Packages from this file.
+local Ember = require(script.Ember)
+
+return Ember.project({
+	dependencies = {
+	},
+	dev_dependencies = {
+	},
+})
+]==]
+
+--- The manifest module, or nil when the place has none.
+export function find() -> ModuleScript?
+  const found = ServerStorage->ember
+
+  return if found?:IsA('ModuleScript') then found :: ModuleScript else nil
+end
+
+--- Writes the factory module under the manifest, new or over the old one.
+export function write_factory(manifest: ModuleScript) -> ()
+  local factory = manifest->Ember
+
+  if factory == nil or not factory:IsA('ModuleScript') then
+    if factory then
+      factory:Destroy()
+    end
+
+    factory = new Instance('ModuleScript')
+    factory.Name = 'Ember'
+    factory.Parent = manifest
+  end
+
+  local module = factory :: ModuleScript
+  module.Source = FACTORY
+end
+
+--- Makes `ServerStorage.ember` with the template, or gives the one there.
+export function create() -> ModuleScript
+  const existing = find()
+
+  if existing then
+    return existing
+  end
+
+  local manifest = new Instance('ModuleScript')
+  manifest.Name = 'ember'
+  manifest.Source = TEMPLATE
+  write_factory(manifest)
+  manifest.Parent = ServerStorage
+
+  return manifest
+end
+
+-- `'scope/name@req'` or a table, as one checked spec.
+local function spec_of(alias: string, value: unknown) -> Spec
+  if value is string then
+    const name, version = value:match('^([^@]+)@(.*)$')
+
+    return {
+      name = name or value,
+      version = version or '^',
+      target = 'roblox',
+      optional = false,
+      features = {},
+      default_features = true,
+    }
+  end
+
+  if not (value is table) or not (value.name is string) then
+    error(`{alias}: write "scope/name", "scope/name@^1.0.0", or a table with a name`, 0)
+  end
+
+  const target = if value.target is string then value.target else 'roblox'
+
+  if target ~= 'roblox' and target ~= 'roblox_server' then
+    error(`{alias}: target is "roblox" or "roblox_server" in a place`, 0)
+  end
+
+  return {
+    name = value.name,
+    version = if value.version is string then value.version else '^',
+    target = target,
+    entry = if value.entry is string then value.entry else nil,
+    optional = value.optional is boolean and value.optional,
+    features = if value.features is table then value.features :: { string } else {},
+    default_features = not (value.default_features is boolean) or value.default_features,
+  }
+end
+
+local function specs_of(table_name: string, value: unknown) -> { [string]: Spec }
+  local specs: { [string]: Spec } = {}
+
+  if value == nil then
+    return specs
+  end
+
+  if not (value is table) then
+    error(`{table_name} is a table of alias = package`, 0)
+  end
+
+  for alias, entry in value do
+    if not (alias is string) then
+      error(`{table_name}: each key is an alias, a name`, 0)
+    end
+
+    specs[alias] = spec_of(`{table_name}.{alias}`, entry)
+  end
+
+  return specs
+end
+
+--- Runs a fresh copy of the manifest, so an edit since the last read
+--- counts, and checks what it gives.
+export function read(manifest: ModuleScript) -> Project
+  const copy = manifest:Clone()
+  const ran = Result.pcall(require, copy)
+
+  copy:Destroy()
+
+  match ran with
+    case Err(problem) then error(`ember.luau did not run: {problem}`, 0)
+    case Ok(value) then
+      if not (value is table) then
+        error('ember.luau returns no table; it ends in return Ember.project({ ... })', 0)
+      end
+
+      const project: Project = {
+        dependencies = specs_of('dependencies', value.dependencies),
+        dev_dependencies = specs_of('dev_dependencies', value.dev_dependencies),
+        overrides = specs_of('overrides', value.overrides),
+      }
+
+      for alias in project.dependencies do
+        if project.dev_dependencies[alias] then
+          error(`{alias} is in dependencies and in dev_dependencies; keep one`, 0)
+        end
+      end
+
+      return project
+  end
+end
+
+--- The locked versions, `scope/name` -> version.
+export function read_lock(manifest: ModuleScript) -> { [string]: string }
+  const lock = manifest->lock
+
+  if lock == nil or not lock:IsA('ModuleScript') then
+    return {}
+  end
+
+  const copy = lock:Clone()
+  const ran = Result.pcall(require, copy)
+  copy:Destroy()
+
+  match ran with
+    case Ok(value) then return if value is table then value :: { [string]: string } else {}
+    case Err(_) then return {}
+  end
+end
+
+--- Writes the lock under the manifest.
+export function write_lock(manifest: ModuleScript, versions: { [string]: string }) -> ()
+  local lock = manifest->lock
+
+  if lock == nil or not lock:IsA('ModuleScript') then
+    if lock then
+      lock:Destroy()
+    end
+
+    lock = new Instance('ModuleScript')
+    lock.Name = 'lock'
+    lock.Parent = manifest
+  end
+
+  const names: { string } = {}
+
+  for name in versions do
+    table.insert(names, name)
+  end
+
+  table.sort(names)
+
+  const lines = [ '-- Written by the Ember plugin at each install. Keep it, so each', '-- install picks the same versions.', 'return {' ]
+
+  for _, name in names do
+    table.insert(lines, `\t["{name}"] = "{versions[name]}",`)
+  end
+
+  table.insert(lines, '}')
+  local module = lock :: ModuleScript
+  module.Source = table.concat(lines, '\n')
+end
+
+--- Adds `alias = "name@version"` to the dependencies table of the source.
+--- Nil when the source has no `dependencies = {` to add to, or has the
+--- alias already.
+export function add_dependency(source: string, alias: string, spec: string) -> string?
+  if source:find(`["{alias}"]`, 1, true) or source:match('[%s,{]' .. alias .. '%s*=') then
+    return nil
+  end
+
+  const start, finish = source:find('dependencies%s*=%s*{')
+
+  if start == nil or finish == nil then
+    return nil
+  end
+
+  -- `dev_dependencies` matches too; skip it for the plain table.
+  if start > 4 and source:sub(start - 4, start - 1) == 'dev_' then
+    const again_start, again_finish = source:find('[^_]dependencies%s*=%s*{', finish)
+
+    if again_start == nil or again_finish == nil then
+      return nil
+    end
+
+    return `{source:sub(1, again_finish)}\n\t\t["{alias}"] = "{spec}",{source:sub(again_finish + 1)}`
+  end
+
+  return `{source:sub(1, finish)}\n\t\t["{alias}"] = "{spec}",{source:sub(finish + 1)}`
+end
+
+--- Adds `name` at `^version` to the manifest, made when the place has
+--- none, under the last part of the name as its alias. Gives the line it
+--- wrote, or an error that says why it could not.
+export function add(name: string, version: string) -> string
+  const manifest = create()
+  const alias = name:split('/')[2] or name
+  const spec = `{name}@^{version}`
+  local added = false
+
+  -- Through the script editor, so an open tab of the file keeps in step.
+  ScriptEditorService:UpdateSourceAsync(manifest, function(old: string) -> string
+    const next = add_dependency(old, alias, spec)
+    added = next ~= nil
+
+    return next or old
+  end)
+
+  if not added then
+    error(`ember.luau has {alias} already, or no dependencies table to add it to`, 0)
+  end
+
+  return `["{alias}"] = "{spec}"`
+end
+
+@test namespace Manifest
+  public function a_dependency_goes_into_the_dependencies_table() -> ()
+    const added = add_dependency(TEMPLATE, 'svelte', 'alloy/svelte-aly@^0.1.2') :: string
+    $assert(added:find('dependencies = {\n\t\t["svelte"] = "alloy/svelte-aly@^0.1.2",', 1, true) ~= nil)
+    $assert(added:find('dev_dependencies = {\n\t},', 1, true) ~= nil)
+    $assert(add_dependency(added, 'svelte', 'x') == nil)
+    $assert(add_dependency('return {}', 'svelte', 'x') == nil)
+  end
+
+  public function the_string_form_names_the_package_and_the_version() -> ()
+    const plain = spec_of('a', 'alloy/svelte-aly')
+    $assert(plain.name == 'alloy/svelte-aly' and plain.version == '^')
+    const pinned = spec_of('a', 'alloy/svelte-aly@=0.1.2')
+    $assert(pinned.name == 'alloy/svelte-aly' and pinned.version == '=0.1.2')
+    const full = spec_of('a', { name = 'a/b', target = 'roblox_server', features = [ 'x' ] })
+    $assert(full.target == 'roblox_server' and full.features[1] == 'x' and full.default_features)
+  end
+end

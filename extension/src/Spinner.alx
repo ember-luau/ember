@@ -1,0 +1,29 @@
+--[[
+  A turning ring for a request in flight. The effect connects to
+  Heartbeat while the spinner shows, and its cleanup disconnects.
+]]
+
+import RunService from '@game/RunService'
+import { create } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+import { BRAND } from './theme'
+
+--- A turning ring over a short label, `'Loading'` by default.
+export function Spinner(props: { label: string? }) -> Instance
+  local angle = $state(0)
+
+  $effect(function()
+    const connection = RunService.Heartbeat:Connect(function(dt: number)
+      angle = (angle + dt * 360) % 360
+    end)
+
+    return function() connection:Disconnect() end
+  end)
+
+  return <Frame ClassName="ghost w-full h-24 flex-col items-center justify-center gap-2">
+    <Frame ClassName="ghost size-5" Rotation={angle}>
+      <Icon name="circle-notch" weight="bold" size={20} color={BRAND} />
+    </Frame>
+    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500">{props.label or 'Loading'}</TextLabel>
+  </Frame>
+end

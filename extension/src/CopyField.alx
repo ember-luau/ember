@@ -1,0 +1,35 @@
+--[[
+  A line of text to copy, such as an install command. A plugin has no
+  clipboard, so the box selects all of its text when it takes the focus,
+  and Ctrl+C copies it. The TextBox is made in code and not in the
+  markup: the focus handler needs the instance.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+
+--- A read-only line that selects itself on focus, with an icon,
+--- `'terminal'` by default.
+export function CopyField(props: { text: string, icon: string? }) -> Instance
+  local box = new Instance('TextBox')
+  box.Size = UDim2.fromScale(1, 1)
+  box.BackgroundTransparency = 1
+  box.ClearTextOnFocus = false
+  box.TextEditable = false
+  box.TextXAlignment = Enum.TextXAlignment.Left
+  box.TextTruncate = Enum.TextTruncate.AtEnd
+  box.TextSize = 13
+  box.TextColor3 = Color3.fromRGB(244, 244, 245)
+  box.FontFace = Font.fromEnum(Enum.Font.RobotoMono)
+  box.Text = props.text
+  box.Focused:Connect(function()
+    box.SelectionStart = 1
+    box.CursorPosition = #box.Text + 1
+  end)
+
+  return <Frame ClassName="card w-full h-9 flex items-center gap-2 px-3">
+    <Icon name={props.icon or 'terminal'} size={14} />
+    <Frame ClassName="ghost h-full fill">{box}</Frame>
+    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600">Ctrl+C</TextLabel>
+  </Frame>
+end

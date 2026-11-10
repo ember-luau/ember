@@ -1,0 +1,15 @@
+-- The colors that a prop takes as a Color3. enamel.aly at the project
+-- root holds the same brand color for the classes.
+
+--- The Ember orange, for the brand mark and the active parts.
+export const BRAND = Color3.fromRGB(242, 60, 27)
+--- Text that leads.
+export const TEXT = Color3.fromRGB(244, 244, 245) -- zinc-100
+--- Text and icons that follow.
+export const MUTED = Color3.fromRGB(161, 161, 170) -- zinc-400
+--- Hints and placeholders.
+export const FAINT = Color3.fromRGB(113, 113, 122) -- zinc-500
+--- The fill of a card.
+export const PANEL = Color3.fromRGB(24, 24, 27) -- zinc-900
+--- The fill of a card under the pointer, or of the active tab.
+export const RAISED = Color3.fromRGB(39, 39, 42) -- zinc-800

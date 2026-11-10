@@ -1,0 +1,13 @@
+packages/
+.ember-patch/
+build/
+Ember.rbxm
+.alloy/ingots/
+# alloy test and alloy build write these.
+tests/
+.lest/
+.alloy/alloy.schema.json
+.alloy/build.project.json
+# The root ignores manifests for test projects; the plugin needs its own.
+!ember.toml
+!ember.lock

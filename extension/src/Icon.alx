@@ -1,0 +1,38 @@
+--[[
+  A Phosphor icon from prospero. The icon sits on one of prospero's
+  sprite sheets, so the label shows a 32-pixel rect of the sheet. The
+  glyphs are white, so `color` tints them. `color` may be a tween: the
+  hole reads it in a function, so the tint follows it.
+]]
+
+import prospero from '@packages/prospero'
+import { create, get, type Tween } from '@packages/svelte-aly'
+import { MUTED } from './theme'
+
+--- The props of [Icon].
+export type IconProps = {
+  --- A Phosphor icon name, such as `'package'`.
+  name: string,
+  --- `'regular'` by default; also `'bold'`, `'fill'`, `'duotone'`.
+  weight: string?,
+  --- The side in pixels, 16 by default.
+  size: number?,
+  --- The tint, zinc-400 by default.
+  color: (Color3 | Tween<Color3>)?,
+}
+
+--- A Phosphor icon, tinted.
+export function Icon(props: IconProps) -> Instance
+  @allow(explicit_any)
+  const image, offset = prospero.get(props.name :: any, (props.weight or 'regular') :: any)
+  const side = props.size or 16
+
+  return <ImageLabel
+    ClassName="ghost"
+    Size={new UDim2(0, side, 0, side)}
+    Image={image}
+    ImageRectOffset={offset}
+    ImageRectSize={prospero.ICON_SIZE}
+    ImageColor3={function() return (get(props.color) :: Color3?) or MUTED end}
+  />
+end
