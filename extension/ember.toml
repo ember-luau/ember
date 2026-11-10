@@ -1,0 +1,13 @@
+# Manifest for this project. See https://emberpm.dev/docs
+# Add dependencies with `embr add <scope/name>`, then run `embr install`.
+
+[target]
+environment = "roblox"
+language = "alloy"
+
+[dependencies]
+svelte-aly = { name = "alloy/svelte-aly", version = "^" }
+prospero = { name = "teamfireworks/prospero", version = "^" }
+
+[scripts]
+build = "./scripts/build.sh"

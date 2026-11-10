@@ -1,0 +1,15 @@
+-- The plugin's theme for Enamel: the Ember orange of emberpm.dev, and
+-- the zinc darks that the site uses. src/theme.aly holds the same
+-- colors as values, for props that take a Color3.
+
+--- The colors that a class names: `bg-brand`, `text-brand`.
+export const colors = {
+  brand = Color3.fromRGB(242, 60, 27),
+  ink = Color3.fromRGB(9, 9, 11),
+}
+
+--- Sets of classes that many elements share.
+export const classes = {
+  card = 'bg-zinc-900 rounded-lg stroke stroke-zinc-800',
+  ghost = 'bg-transparency-100',
+}

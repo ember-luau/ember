@@ -1,0 +1,53 @@
+#:schema .alloy/alloy.schema.json
+[build]
+in = "src"
+out = "build"
+exclude = []
+clean = false
+artifact = "ship"
+
+[emit]
+wait_timeout = 5
+# std_require = "@alloy"
+
+[std]
+globals = "none"
+
+[fmt]
+recommended = true
+column_width = 100
+indent_type = "spaces"
+indent_width = 2
+quote_style = "force-single"
+
+[lint]
+recommended = true
+strict = true
+
+[lint.rules]
+# raw_require = "allow"
+
+[flux]
+typecheck = true
+definitions = []
+
+[test]
+out = "tests"
+suite = "alloy"
+lest = true
+shim = true
+
+[ingots]
+svelte-aly = { repo = "alloy-luau/ingots" }
+enamel = { repo = "alloy-luau/ingots" }
+
+[project]
+name = "embr-plugin"
+runtime = "@game/ReplicatedStorage/Alloy"
+sourcemap = false
+source_of_truth = false
+
+[alx.factory]
+backend = "table"
+create = "create"
+interpolate = "wrap"

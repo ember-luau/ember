@@ -1,0 +1,97 @@
+-- Short forms of counts, times, and markdown for the panel.
+
+--- 950, 1.2k, 3.4M.
+export function count(n: number) -> string
+  if n >= 1e9 then
+    return `{string.format('%.1f', n / 1e6)}B`
+  elseif n >= 1e6 then
+    return `{string.format('%.1f', n / 1e6)}M`
+  elseif n >= 1e3 then
+    return `{string.format('%.1f', n / 1e3)}k`
+  end
+
+  return tostring(n)
+end
+
+--- "3 days ago" for a unix time.
+export function ago(seconds: number) -> string
+  const delta = os.time() - seconds
+
+  if delta < 60 then
+    return 'just now'
+  end
+
+  for _, step in [
+    { 86400 * 365, 'year' },
+    { 86400 * 30, 'month' },
+    { 86400, 'day' },
+    { 3600, 'hour' },
+    { 60, 'minute' },
+  ] do
+    const size, unit = step[1] :: number, step[2] :: string
+
+    if delta >= size then
+      const n = delta // size
+
+      return `{n} {unit}{if n == 1 then '' else 's'} ago`
+    end
+  end
+
+  return 'just now'
+end
+
+--- `ago` for an ISO 8601 time, such as the `published_at` of a package.
+export function ago_iso(text: string?) -> string
+  if text == nil or text == '' then
+    return ''
+  end
+
+  match Result.pcall(DateTime.fromIsoDate, text) with
+    case Ok(time) then return if time then ago(time.UnixTimestamp) else ''
+    case Err(_) then return ''
+  end
+end
+
+-- RichText needs these three escaped.
+local function escape(text: string) -> string
+  return (text:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;'))
+end
+
+-- A TextLabel holds about 200k characters; a README past this length
+-- ends with a pointer to the site.
+const MAX_CHARS = 16000
+
+--- Markdown as Roblox RichText: headings are bold and larger, code is
+--- monospace, and the rest stays as written.
+export function rich(markdown: string) -> string
+  const lines: { string } = {}
+  local in_code = false
+  local text = markdown
+
+  if #text > MAX_CHARS then
+    text = `{text:sub(1, MAX_CHARS)}\n\n…`
+  end
+
+  for _, line in string.split(text:gsub('\r', ''), '\n') do
+    if line:match('^%s*```') then
+      in_code = not in_code
+    elseif in_code then
+      table.insert(lines, `<font face="RobotoMono" color="#a1a1aa">{escape(line)}</font>`)
+    else
+      const hashes, heading = line:match('^(#+)%s+(.*)$')
+
+      if heading and hashes then
+        const size = if #hashes == 1 then 20 elseif #hashes == 2 then 17 else 15
+        table.insert(lines, `<b><font size="{size}" color="#f4f4f5">{escape(heading)}</font></b>`)
+      else
+        -- Inline code in backticks, as monospace.
+        table.insert(
+          lines,
+          (escape(line):gsub('`([^`]+)`', '<font face="RobotoMono" color="#e4e4e7">%1</font>'))
+        )
+      end
+    end
+  end
+
+  return table.concat(lines, '\n')
+end

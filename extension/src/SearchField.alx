@@ -1,0 +1,40 @@
+--[[
+  The search box. The TextBox is made in code and not in the markup: the
+  factory has no binding for a property signal, and the search follows
+  each key. The border turns Ember orange while the box has the focus.
+]]
+
+import { create, Easing, Tween } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+import { BRAND, FAINT, RAISED } from './theme'
+
+--- A search field that calls `on_change` with the text after each key.
+export function SearchField(props: { on_change: (string) -> () }) -> Instance
+  local focused = $state(false)
+
+  local box = new Instance('TextBox')
+  box.Size = UDim2.fromScale(1, 1)
+  box.BackgroundTransparency = 1
+  box.ClearTextOnFocus = false
+  box.Text = ''
+  box.PlaceholderText = 'Search packages and tools'
+  box.PlaceholderColor3 = FAINT
+  box.TextColor3 = Color3.fromRGB(244, 244, 245)
+  box.TextSize = 14
+  box.TextXAlignment = Enum.TextXAlignment.Left
+  box.FontFace = Font.fromEnum(Enum.Font.BuilderSans)
+  box:GetPropertyChangedSignal('Text'):Connect(function() props.on_change(box.Text) end)
+  box.Focused:Connect(function() focused = true end)
+  box.FocusLost:Connect(function() focused = false end)
+
+  const ring = Tween.of(function() return if focused then BRAND else RAISED end, {
+    duration = 0.15,
+    easing = Easing.cubic_out,
+  })
+
+  return <Frame ClassName="card w-full h-9 flex items-center gap-2 px-3">
+    <UIStroke Color={ring} />
+    <Icon name="magnifying-glass" weight="bold" size={14} />
+    <Frame ClassName="ghost h-full fill">{box}</Frame>
+  </Frame>
+end

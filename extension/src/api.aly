@@ -1,0 +1,221 @@
+-- The Ember API, read through HttpService. Each function yields, and it
+-- raises an error with a short message when the request fails, so a
+-- caller runs it in a thread and catches with pcall. Studio asks the
+-- user once to allow each host.
+
+import HttpService from '@game/HttpService'
+
+const API = 'https://api.emberpm.dev'
+const CDN = 'https://cdn.emberpm.dev'
+
+-- Enough results to fill the panel; the site pages the rest.
+const PER_PAGE = 30
+
+export type Org = { name: string, display_name: string?, avatar_url: string? }
+
+export type Package = {
+  name: string,
+  version: string,
+  description: string?,
+  downloads: number?,
+  language: string?,
+  target: string?,
+  published_at: string?,
+  publishers: { string }?,
+  repository: string?,
+  org: Org?,
+}
+
+export type Tool = {
+  scope: string,
+  name: string,
+  description: string,
+  tags: { string },
+  source: string,
+  repository: string?,
+  homepage: string?,
+  latest: string?,
+  downloads: number,
+  org: Org?,
+}
+
+export type ToolVersion = {
+  version: string,
+  prerelease: boolean,
+  published_at: number,
+  notes: string?,
+  assets: { { name: string, size: number } },
+}
+
+export type ToolDetail = Tool & { license: string?, versions: { ToolVersion } }
+
+-- The body of a GET, or an error that names the status.
+local function fetch(url: string) -> string
+  const sent = Result.pcall(function()
+    return HttpService:RequestAsync({ Url = url, Method = 'GET' })
+  end)
+
+  match sent with
+    case Err(problem) then
+      error(`Ember did not answer: {problem}`, 0)
+    case Ok(response) then
+      if not response.Success then
+        error(`Ember answered {response.StatusCode}`, 0)
+      end
+
+      return response.Body or ''
+  end
+end
+
+@allow(explicit_any)
+local function json(url: string) -> any
+  return HttpService:JSONDecode(fetch(url))
+end
+
+local function encode(text: string) -> string
+  return HttpService:UrlEncode(text)
+end
+
+--- The rock of a `rocks/<name>` package, or nil for an Ember package.
+--- The Ember registry converts each LuaRocks rock into a package, and
+--- the scope `rocks` is reserved for them.
+export function rock_of(name: string) -> string?
+  return name:match('^rocks/(.+)$')
+end
+
+local function rock_url(rock: string) -> string
+  return `{API}/v1/luarocks/packages/{encode(rock)}`
+end
+
+--- Rocks that match `query`, as packages. A rock is portable Lua.
+export function search_rocks(query: string) -> { Package }
+  const found: { Package } = {}
+
+  if #query < 2 then
+    return found
+  end
+
+  for _, hit in json(`{API}/v1/luarocks/search?q={encode(query)}`).results do
+    table.insert(found, {
+      name = `rocks/{string.lower(hit.name)}`,
+      version = hit.version,
+      description = if hit.summary == '' then nil else hit.summary,
+      downloads = hit.downloads,
+      target = 'luau',
+    })
+  end
+
+  return found
+end
+
+--- Packages that match `query`. With no query, the most downloaded.
+export function search_packages(query: string) -> { Package }
+  const url = if query == ''
+    then `{API}/v1/search?sort=downloads&per_page={PER_PAGE}`
+    else `{API}/v1/search?q={encode(query)}&per_page={PER_PAGE}`
+
+  return json(url).results
+end
+
+--- Tools that match `query`. With no query, the most downloaded.
+export function search_tools(query: string) -> { Tool }
+  const url = if query == ''
+    then `{API}/v1/tools?per_page={PER_PAGE}`
+    else `{API}/v1/tools?q={encode(query)}&per_page={PER_PAGE}`
+
+  return json(url).items
+end
+
+--- The published versions of a package, newest first, each once.
+export function package_versions(name: string) -> { string }
+  const rock = rock_of(name)
+
+  if rock then
+    const versions: { string } = {}
+
+    for _, entry in json(rock_url(rock)).versions do
+      table.insert(versions, entry.version)
+    end
+
+    return versions
+  end
+
+  const entries = json(`{API}/v1/packages/{name}`).versions
+  type Dated = { version: string, at: string }
+  const dated: { Dated } = {}
+  local seen: { [string]: boolean } = {}
+
+  -- A key is "<version> <target>": a version with two targets is listed
+  -- once.
+  for key, entry in entries do
+    const version = string.split(key, ' ')[1]
+
+    if not seen[version] then
+      seen[version] = true
+      table.insert(dated, { version = version, at = entry.published_at or '' })
+    end
+  end
+
+  table.sort(dated, function(a: Dated, b: Dated) return a.at > b.at end)
+
+  const versions: { string } = {}
+
+  for _, item in dated do
+    table.insert(versions, item.version)
+  end
+
+  return versions
+end
+
+--- The README of a version, or nil when it has none.
+export function readme(name: string, version: string) -> string?
+  if rock_of(name) then
+    return nil
+  end
+
+  match Result.pcall(fetch, `{CDN}/{name}/{version}.readme.md`) with
+    case Ok(body) then return body
+    case Err(_) then return nil
+  end
+end
+
+--- A tool with its versions, newest first.
+export function tool_detail(scope: string, name: string) -> ToolDetail
+  return json(`{API}/v1/tools/{scope}/{name}`)
+end
+
+--- The answer of `GET /v1/packages/{name}`, for the resolver.
+export function package_answer(name: string) -> { [string]: unknown }
+  const rock = rock_of(name)
+
+  if not rock then
+    return json(`{API}/v1/packages/{name}`)
+  end
+
+  -- A rock has one release per version, for the portable target, and no
+  -- dependencies: the conversion copies their modules into it.
+  local versions: { [string]: unknown } = {}
+
+  for _, entry in json(rock_url(rock)).versions do
+    versions[`{entry.version} luau`] = {}
+  end
+
+  return { versions = versions }
+end
+
+--- The sources of one release: the entry module as a require path, and
+--- each `.luau` or `.lua` file by its path. The route unpacks the
+--- tarball once and redirects to the JSON on the CDN; HttpService
+--- follows the redirect.
+export type Files = { main: string, files: { [string]: string } }
+
+--- The sources of `name@version` for one target ID.
+export function package_files(name: string, version: string, target: string) -> Files
+  const rock = rock_of(name)
+
+  if rock then
+    return json(`{rock_url(rock)}/{encode(version)}/files`)
+  end
+
+  return json(`{API}/v1/packages/{name}/{encode(version)}/files?target={encode(target)}`)
+end

@@ -1,0 +1,459 @@
+-- Picks the versions to install from the manifest, the lock, and the
+-- registry's package answers. One version for each package, as embr's
+-- tree holds one folder for each: the newest that meets every
+-- requirement on it, or the locked one while it still does.
+
+import type { Project, Spec } from './manifest'
+import * as semver from './semver'
+
+--- A dependency entry of a package answer, as the registry sends it.
+export type Raw = { [string]: unknown }
+
+--- One release of a package version, from `GET /v1/packages/{name}`.
+export type Release = {
+  version: string,
+  --- The target ID of the key, such as `roblox-alloy`.
+  target: string,
+  yanked: boolean,
+  dependencies: { [string]: Raw },
+  optional: { [string]: Raw },
+  gated: { [string]: Raw },
+  features: { [string]: { string } },
+}
+
+--- A package to install.
+export type Pick = {
+  name: string,
+  version: string,
+  target: string,
+  --- The folder under `.ember`, as embr names it: `scope_name`.
+  folder: string,
+  --- Its own dependencies: alias -> package name.
+  links: { [string]: string },
+}
+
+--- A top-level link: `<place>/<alias>` to the main of a package. `place`
+--- is `shared`, `server`, or `dev`.
+export type Root = { alias: string, name: string, place: string, entry: string? }
+
+--- What to install.
+export type Plan = { picks: { [string]: Pick }, roots: { Root } }
+
+--- Reads the releases of one package; the caller fetches and caches.
+export type Fetch = (name: string) -> { Release }
+
+-- The requirements and features that the tree puts on one package.
+type Want = {
+  requirements: { { text: string, from: string } },
+  features: { [string]: boolean },
+  default_features: boolean,
+  place: string,
+}
+
+-- The target IDs a place takes, best first. A package for another
+-- language ships its build as Luau, so it fits too. `shared` and
+-- `server` are the names from before the renames. A plain Luau package
+-- comes last, as embr installs one in a Roblox project too.
+const ROBLOX = [ 'roblox', 'shared', 'roblox-alloy', 'roblox-loom', 'roblox-luwu', 'luau' ]
+const SERVER = [ 'roblox_server', 'server', 'roblox_server-alloy', 'roblox_server-loom', 'roblox_server-luwu' ]
+
+local function targets_for(place: string) -> { string }
+  return if place == 'server' then SERVER:concat(ROBLOX) else ROBLOX
+end
+
+-- A dependency entry of a package answer as a spec. An entry of another
+-- index (wally, pesde) has `index`, and gives no name: a place cannot
+-- install it.
+local function spec_of(entry: Raw) -> Spec
+  const name = if entry.name is string and entry.index == nil then entry.name else ''
+
+  return {
+    name = name,
+    version = if entry.version is string then entry.version else '^',
+    target = 'roblox',
+    optional = entry.optional is boolean and entry.optional,
+    features = if entry.features is table then entry.features :: { string } else {},
+    default_features = not (entry['default-features'] is boolean) or entry['default-features'] :: boolean,
+  }
+end
+
+-- The requirements of a want, parsed. An error names one that does not
+-- parse.
+local function requirements_of(entry: Want?) -> { semver.Requirement }
+  const parsed: { semver.Requirement } = {}
+
+  for _, item in (if entry then entry.requirements else {}) do
+    table.insert(parsed, semver.requirement(item.text) or error(`{item.from}: "{item.text}" is no version requirement`, 0))
+  end
+
+  return parsed
+end
+
+-- Whether a release fits a place and meets every requirement.
+local function fits(release: Release, order: { string }, requirements: { semver.Requirement }) -> boolean
+  const version = semver.parse(release.version)
+
+  if version == nil or table.find(order, release.target) == nil then
+    return false
+  end
+
+  for _, req in requirements do
+    if not semver.matches(req, version) then
+      return false
+    end
+  end
+
+  return true
+end
+
+-- Whether `a` beats `b`: the locked version first, then the newest that
+-- is not yanked, then the better target of one version.
+local function better(a: Release, b: Release?, locked: string?, order: { string }) -> boolean
+  if a.version ~= locked and a.yanked then
+    return false
+  elseif b == nil then
+    return true
+  elseif (a.version == locked) ~= (b.version == locked) then
+    return a.version == locked
+  end
+
+  const c = semver.compare(semver.parse(a.version) :: semver.Version, semver.parse(b.version) :: semver.Version)
+
+  return c > 0 or (c == 0 and (table.find(order, a.target) :: number) < (table.find(order, b.target) :: number))
+end
+
+-- The release to install. `entry` nil asks only whether the package
+-- resolves at all.
+local function choose(name: string, entry: Want?, locked: string?, fetch: Fetch) -> Release
+  const order = targets_for(if entry then entry.place else 'shared')
+  const requirements = requirements_of(entry)
+  local best: Release? = nil
+
+  for _, release in fetch(name) do
+    if fits(release, order, requirements) and better(release, best, locked, order) then
+      best = release
+    end
+  end
+
+  if best == nil then
+    const asked: { string } = {}
+
+    for _, item in (if entry then entry.requirements else {}) do
+      table.insert(asked, `{item.text} (from {item.from})`)
+    end
+
+    error(`no release of {name} for a place meets {table.concat(asked, ' and ')}`, 0)
+  end
+
+  return best :: Release
+end
+
+-- The features that are on for a release: the requested ones, `default`
+-- unless every request turned it off, and the features they name.
+local function enabled(release: Release, entry: Want) -> { string }
+  local on: { [string]: boolean } = {}
+  const stack: { string } = {}
+
+  for feature in entry.features do
+    table.insert(stack, feature)
+  end
+
+  if entry.default_features and release.features.default then
+    table.insert(stack, 'default')
+  end
+
+  while #stack > 0 do
+    const feature = table.remove(stack) :: string
+
+    if not on[feature] and release.features[feature] then
+      on[feature] = true
+
+      for _, item in release.features[feature] do
+        table.insert(stack, item)
+      end
+    end
+  end
+
+  const list: { string } = {}
+
+  for feature in on do
+    table.insert(list, feature)
+  end
+
+  table.sort(list)
+
+  return list
+end
+
+type Child = { alias: string, spec: Spec, optional: boolean }
+
+-- The dependencies that a release installs: the plain ones, the ones an
+-- enabled feature names (`alias` or `alias/feature`), and the optional
+-- ones.
+local function children_of(release: Release, features: { string }) -> { Child }
+  local on: { [string]: boolean } = {}
+
+  for _, feature in features do
+    for _, item in release.features[feature] or {} do
+      on[item:split('/')[1]] = true
+    end
+  end
+
+  const children: { Child } = {}
+
+  for alias, raw in release.dependencies do
+    table.insert(children, { alias = alias, spec = spec_of(raw), optional = false })
+  end
+
+  for alias, raw in release.gated do
+    if on[alias] then
+      table.insert(children, { alias = alias, spec = spec_of(raw), optional = raw.optional is boolean and raw.optional })
+    end
+  end
+
+  for alias, raw in release.optional do
+    table.insert(children, { alias = alias, spec = spec_of(raw), optional = true })
+  end
+
+  return children
+end
+
+-- The resolver's state while the queue runs.
+type State = {
+  project: Project,
+  lock: { [string]: string },
+  fetch: Fetch,
+  wants: { [string]: Want },
+  picks: { [string]: Pick },
+  --- What each pick was made from, so a package that a new requirement
+  --- leaves as it was is not walked again.
+  made: { [string]: string },
+  --- The alias path to each package, for the overrides of its own
+  --- dependencies, such as `Traits.Promise`.
+  paths: { [string]: string },
+  queue: { string },
+}
+
+-- Records one requirement on `spec.name` and queues the package.
+local function want(state: State, spec: Spec, from: string, place: string) -> ()
+  if spec.name:find('/') == nil then
+    error(`{from}: "{spec.name}" is no scope/name`, 0)
+  end
+
+  if state.wants[spec.name] == nil then
+    state.wants[spec.name] = { requirements = {}, features = {}, default_features = false, place = place }
+  end
+
+  local entry = state.wants[spec.name]
+  table.insert(entry.requirements, { text = spec.version, from = from })
+  entry.default_features = entry.default_features or spec.default_features
+
+  for _, feature in spec.features do
+    entry.features[feature] = true
+  end
+
+  table.insert(state.queue, spec.name)
+end
+
+-- The spec that an override of `path` puts in place of `spec`.
+local function overridden(state: State, path: string, spec: Spec) -> Spec
+  const replacement = state.project.overrides[path]
+
+  if replacement == nil then
+    return spec
+  end
+
+  -- `"Traits.Promise" = "Promise"` names another alias of the project.
+  const project = state.project
+
+  return project.dependencies[replacement.name] or project.dev_dependencies[replacement.name] or replacement
+end
+
+-- One package off the queue: pick its release, and queue the
+-- dependencies that the release installs.
+local function step(state: State, name: string) -> ()
+  const entry = state.wants[name]
+  const chosen = choose(name, entry, state.lock[name], state.fetch)
+  const features = enabled(chosen, entry)
+  const key = `{chosen.version} {chosen.target} {table.concat(features, ',')}`
+
+  if state.made[name] == key then
+    return
+  end
+
+  state.made[name] = key
+
+  const pick: Pick = {
+    name = name,
+    version = chosen.version,
+    target = chosen.target,
+    folder = name:gsub('/', '_'),
+    links = {},
+  }
+  state.picks[name] = pick
+
+  for _, child in children_of(chosen, features) do
+    const path = `{state.paths[name] or name}.{child.alias}`
+    const spec = overridden(state, path, child.spec)
+
+    if spec.name == '' then
+      if not child.optional then
+        error(`{name} needs {child.alias} from another index; a Studio install takes Ember packages only`, 0)
+      end
+    elseif not child.optional or Result.pcall(choose, spec.name, nil, nil, state.fetch):is_ok() then
+      pick.links[child.alias] = spec.name
+      state.paths[spec.name] = state.paths[spec.name] or path
+      want(state, spec, `{name} ({child.alias})`, entry.place)
+    end
+  end
+end
+
+--- The plan for `project`. `lock` maps a package to its locked version.
+--- An error names the package and the requirement it cannot meet.
+export function resolve(project: Project, lock: { [string]: string }, fetch: Fetch) -> Plan
+  const state: State = {
+    project = project,
+    lock = lock,
+    fetch = fetch,
+    wants = {},
+    picks = {},
+    made = {},
+    paths = {},
+    queue = {},
+  }
+  const roots: { Root } = {}
+
+  for _, group in [ { place = 'shared', specs = project.dependencies }, { place = 'dev', specs = project.dev_dependencies } ] do
+    for alias, spec in group.specs do
+      const place = if group.place == 'dev' then 'dev' elseif spec.target == 'roblox_server' then 'server' else 'shared'
+      table.insert(roots, { alias = alias, name = spec.name, place = place, entry = spec.entry })
+      state.paths[spec.name] = state.paths[spec.name] or alias
+      want(state, spec, alias, place)
+    end
+  end
+
+  local steps = 0
+
+  while #state.queue > 0 do
+    steps += 1
+
+    if steps > 2000 then
+      error('the dependencies did not settle; look for a requirement that two packages fight over', 0)
+    end
+
+    step(state, table.remove(state.queue, 1) :: string)
+  end
+
+  return { picks = state.picks, roots = roots }
+end
+
+-- A table field of a package answer, or an empty table.
+@allow(explicit_any)
+local function field(value: { [string]: unknown }, key: string) -> any
+  const found = value[key]
+
+  return if found is table then found else {}
+end
+
+--- The releases of a `GET /v1/packages/{name}` answer.
+export function releases_of(answer: { [string]: unknown }) -> { Release }
+  const list: { Release } = {}
+  const versions = answer.versions
+
+  if not (versions is table) then
+    return list
+  end
+
+  for key, value in versions do
+    if not (key is string) or not (value is table) then
+      continue
+    end
+
+    const version, target = key:match('^(%S+) (%S+)$')
+
+    if version and target then
+      table.insert(list, {
+        version = version,
+        target = target,
+        yanked = value.yanked is boolean and value.yanked,
+        dependencies = field(value, 'dependencies'),
+        optional = field(value, 'optional-dependencies'),
+        gated = field(value, 'feature-dependencies'),
+        features = field(value, 'features'),
+      })
+    end
+  end
+
+  return list
+end
+
+-- A release for the tests.
+local function sample(version: string, target: string, deps: { [string]: Raw }?) -> Release
+  return {
+    version = version,
+    target = target,
+    yanked = false,
+    dependencies = deps or {},
+    optional = {},
+    gated = {},
+    features = {},
+  }
+end
+
+-- A spec for the tests.
+local function wanted(name: string, version: string) -> Spec
+  return { name = name, version = version, target = 'roblox', optional = false, features = {}, default_features = true }
+end
+
+-- The package answers of the tests.
+const SAMPLES: { [string]: { Release } } = {
+  ['a/app'] = [ sample('1.0.0', 'roblox', { core = { name = 'a/core', version = '^1.1' } }) ],
+  ['a/core'] = [
+    sample('1.0.0', 'roblox'),
+    sample('1.2.0', 'roblox'),
+    sample('1.3.0-rc.1', 'roblox'),
+    sample('2.0.0', 'roblox'),
+  ],
+  ['a/ui'] = [ sample('0.1.0', 'roblox-alloy'), sample('0.1.0', 'lune') ],
+}
+
+local function from_samples(name: string) -> { Release }
+  return SAMPLES[name] or error(`no package {name}`, 0)
+end
+
+local function project_of(deps: { [string]: Spec }) -> Project
+  return { dependencies = deps, dev_dependencies = {}, overrides = {} }
+end
+
+@test namespace Resolve
+  public function the_newest_that_meets_every_requirement() -> ()
+    const plan = resolve(project_of({ app = wanted('a/app', '^'), core = wanted('a/core', '^1') }), {}, from_samples)
+    $assert(plan.picks['a/core'].version == '1.2.0')
+    $assert(plan.picks['a/app'].links.core == 'a/core')
+    $assert(plan.picks['a/core'].folder == 'a_core')
+    $assert(#plan.roots == 2)
+  end
+
+  public function the_lock_holds_while_it_fits() -> ()
+    const plan = resolve(project_of({ core = wanted('a/core', '^1') }), { ['a/core'] = '1.0.0' }, from_samples)
+    $assert(plan.picks['a/core'].version == '1.0.0')
+    const moved = resolve(project_of({ core = wanted('a/core', '^2') }), { ['a/core'] = '1.0.0' }, from_samples)
+    $assert(moved.picks['a/core'].version == '2.0.0')
+  end
+
+  public function a_place_takes_a_build_of_another_language() -> ()
+    const plan = resolve(project_of({ ui = wanted('a/ui', '^') }), {}, from_samples)
+    $assert(plan.picks['a/ui'].target == 'roblox-alloy')
+  end
+
+  public function a_requirement_no_release_meets_is_an_error() -> ()
+    const ran = Result.pcall(resolve, project_of({ app = wanted('a/app', '^'), core = wanted('a/core', '^2') }), {}, from_samples)
+    $assert(ran:is_err())
+  end
+
+  public function an_override_replaces_a_dependency_of_a_dependency() -> ()
+    const project = project_of({ app = wanted('a/app', '^') })
+    project.overrides['app.core'] = wanted('a/core', '=1.0.0')
+    $assert(resolve(project, {}, from_samples).picks['a/core'].version == '1.0.0')
+  end
+end

@@ -1,0 +1,22 @@
+{
+  "name": "Ember",
+  "tree": {
+    "$path": "build",
+    "Packages": {
+      "$className": "Folder",
+      "svelte-aly": { "$path": "packages/roblox/svelte-aly.luau" },
+      "prospero": { "$path": "packages/roblox/prospero.luau" },
+      ".ember": {
+        "$className": "Folder",
+        "alloy_svelte-aly": {
+          "$className": "Folder",
+          "build": { "$path": "packages/roblox/.ember/alloy_svelte-aly/build" }
+        },
+        "teamfireworks_prospero": {
+          "$className": "Folder",
+          "src": { "$path": "packages/roblox/.ember/teamfireworks_prospero/src" }
+        }
+      }
+    }
+  }
+}

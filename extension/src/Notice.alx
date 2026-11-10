@@ -1,0 +1,19 @@
+--[[
+  A quiet message in the middle of the list: no results, or a request
+  that failed.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+
+--- The props of [Notice].
+export type NoticeProps = { icon: string, title: string, body: string? }
+
+--- An icon, a title, and a line under it.
+export function Notice(props: NoticeProps) -> Instance
+  return <Frame ClassName="ghost w-full h-auto flex-col items-center gap-2 py-10 px-6">
+    <Icon name={props.icon} size={28} />
+    <TextLabel ClassName="ghost w-full h-5 text-sm font-bold text-zinc-200">{props.title}</TextLabel>
+    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-wrap">{props.body or ''}</TextLabel>
+  </Frame>
+end

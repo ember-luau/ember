@@ -1,0 +1,38 @@
+--[[
+  The top of the panel: the brand, the search, and the Packages and Tools
+  switch.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+import { SearchField } from './SearchField'
+import { Tab } from './Tab'
+import { BRAND } from './theme'
+
+--- The props of [Header].
+export type HeaderProps = {
+  --- The open tab: `'packages'`, `'tools'`, or `'project'`.
+  tab: () -> string,
+  on_tab: (string) -> (),
+  on_query: (string) -> (),
+}
+
+--- The brand row, the search field, and the switch.
+export function Header(props: HeaderProps) -> Instance
+  return <Frame ClassName="w-full h-auto bg-zinc-950 flex-col gap-3 px-4 pt-4 pb-3">
+    <Frame ClassName="ghost w-full h-6 flex items-center gap-2">
+      <Icon name="fire" weight="fill" size={20} color={BRAND} />
+      <TextLabel ClassName="ghost w-auto h-6 text-base font-bold text-zinc-100">ember</TextLabel>
+      <Frame ClassName="ghost h-6 fill" />
+      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-600">emberpm.dev</TextLabel>
+    </Frame>
+
+    <SearchField on_change={props.on_query} />
+
+    <Frame ClassName="card w-full h-9 flex gap-1 p-1">
+      <Tab label="Packages" icon="package" active={function() return props.tab() == 'packages' end} on_select={function() props.on_tab('packages') end} />
+      <Tab label="Tools" icon="wrench" active={function() return props.tab() == 'tools' end} on_select={function() props.on_tab('tools') end} />
+      <Tab label="Project" icon="file-code" active={function() return props.tab() == 'project' end} on_select={function() props.on_tab('project') end} />
+    </Frame>
+  </Frame>
+end

@@ -1,0 +1,251 @@
+-- Versions and version requirements, as embr reads them in ember.toml:
+-- `^1.2.0`, `~1.2`, `=2.0.0`, `>=4, <5`, and a bare `^`, `*`, or `''`
+-- for the newest. A bare version is a caret requirement, as in Cargo.
+
+--- A parsed version.
+export type Version = {
+  major: number,
+  minor: number,
+  patch: number,
+  --- The prerelease part, such as `{ 'rc', '1' }`, or empty.
+  pre: { string },
+  text: string,
+}
+
+--- `1.2.3` or `1.2.3-rc.1`, with any build part dropped. Nil for any
+--- other text.
+export function parse(text: string) -> Version?
+  const core = text:split('+')[1]
+  const dash = core:find('-', 1, true)
+  const main = if dash then core:sub(1, dash - 1) else core
+  const pre = if dash then core:sub(dash + 1):split('.') else {}
+  const major, minor, patch = main:match('^(%d+)%.(%d+)%.(%d+)$')
+
+  if not major then
+    return nil
+  end
+
+  return {
+    major = tonumber(major) :: number,
+    minor = tonumber(minor) :: number,
+    patch = tonumber(patch) :: number,
+    pre = pre,
+    text = text,
+  }
+end
+
+-- A prerelease sorts below its release; its parts compare one by one, a
+-- number below a word.
+local function compare_pre(a: { string }, b: { string }) -> number
+  if #a == 0 or #b == 0 then
+    return if #a == #b then 0 elseif #a == 0 then 1 else -1
+  end
+
+  for i = 1, math.max(#a, #b) do
+    const x, y = a[i], b[i]
+
+    if x == nil then
+      return -1
+    elseif y == nil then
+      return 1
+    end
+
+    const nx, ny = tonumber(x), tonumber(y)
+
+    if nx and ny then
+      if nx ~= ny then
+        return if nx < ny then -1 else 1
+      end
+    elseif nx then
+      return -1
+    elseif ny then
+      return 1
+    elseif x ~= y then
+      return if x < y then -1 else 1
+    end
+  end
+
+  return 0
+end
+
+--- -1, 0, or 1 as `a` is below, equal to, or above `b`.
+export function compare(a: Version, b: Version) -> number
+  for _, pair in [ { a.major, b.major }, { a.minor, b.minor }, { a.patch, b.patch } ] do
+    if pair[1] ~= pair[2] then
+      return if pair[1] < pair[2] then -1 else 1
+    end
+  end
+
+  return compare_pre(a.pre, b.pre)
+end
+
+type Bound = { op: string, version: Version }
+
+-- `1`, `1.2`, or `1.2.3`, with the parts it names.
+local function partial(text: string) -> (Version?, number)
+  const parts = text:split('-')[1]:split('.')
+  const numbers: { number } = {}
+
+  for _, part in parts do
+    const n = tonumber(part)
+
+    if n == nil or part:find('[^%d]') then
+      return nil, 0
+    end
+
+    table.insert(numbers, n)
+  end
+
+  if #numbers == 0 or #numbers > 3 then
+    return nil, 0
+  end
+
+  const dash = text:find('-', 1, true)
+
+  return {
+    major = numbers[1],
+    minor = numbers[2] or 0,
+    patch = numbers[3] or 0,
+    pre = if dash then text:sub(dash + 1):split('.') else {},
+    text = text,
+  }, #numbers
+end
+
+local function at(major: number, minor: number, patch: number) -> Version
+  return { major = major, minor = minor, patch = patch, pre = {}, text = '' }
+end
+
+-- The first version past a caret range: the first part that is not
+-- zero may not change. `given` counts the parts the text named.
+local function caret_top(low: Version, given: number) -> Version
+  if low.major > 0 or given == 1 then
+    return at(low.major + 1, 0, 0)
+  elseif low.minor > 0 or given == 2 then
+    return at(0, low.minor + 1, 0)
+  end
+
+  return at(0, 0, low.patch + 1)
+end
+
+-- The bounds of one comparator, or nil when it does not parse.
+local function bounds(item: string) -> { Bound }?
+  const op, rest = item:match('^([%^~=<>]*)%s*(.*)$')
+
+  if op == nil or rest == nil then
+    return nil
+  end
+
+  if rest == '' or rest == '*' then
+    return if op == '' or op == '^' or op == '*' then {} else nil
+  end
+
+  const low, given = partial(rest)
+
+  if low == nil then
+    return nil
+  end
+
+  if op == '' or op == '^' then
+    return { { op = '>=', version = low }, { op = '<', version = caret_top(low, given) } }
+  elseif op == '~' then
+    const high = if given == 1 then at(low.major + 1, 0, 0) else at(low.major, low.minor + 1, 0)
+
+    return { { op = '>=', version = low }, { op = '<', version = high } }
+  elseif op == '=' then
+    if given == 3 then
+      return { { op = '=', version = low } }
+    end
+
+    return bounds(`~{rest}`)
+  elseif op == '>=' or op == '>' or op == '<=' or op == '<' then
+    return { { op = op, version = low } }
+  end
+
+  return nil
+end
+
+--- A requirement, ready for [matches]. Nil when it does not parse.
+export type Requirement = { bounds: { Bound }, pre: boolean }
+
+--- Reads a requirement such as `^1.2.0` or `>=4, <5`.
+export function requirement(text: string?) -> Requirement?
+  const all: { Bound } = {}
+  const trimmed = (text or ''):gsub('^%s+', ''):gsub('%s+$', '')
+
+  for _, item in trimmed:split(',') do
+    const found = bounds((item:gsub('^%s+', ''):gsub('%s+$', '')))
+
+    if found == nil then
+      return nil
+    end
+
+    for _, bound in found do
+      table.insert(all, bound)
+    end
+  end
+
+  return { bounds = all, pre = trimmed:find('-', 1, true) ~= nil }
+end
+
+--- Whether `version` meets `req`. A prerelease meets only a requirement
+--- that names a prerelease itself.
+export function matches(req: Requirement, version: Version) -> boolean
+  if #version.pre > 0 and not req.pre then
+    return false
+  end
+
+  for _, bound in req.bounds do
+    const c = compare(version, bound.version)
+    const ok = if bound.op == '>=' then c >= 0
+      elseif bound.op == '>' then c > 0
+      elseif bound.op == '<=' then c <= 0
+      elseif bound.op == '<' then c < 0
+      else c == 0
+
+    if not ok then
+      return false
+    end
+  end
+
+  return true
+end
+
+-- Whether the text of a version meets the text of a requirement.
+local function meets(req: string, version: string) -> boolean
+  return matches(requirement(req) :: Requirement, parse(version) :: Version)
+end
+
+@test namespace Semver
+
+  public function carets_keep_the_first_part_that_is_not_zero() -> ()
+    $assert(meets('^1.2.0', '1.9.0'))
+    $assert(not meets('^1.2.0', '2.0.0'))
+    $assert(not meets('^1.2.0', '1.1.9'))
+    $assert(meets('^0.2', '0.2.7'))
+    $assert(not meets('^0.2', '0.3.0'))
+    $assert(meets('^0.0.3', '0.0.3'))
+    $assert(not meets('^0.0.3', '0.0.4'))
+    $assert(meets('1.2', '1.4.0'))
+  end
+
+  public function the_newest_and_the_other_forms() -> ()
+    for _, req in [ '^', '*', '' ] do
+      $assert(meets(req, '9.1.0'))
+    end
+    $assert(meets('~1.2', '1.2.9'))
+    $assert(not meets('~1.2', '1.3.0'))
+    $assert(meets('=2.0.0', '2.0.0'))
+    $assert(not meets('=2.0.0', '2.0.1'))
+    $assert(meets('>=4, <5', '4.5.0'))
+    $assert(not meets('>=4, <5', '5.0.0'))
+    $assert(requirement('^x') == nil)
+  end
+
+  public function a_prerelease_needs_a_prerelease_requirement() -> ()
+    $assert(not meets('^1.0.0', '1.1.0-rc.1'))
+    $assert(meets('^1.0.0-rc.1', '1.0.0-rc.2'))
+    $assert(compare(parse('1.0.0-rc.1') :: Version, parse('1.0.0') :: Version) == -1)
+    $assert(compare(parse('1.0.0-rc.2') :: Version, parse('1.0.0-rc.10') :: Version) == -1)
+    $assert(compare(parse('1.0.0-alpha') :: Version, parse('1.0.0-1') :: Version) == 1)
+  end
+end

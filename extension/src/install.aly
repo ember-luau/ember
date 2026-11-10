@@ -1,0 +1,286 @@
+-- Writes a plan into the place, in embr's layout so that a package's own
+-- string requires land as they do on disk:
+--
+--   <root>/<alias>                        link: require("./.ember/<folder>/<main>")
+--   <root>/.ember/<folder>/...            the package's sources
+--   <root>/.ember/<folder>/packages/roblox/<alias>
+--                                         its own links: require("../../../<dep>/<main>")
+--   <root>/.ember/<folder>/<alias>        the same link where a Wally-era package
+--                                         climbs one level past its module for it
+--
+-- The roots are ReplicatedStorage.Packages, ServerStorage.Packages for
+-- `target = "roblox_server"`, and ServerStorage.DevPackages. The plugin
+-- owns `.ember` and the links it marks with the `Ember` attribute; any
+-- other child of a root stays.
+
+import ChangeHistoryService from '@game/ChangeHistoryService'
+import ReplicatedStorage from '@game/ReplicatedStorage'
+import ServerStorage from '@game/ServerStorage'
+import { package_files, type Files } from './api'
+import type { Pick, Plan } from './resolve'
+
+-- A file tree before it becomes instances.
+type Node = { class: string, source: string?, children: { [string]: Node } }
+
+local function node() -> Node
+  return { class = 'Folder', source = nil, children = {} }
+end
+
+-- The instance name and class of a source file: `a.server.luau` is the
+-- Script `a`, `init.luau` is its folder's own source.
+local function file_kind(file: string) -> (string, string)
+  const stem = file:gsub('%.luau$', ''):gsub('%.lua$', '')
+
+  if stem:match('%.server$') then
+    return stem:sub(1, -8), 'Script'
+  elseif stem:match('%.client$') then
+    return stem:sub(1, -8), 'LocalScript'
+  end
+
+  return stem, 'ModuleScript'
+end
+
+--- The tree of one package's sources. A folder with an `init` file is
+--- that module, as Rojo and embr read it.
+export function tree_of(files: { [string]: string }) -> Node
+  const root = node()
+
+  for path, source in files do
+    const parts = path:split('/')
+    local at = root
+
+    for i = 1, #parts - 1 do
+      at.children[parts[i]] = at.children[parts[i]] or node()
+      at = at.children[parts[i]]
+    end
+
+    const name, class = file_kind(parts[#parts])
+
+    if name == 'init' then
+      at.class = class
+      at.source = source
+    else
+      local leaf = at.children[name] or node()
+      leaf.class = class
+      leaf.source = source
+      at.children[name] = leaf
+    end
+  end
+
+  return root
+end
+
+local function instance_of(name: string, tree: Node) -> Instance
+  local made = new Instance(tree.class)
+  made.Name = name
+
+  if tree.source and made:IsA('ModuleScript') then
+    (made :: ModuleScript).Source = tree.source
+  elseif tree.source and made:IsA('Script') then
+    (made :: Script).Source = tree.source
+  end
+
+  for child_name, child in tree.children do
+    instance_of(child_name, child).Parent = made
+  end
+
+  return made
+end
+
+-- The folder of a package's own links that embr writes for a dependency
+-- of this target: `packages/<env>/<alias>`.
+local function env_folder(target: string) -> string
+  if target:sub(1, 13) == 'roblox_server' or target == 'server' then
+    return 'server'
+  elseif target:sub(1, 4) == 'luau' then
+    return 'luau'
+  end
+
+  return 'roblox'
+end
+
+local function link(name: string, path: string) -> ModuleScript
+  local module = new Instance('ModuleScript')
+  module.Name = name
+  module.Source = `-- Written by the Ember plugin.\nreturn require("{path}")\n`
+
+  return module
+end
+
+--- `main` as the tail of a require path: empty means the folder itself.
+local function under(folder: string, main: string) -> string
+  return if main == '' then folder else `{folder}/{main}`
+end
+
+-- The packages a place needs: its roots and all they reach.
+local function closure(plan: Plan, place: string) -> { [string]: boolean }
+  local seen: { [string]: boolean } = {}
+  const stack: { string } = {}
+
+  for _, root in plan.roots do
+    if root.place == place then
+      table.insert(stack, root.name)
+    end
+  end
+
+  while #stack > 0 do
+    const name = table.remove(stack) :: string
+
+    if not seen[name] then
+      seen[name] = true
+
+      for _, dependency in plan.picks[name].links do
+        table.insert(stack, dependency)
+      end
+    end
+  end
+
+  return seen
+end
+
+-- A package's own links, as embr writes them under `packages/<env>`, and
+-- the Wally-era links beside its module.
+local function write_links(package: Instance, pick: Pick, plan: Plan, files: { [string]: Files }) -> ()
+  const main = files[pick.name].main
+
+  if next(pick.links) then
+    local packages = new Instance('Folder')
+    packages.Name = 'packages'
+    packages.Parent = package
+
+    for alias, dependency in pick.links do
+      const target = under(plan.picks[dependency].folder, files[dependency].main)
+      const env = env_folder(plan.picks[dependency].target)
+
+      -- A package from before the rename of `shared` to `roblox` still
+      -- requires `packages/shared/<alias>`, which embr rewrites on
+      -- disk; here a second link folder serves it.
+      for _, folder_name in (if env == 'roblox' then [ 'roblox', 'shared' ] else [ env ]) do
+        local holder = packages:FindFirstChild(folder_name)
+
+        if holder == nil then
+          holder = new Instance('Folder')
+          holder.Name = folder_name
+          holder.Parent = packages
+        end
+
+        link(alias, `../../../{target}`).Parent = holder
+      end
+
+      -- A Wally-era package climbs one level past its module for a
+      -- dependency, so the link sits there too, when nothing holds the
+      -- name.
+      if main ~= '' and main:find('/') == nil and package:FindFirstChild(alias) == nil then
+        link(alias, `../{target}`).Parent = package
+      end
+    end
+  end
+end
+
+-- The `.ember` folder of one place, with each package and its links.
+local function ember_folder(plan: Plan, names: { [string]: boolean }, files: { [string]: Files }) -> Folder
+  local folder = new Instance('Folder')
+  folder.Name = '.ember'
+
+  for name in names do
+    const pick: Pick = plan.picks[name]
+    local package = instance_of(pick.folder, tree_of(files[name].files))
+    const main = files[name].main
+
+    write_links(package, pick, plan, files)
+    package.Parent = folder
+  end
+
+  return folder
+end
+
+-- A root folder, made when the place has none.
+local function root_of(parent: Instance, name: string) -> Instance
+  local found = parent:FindFirstChild(name)
+
+  if found == nil then
+    found = new Instance('Folder')
+    found.Name = name
+    found.Parent = parent
+  end
+
+  return found :: Instance
+end
+
+const PLACES = [
+  { place = 'shared', parent = ReplicatedStorage, name = 'Packages' },
+  { place = 'server', parent = ServerStorage, name = 'Packages' },
+  { place = 'dev', parent = ServerStorage, name = 'DevPackages' },
+]
+
+--- Fetches the sources of every pick, then writes each place in one
+--- undoable step. `progress` hears each package as it arrives.
+export function install(plan: Plan, progress: (string) -> ()) -> number
+  local files: { [string]: Files } = {}
+  local count = 0
+
+  for name, pick in plan.picks do
+    progress(`Fetching {name}@{pick.version}`)
+    files[name] = package_files(name, pick.version, pick.target)
+    count += 1
+  end
+
+  const recording = ChangeHistoryService:TryBeginRecording('Install Ember packages')
+
+  for _, where in PLACES do
+    const names = closure(plan, where.place)
+    const existing = where.parent:FindFirstChild(where.name)
+
+    if next(names) == nil and existing == nil then
+      continue
+    end
+
+    const root = root_of(where.parent, where.name)
+
+    for _, child in root:GetChildren() do
+      if child.Name == '.ember' or child:GetAttribute('Ember') then
+        child:Destroy()
+      end
+    end
+
+    if next(names) then
+      ember_folder(plan, names, files).Parent = root
+    end
+
+    for _, entry in plan.roots do
+      if entry.place == where.place then
+        const main = if entry.entry then entry.entry:gsub('%.luau?$', ''):gsub('/init$', '') else files[entry.name].main
+        local made = link(entry.alias, `./.ember/{under(plan.picks[entry.name].folder, main)}`)
+        made:SetAttribute('Ember', true)
+        made.Parent = root
+      end
+    end
+  end
+
+  if recording then
+    ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+  end
+
+  return count
+end
+
+@test namespace Install
+  public function a_folder_with_an_init_file_is_that_module() -> ()
+    const tree = tree_of({
+      ['src/init.luau'] = 'return 1',
+      ['src/util.lua'] = 'return 2',
+      ['src/run.server.luau'] = 'print(1)',
+      ['README.luau'] = 'return 3',
+    })
+    const src = tree.children.src
+    $assert(src.class == 'ModuleScript' and src.source == 'return 1')
+    $assert(src.children.util.class == 'ModuleScript')
+    $assert(src.children.run.class == 'Script')
+    $assert(tree.class == 'Folder')
+  end
+
+  public function a_root_init_makes_the_package_a_module() -> ()
+    const tree = tree_of({ ['init.luau'] = 'return {}', ['a.luau'] = 'return 1' })
+    $assert(tree.class == 'ModuleScript' and tree.children.a ~= nil)
+  end
+end

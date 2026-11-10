@@ -1,0 +1,190 @@
+--[[
+  The place's own packages: ember.luau, what it asks for, what the lock
+  holds, and the Install button. An install reads a fresh copy of the
+  manifest, resolves, fetches the sources, and writes the Packages
+  folders in one undoable step.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { package_answer } from './api'
+import { install } from './install'
+import * as manifest from './manifest'
+import { Notice } from './Notice'
+import { releases_of, resolve, type Release } from './resolve'
+import { BRAND } from './theme'
+import { Icon } from './Icon'
+
+--- The props of [ProjectView].
+export type ProjectViewProps = {
+  --- Opens a script in Studio's editor.
+  open_script: (Instance) -> (),
+}
+
+type Row = { alias: string, name: string, version: string, place: string, locked: string? }
+
+-- The rows of the dependencies table, by alias.
+local function rows_of(project: manifest.Project, lock: { [string]: string }) -> { Row }
+  const list: { Row } = {}
+
+  for _, group in [ { place = 'shared', specs = project.dependencies }, { place = 'dev', specs = project.dev_dependencies } ] do
+    for alias, spec in group.specs do
+      const place = if group.place == 'dev' then 'dev' elseif spec.target == 'roblox_server' then 'server' else 'shared'
+      table.insert(list, { alias = alias, name = spec.name, version = spec.version, place = place, locked = lock[spec.name] })
+    end
+  end
+
+  table.sort(list, function(a: Row, b: Row) return a.alias < b.alias end)
+
+  return list
+end
+
+-- The full install, in the caller's thread. Gives the lock it wrote.
+local function run_install(source: ModuleScript, progress: (string) -> ()) -> { [string]: string }
+  manifest.write_factory(source)
+  const project = manifest.read(source)
+  local cache: { [string]: { Release } } = {}
+
+  progress('Resolving')
+  const plan = resolve(project, manifest.read_lock(source), function(name: string) -> { Release }
+    if cache[name] == nil then
+      progress(`Reading {name}`)
+      cache[name] = releases_of(package_answer(name))
+    end
+
+    return cache[name]
+  end)
+
+  install(plan, progress)
+
+  local lock: { [string]: string } = {}
+
+  for name, pick in plan.picks do
+    lock[name] = pick.version
+  end
+
+  manifest.write_lock(source, lock)
+
+  return lock
+end
+
+--- The Project tab.
+export function ProjectView(props: ProjectViewProps) -> Instance
+  local current = $state(manifest.find())
+  local deps: { Row } = $state([])
+  local status = $state('')
+  local problem = $state(nil :: string?)
+  local busy = $state(false)
+
+  local function refresh()
+    const found = manifest.find()
+    current = found
+    problem = nil
+
+    if found then
+      match Result.pcall(manifest.read, found) with
+        case Ok(project) then deps = rows_of(project, manifest.read_lock(found))
+        case Err(message) then problem = message
+      end
+    else
+      deps = []
+    end
+  end
+
+  refresh()
+
+  -- The list reads `deps` as a plain value; the branch builds it again
+  -- after each refresh.
+  local function dependency_list() -> Instance
+    return DependencyList({ rows = deps })
+  end
+
+  local function set_up()
+    const made = manifest.create()
+    refresh()
+    props.open_script(made)
+  end
+
+  local function start_install()
+    const found = current
+
+    if busy or found == nil then
+      return
+    end
+
+    busy = true
+    problem = nil
+    status = 'Starting'
+
+    task.spawn(function()
+      match Result.pcall(run_install, found, function(line: string) status = line end) with
+        case Ok(lock) then
+          local count = 0
+
+          for _ in lock do
+            count += 1
+          end
+
+          status = `Installed {count} {if count == 1 then 'package' else 'packages'}`
+        case Err(message) then
+          problem = message
+          status = ''
+      end
+
+      busy = false
+      refresh()
+    end)
+  end
+
+  return <ScrollingFrame
+    ClassName="ghost w-full fill scroll-y canvas-auto scrollbar-4 flex-col gap-3 p-4"
+    ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
+    BorderSizePixel={0}
+  >
+    {#if current == nil}
+      <Notice icon="file-code" title="No ember.luau yet" body="It lists the packages of this place, the way ember.toml does for a project on disk." />
+      <TextButton ClassName="w-full h-9 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors text-sm font-bold text-white no-auto-color" Text="Set up ember.luau" Activated={set_up} />
+    {:else}
+      <Frame ClassName="ghost w-full h-9 flex gap-2">
+        <TextButton ClassName="h-full fill rounded-lg bg-brand hover:bg-[#ff5533] transition-colors text-sm font-bold text-white no-auto-color" Text={function() return if busy then 'Installing' else 'Install' end} Activated={start_install} />
+        <TextButton ClassName="card w-auto h-full px-3 hover:bg-zinc-800 transition-colors text-sm text-zinc-200 no-auto-color" Text="Open ember.luau" Activated={function() props.open_script(current :: ModuleScript) end} />
+        <TextButton ClassName="card w-9 h-full hover:bg-zinc-800 transition-colors no-auto-color" Text="" Activated={refresh}>
+          <Icon name="arrow-clockwise" size={14} />
+        </TextButton>
+      </Frame>
+
+      {#if problem}
+        <Frame ClassName="w-full h-auto p-3 rounded-lg bg-brand/10 stroke stroke-brand/40 flex gap-2">
+          <Icon name="warning" size={14} color={BRAND} />
+          <TextLabel ClassName="ghost fill h-auto text-xs text-zinc-200 text-left text-wrap" Text={problem} />
+        </Frame>
+      {/if}
+
+      {#if status ~= ''}
+        <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate" Text={status} />
+      {/if}
+
+      {dependency_list()}
+    {/if}
+  </ScrollingFrame>
+end
+
+--- The dependencies of ember.luau, each with its locked version.
+export function DependencyList(props: { rows: { Row } }) -> Instance
+  return <Frame ClassName="ghost w-full h-auto flex-col gap-2">
+      <TextLabel ClassName="ghost w-full h-4 text-xs font-bold text-zinc-500 text-left">DEPENDENCIES</TextLabel>
+
+      {#each props.rows as row (row.alias)}
+        <Frame ClassName="card w-full h-auto p-3 flex-col gap-1">
+          <Frame ClassName="ghost w-full h-5 flex items-center gap-2">
+            <Icon name="package" weight="duotone" size={14} color={BRAND} />
+            <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-zinc-100">{row.alias}</TextLabel>
+            <Frame ClassName="ghost h-5 fill" />
+            <TextLabel ClassName="ghost w-auto h-5 text-xs font-mono text-zinc-400">{row.locked or 'not installed'}</TextLabel>
+          </Frame>
+          <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate">{row.name}  ·  {row.version}  ·  {row.place}</TextLabel>
+        </Frame>
+      {:else}
+        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-left text-wrap">ember.luau lists no packages. Open a package in the Packages tab and press Add to ember.luau, or write one in the file.</TextLabel>
+      {/each}
+  </Frame>
+end

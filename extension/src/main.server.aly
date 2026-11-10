@@ -1,0 +1,35 @@
+--[[
+  The plugin: a toolbar button that shows and hides the Ember panel, a
+  dock widget. The panel mounts the first time it opens, so Studio asks
+  for HTTP access only once the user wants it, not on each place load.
+]]
+
+import { mount } from '@packages/svelte-aly'
+import { App } from './App'
+
+const toolbar = plugin:CreateToolbar('Ember')
+local button = toolbar:CreateButton('Ember', 'Browse packages and tools on Ember', '', 'Ember')
+button.ClickableWhenViewportHidden = true
+
+const info = new DockWidgetPluginGuiInfo(Enum.InitialDockState.Right, false, false, 380, 640, 300, 360)
+local widget = plugin:CreateDockWidgetPluginGuiAsync('EmberBrowser', info)
+widget.Title = 'Ember'
+widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local mounted = false
+
+local function sync()
+  button:SetActive(widget.Enabled)
+
+  if widget.Enabled and not mounted then
+    mounted = true
+    mount(App, {
+      target = widget,
+      props = { open_script = function(script: Instance) plugin:OpenScript(script :: LuaSourceContainer) end },
+    })
+  end
+end
+
+button.Click:Connect(function() widget.Enabled = not widget.Enabled end)
+widget:GetPropertyChangedSignal('Enabled'):Connect(sync)
+sync()

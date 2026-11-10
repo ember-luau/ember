@@ -1,0 +1,39 @@
+--[[
+  The versions of a tool, newest first, each with its file count and
+  age, then the release notes of the newest one.
+]]
+
+import { create } from '@packages/svelte-aly'
+import type { ToolVersion } from './api'
+import { ago, rich } from './format'
+
+--- The versions of a tool, newest first, then the notes of the newest.
+export function ToolVersions(props: { list: { ToolVersion } }) -> Instance
+  const list = props.list
+
+  return <Frame ClassName="ghost w-full h-auto flex-col gap-4">
+      <Frame ClassName="ghost w-full h-auto flex-col gap-2">
+        <TextLabel ClassName="ghost w-full h-4 text-xs font-bold text-zinc-500 text-left">VERSIONS</TextLabel>
+        {#each list as version (version.version)}
+          <Frame ClassName="card w-full h-9 flex items-center gap-2 px-3">
+            <TextLabel ClassName="ghost w-auto h-4 text-xs font-mono text-zinc-200">{version.version}</TextLabel>
+            {#if version.prerelease}
+              <TextLabel ClassName="w-auto h-4 px-1.5 rounded bg-brand/15 text-xs text-brand">pre</TextLabel>
+            {/if}
+            <Frame ClassName="ghost h-4 fill" />
+            <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500">{string.format('%d files', #version.assets)}  ·  {ago(version.published_at)}</TextLabel>
+          </Frame>
+        {:else}
+          <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left">No versions yet.</TextLabel>
+        {/each}
+      </Frame>
+
+      {#if #list > 0 and list[1].notes}
+        <Frame ClassName="card w-full h-auto p-4 flex-col">
+          <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-300 text-left text-wrap leading-[1.3]" RichText={true}>
+            {rich(list[1].notes or '')}
+          </TextLabel>
+        </Frame>
+      {/if}
+  </Frame>
+end

@@ -1,0 +1,16 @@
+# The ingots this project has installed, and the release each one came
+# from. `alloy ingot install` writes it; a build reads it and fetches
+# nothing. Keep it in version control so every machine builds against
+# the same releases.
+
+[enamel]
+repo = "alloy-luau/ingots"
+version = "0.4.0"
+requested = "^"
+asset = "enamel-ingot-linux-x64.zip"
+
+[svelte-aly]
+repo = "alloy-luau/ingots"
+version = "0.4.0"
+requested = "^"
+asset = "svelte-aly-ingot-linux-x64.zip"
