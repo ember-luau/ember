@@ -32,8 +32,16 @@ const DEFINITIONS_SETTING: &str = "luau-lsp.types.definitionFiles";
 /// how many `.d.luau` files a package gives without a `definitions` list, Crater's cap.
 const DEFINITIONS_CAP: usize = 10;
 
-/// each alias name that embr owns, and the path it must hold. None means its folder holds no links.
-type Aliases = BTreeMap<String, Option<String>>;
+/** each alias name that embr owns, the path it must hold, and the path
+embr gives it. a path of None means its folder holds no links. */
+type Aliases = BTreeMap<String, Want>;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Want {
+    path: Option<String>,
+    /// the path embr writes for the name. an alias with both is embr's.
+    own: String,
+}
 
 /** brings the aliases and the definition files in `dir` in step with
 `packages`, what the install put in place. a file that embr cannot edit
@@ -92,16 +100,21 @@ fn sync_with(
     packages: &[LockedPackage],
     warn: &mut impl FnMut(String),
 ) {
-    let aliases = manifest.config.aliases.or(global.aliases);
-    let definition_files = manifest.config.definition_files.or(global.definition_files);
-    if aliases != Some(false)
-        && let Err(message) = sync_aliases(dir, &wanted_aliases(manifest, packages))
-    {
+    /* off also takes back what an earlier install wrote, so a project
+    that turns a key off after its first install ends up as clean as one
+    that never had it on */
+    let aliases_on = manifest.config.aliases.or(global.aliases) != Some(false);
+    let definitions_on =
+        manifest.config.definition_files.or(global.definition_files) != Some(false);
+    let mut wanted = wanted_aliases(manifest, packages);
+    if !aliases_on {
+        wanted.values_mut().for_each(|want| want.path = None);
+    }
+    if let Err(message) = sync_aliases(dir, &wanted) {
         warn(format!("warning: {message}"));
     }
-    if definition_files != Some(false)
-        && let Err(reason) = sync_definitions(manifest, dir, packages)
-    {
+    let defined = if definitions_on { packages } else { &[] };
+    if let Err(reason) = sync_definitions(manifest, dir, defined) {
         warn(format!(
             "warning: embr does not change {SETTINGS}: {reason}"
         ));
@@ -130,9 +143,13 @@ fn wanted_aliases(manifest: &Manifest, packages: &[LockedPackage]) -> Aliases {
                     .iter()
                     .any(|package| package.link.is_some() && package.context() == environment);
             let path = Path::new(".").join(manifest.packages_out(environment));
+            let own = slashed(&path);
             (
                 alias_name(manifest, environment),
-                linked.then(|| slashed(&path)),
+                Want {
+                    path: linked.then(|| own.clone()),
+                    own,
+                },
             )
         })
         .collect()
@@ -148,12 +165,14 @@ enum Edit {
 }
 
 /** what one alias that embr owns needs. a folder with links sets its path.
-without links the alias goes, but only while its path gets to no folder: an
-alias that gets to a real folder can be the user's own. */
-fn alias_edit(wanted: Option<&str>, current: Option<&str>, dir: &Path) -> Option<Edit> {
-    match (wanted, current) {
+without links the alias goes when it holds embr's own path, or while its
+path gets to no folder: an alias of embr's name that gets to another real
+folder can be the user's own. */
+fn alias_edit(want: &Want, current: Option<&str>, dir: &Path) -> Option<Edit> {
+    match (want.path.as_deref(), current) {
         (Some(wanted), Some(current)) if wanted == current => None,
         (Some(wanted), _) => Some(Edit::Set(wanted.to_string())),
+        (None, Some(current)) if plain(current) == plain(&want.own) => Some(Edit::Remove),
         (None, Some(current)) if !dir.join(current).is_dir() => Some(Edit::Remove),
         (None, _) => None,
     }
@@ -223,10 +242,7 @@ fn edit_luaurc(text: &str, wanted: &Aliases, dir: &Path) -> Result<Option<String
         let current = property
             .as_ref()
             .and_then(|property| property.value()?.as_string_lit()?.decoded_value().ok());
-        match (
-            alias_edit(wanted.as_deref(), current.as_deref(), dir),
-            property,
-        ) {
+        match (alias_edit(wanted, current.as_deref(), dir), property) {
             (None, _) | (Some(Edit::Remove), None) => continue,
             (Some(Edit::Set(path)), Some(property)) => {
                 property.set_value(CstInputValue::String(path))
@@ -319,7 +335,7 @@ fn config_luau_splices(source: &str, wanted: &Aliases, dir: &Path) -> Result<Vec
         });
         let value = pair.and_then(|pair| field_value(pair.value()));
         match (
-            alias_edit(wanted.as_deref(), value.and_then(literal), dir),
+            alias_edit(wanted, value.and_then(literal), dir),
             pair,
             value,
         ) {
@@ -680,7 +696,13 @@ mod tests {
     fn wanted(pairs: &[(&str, Option<&str>)]) -> Aliases {
         pairs
             .iter()
-            .map(|(name, path)| (name.to_string(), path.map(str::to_string)))
+            .map(|(name, path)| {
+                let want = Want {
+                    path: path.map(str::to_string),
+                    own: path.unwrap_or("./packages/none").to_string(),
+                };
+                (name.to_string(), want)
+            })
             .collect()
     }
 
@@ -694,13 +716,16 @@ mod tests {
         ];
 
         let aliases = wanted_aliases(&manifest(ROBLOX), &packages);
-        assert_eq!(aliases["packages"].as_deref(), Some("./packages/roblox"));
         assert_eq!(
-            aliases["server-packages"].as_deref(),
+            aliases["packages"].path.as_deref(),
+            Some("./packages/roblox")
+        );
+        assert_eq!(
+            aliases["server-packages"].path.as_deref(),
             Some("./packages/server")
         );
         // a transitive alone puts no link in a folder
-        assert_eq!(aliases["lune-packages"], None);
+        assert_eq!(aliases["lune-packages"].path, None);
         assert!(!aliases.contains_key("roblox-packages"));
 
         // the trees that require through `script` get none
@@ -708,7 +733,7 @@ mod tests {
         assert!(
             wanted_aliases(&instance, &packages)
                 .values()
-                .all(Option::is_none)
+                .all(|want| want.path.is_none())
         );
     }
 
@@ -720,17 +745,23 @@ mod tests {
         let aliases = |target: &str| wanted_aliases(&manifest(target), &packages);
 
         let luau = aliases("[target]\nenvironment = \"luau\"\n");
-        assert_eq!(luau["packages"].as_deref(), Some("./packages/luau"));
+        assert_eq!(luau["packages"].path.as_deref(), Some("./packages/luau"));
         let lune = aliases("[target]\nenvironment = \"lune\"\n");
-        assert_eq!(lune["luau-packages"].as_deref(), Some("./packages/luau"));
+        assert_eq!(
+            lune["luau-packages"].path.as_deref(),
+            Some("./packages/luau")
+        );
         assert!(!lune.contains_key("luwu-packages"));
 
         let luwu = aliases("[target]\nenvironment = \"luau\"\nlanguage = \"luwu\"\n");
-        assert_eq!(luwu["packages"].as_deref(), Some("./packages/luwu"));
+        assert_eq!(luwu["packages"].path.as_deref(), Some("./packages/luwu"));
         assert!(!luwu.contains_key("luau-packages"));
 
         let seal = aliases("[target]\nenvironment = \"seal\"\nlanguage = \"luwu\"\n");
-        assert_eq!(seal["luwu-packages"].as_deref(), Some("./packages/luwu"));
+        assert_eq!(
+            seal["luwu-packages"].path.as_deref(),
+            Some("./packages/luwu")
+        );
         assert!(!seal.contains_key("luau-packages"));
     }
 
@@ -938,6 +969,64 @@ return {
         });
         assert!(dir.join(LUAURC).exists());
         assert!(dir.join(SETTINGS).exists());
+    }
+
+    /// turning both off after an install takes back what it wrote, and leaves the user's own entries.
+    #[test]
+    fn off_after_an_install_removes_what_embr_wrote() {
+        let dir = scratch("off-later");
+        let store = dir.join("packages/roblox/.ember/acme_types");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("types.d.luau"), "declare x: number\n").unwrap();
+        let packages = [locked("acme/types", Some("types"), Environment::Roblox)];
+        let on = Defaults::default();
+        sync_with(&manifest(ROBLOX), &on, &dir, &packages, &mut |m| {
+            panic!("{m}")
+        });
+        assert!(
+            fs::read_to_string(dir.join(LUAURC))
+                .unwrap()
+                .contains("\"packages\"")
+        );
+        assert!(
+            fs::read_to_string(dir.join(SETTINGS))
+                .unwrap()
+                .contains("acme/types")
+        );
+
+        let off = Defaults {
+            aliases: Some(false),
+            definition_files: Some(false),
+        };
+        sync_with(&manifest(ROBLOX), &off, &dir, &packages, &mut |m| {
+            panic!("{m}")
+        });
+        assert!(
+            !fs::read_to_string(dir.join(LUAURC))
+                .unwrap()
+                .contains("\"packages\"")
+        );
+        assert!(
+            !fs::read_to_string(dir.join(SETTINGS))
+                .unwrap()
+                .contains("acme/types")
+        );
+
+        // an alias of embr's name at another real folder is the user's
+        fs::create_dir_all(dir.join("vendor")).unwrap();
+        fs::write(
+            dir.join(LUAURC),
+            "{ \"aliases\": { \"packages\": \"./vendor\" } }",
+        )
+        .unwrap();
+        sync_with(&manifest(ROBLOX), &off, &dir, &packages, &mut |m| {
+            panic!("{m}")
+        });
+        assert!(
+            fs::read_to_string(dir.join(LUAURC))
+                .unwrap()
+                .contains("./vendor")
+        );
     }
 
     /// `[config]` in ~/.ember/tools.toml turns both off in a project that sets neither, and a project value wins.
