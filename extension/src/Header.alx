@@ -28,7 +28,7 @@ export function Header(props: HeaderProps) -> Instance
       {/if}
       <TextLabel ClassName="ghost w-auto h-6 text-base font-bold text-zinc-100">ember</TextLabel>
       <Frame ClassName="ghost h-6 fill" />
-      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-600">emberpm.dev</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-6 text-[10px] text-zinc-700 font-sans">emberpm.dev</TextLabel>
     </Frame>
 
     <SearchField on_change={props.on_query} />

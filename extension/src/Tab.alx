@@ -25,7 +25,7 @@ export function Tab(props: TabProps) -> Instance
   const mark = Tween.of(function() return if props.active() then BRAND else MUTED end, MOTION)
 
   return <TextButton
-    ClassName="h-full fill rounded-md flex items-center justify-center gap-2 no-auto-color"
+    ClassName="h-full fill rounded-md flex items-center justify-center gap-2 no-auto-color font-sans"
     Text=""
     BackgroundColor3={fill}
     Activated={function() props.on_select() end}

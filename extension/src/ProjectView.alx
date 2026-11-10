@@ -7,7 +7,7 @@
 
 import { create } from '@packages/svelte-aly'
 import { package_answer } from './api'
-import { install } from './install'
+import { clear, install } from './install'
 import * as manifest from './manifest'
 import { Notice } from './Notice'
 import { releases_of, resolve, type Release } from './resolve'
@@ -92,12 +92,6 @@ export function ProjectView(props: ProjectViewProps) -> Instance
 
   refresh()
 
-  -- The list reads `deps` as a plain value; the branch builds it again
-  -- after each refresh.
-  local function dependency_list() -> Instance
-    return DependencyList({ rows = deps })
-  end
-
   local function set_up()
     const made = manifest.create()
     refresh()
@@ -135,6 +129,38 @@ export function ProjectView(props: ProjectViewProps) -> Instance
     end)
   end
 
+  local function start_clear()
+    const found = current
+
+    if busy or found == nil then
+      return
+    end
+
+    match Result.pcall(clear) with
+      case Ok(_) then
+        manifest.write_lock(found, {})
+        status = 'Removed the installed packages'
+      case Err(message) then problem = message
+    end
+
+    refresh()
+  end
+
+  local function remove(alias: string)
+    match Result.pcall(manifest.remove, alias) with
+      case Ok(_) then status = `Removed {alias} from ember.luau`
+      case Err(message) then problem = message
+    end
+
+    refresh()
+  end
+
+  -- The list reads `deps` as a plain value; the branch builds it again
+  -- after each refresh.
+  local function listed() -> Instance
+    return DependencyList({ rows = deps, on_remove = remove })
+  end
+
   return <ScrollingFrame
     ClassName="ghost w-full fill scroll-y canvas-auto scrollbar-4 flex-col gap-3 p-4"
     ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
@@ -144,10 +170,12 @@ export function ProjectView(props: ProjectViewProps) -> Instance
       <Notice icon="file-code" title="No ember.luau yet" body="It lists the packages of this place, the way ember.toml does for a project on disk." />
       <TextButton ClassName="w-full h-9 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors text-sm font-bold text-white no-auto-color" Text="Set up ember.luau" Activated={set_up} />
     {:else}
-      <Frame ClassName="ghost w-full h-9 flex gap-2">
-        <TextButton ClassName="h-full fill rounded-lg bg-brand hover:bg-[#ff5533] transition-colors text-sm font-bold text-white no-auto-color" Text={function() return if busy then 'Installing' else 'Install' end} Activated={start_install} />
-        <TextButton ClassName="card w-auto h-full px-3 hover:bg-zinc-800 transition-colors text-sm text-zinc-200 no-auto-color" Text="Open ember.luau" Activated={function() props.open_script(current :: ModuleScript) end} />
-        <TextButton ClassName="card w-9 h-full hover:bg-zinc-800 transition-colors no-auto-color" Text="" Activated={refresh}>
+      <Frame ClassName="ghost w-full h-8 flex items-center gap-2">
+        <TextButton ClassName="w-auto h-full px-5 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors text-sm font-bold text-white no-auto-color" Text={function() return if busy then 'Installing' else 'Install' end} Activated={start_install} />
+        <TextButton ClassName="card w-auto h-full px-3 hover:bg-zinc-800 transition-colors text-xs text-zinc-300 no-auto-color font-sans" Text="Clear" Activated={start_clear} />
+        <Frame ClassName="ghost h-full fill" />
+        <TextButton ClassName="card w-auto h-full px-3 hover:bg-zinc-800 transition-colors text-xs text-zinc-300 no-auto-color font-sans" Text="Open ember.luau" Activated={function() props.open_script(current :: ModuleScript) end} />
+        <TextButton ClassName="card w-8 h-full flex items-center justify-center hover:bg-zinc-800 transition-colors no-auto-color font-sans" Text="" Activated={refresh}>
           <Icon name="arrow-clockwise" size={14} />
         </TextButton>
       </Frame>
@@ -155,21 +183,21 @@ export function ProjectView(props: ProjectViewProps) -> Instance
       {#if problem}
         <Frame ClassName="w-full h-auto p-3 rounded-lg bg-brand/10 stroke stroke-brand/40 flex gap-2">
           <Icon name="warning" size={14} color={BRAND} />
-          <TextLabel ClassName="ghost fill h-auto text-xs text-zinc-200 text-left text-wrap" Text={problem} />
+          <TextLabel ClassName="ghost fill h-auto text-xs text-zinc-200 text-left text-wrap font-sans" Text={problem or ''} />
         </Frame>
       {/if}
 
       {#if status ~= ''}
-        <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate" Text={status} />
+        <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate font-sans" Text={status} />
       {/if}
 
-      {dependency_list()}
+      {listed()}
     {/if}
   </ScrollingFrame>
 end
 
 --- The dependencies of ember.luau, each with its locked version.
-export function DependencyList(props: { rows: { Row } }) -> Instance
+export function DependencyList(props: { rows: { Row }, on_remove: (string) -> () }) -> Instance
   return <Frame ClassName="ghost w-full h-auto flex-col gap-2">
       <TextLabel ClassName="ghost w-full h-4 text-xs font-bold text-zinc-500 text-left">DEPENDENCIES</TextLabel>
 
@@ -180,11 +208,14 @@ export function DependencyList(props: { rows: { Row } }) -> Instance
             <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-zinc-100">{row.alias}</TextLabel>
             <Frame ClassName="ghost h-5 fill" />
             <TextLabel ClassName="ghost w-auto h-5 text-xs font-mono text-zinc-400">{row.locked or 'not installed'}</TextLabel>
+            <TextButton ClassName="ghost w-5 h-5 flex items-center justify-center rounded hover:bg-zinc-800 no-auto-color font-sans" Text="" Activated={function() props.on_remove(row.alias) end}>
+              <Icon name="x" size={12} />
+            </TextButton>
           </Frame>
-          <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate">{row.name}  ·  {row.version}  ·  {row.place}</TextLabel>
+          <TextLabel ClassName="ghost w-full h-4 text-xs text-zinc-500 text-left truncate font-sans">{row.name}  ·  {row.version}  ·  {row.place}</TextLabel>
         </Frame>
       {:else}
-        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-left text-wrap">ember.luau lists no packages. Open a package in the Packages tab and press Add to ember.luau, or write one in the file.</TextLabel>
+        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-left text-wrap font-sans">ember.luau lists no packages. Open a package in the Packages tab and press Add to ember.luau, or write one in the file.</TextLabel>
       {/each}
   </Frame>
 end
