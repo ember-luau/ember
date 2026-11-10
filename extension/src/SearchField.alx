@@ -12,17 +12,19 @@ import { BRAND, FAINT, RAISED } from './theme'
 export function SearchField(props: { on_change: (string) -> () }) -> Instance
   local focused = $state(false)
 
-  local box = new Instance('TextBox')
-  box.Size = UDim2.fromScale(1, 1)
-  box.BackgroundTransparency = 1
-  box.ClearTextOnFocus = false
-  box.Text = ''
-  box.PlaceholderText = 'Search packages and tools'
-  box.PlaceholderColor3 = FAINT
-  box.TextColor3 = Color3.fromRGB(244, 244, 245)
-  box.TextSize = 14
-  box.TextXAlignment = Enum.TextXAlignment.Left
-  box.FontFace = Font.fromEnum(Enum.Font.BuilderSans)
+  const box = new Instance('TextBox') {
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+    ClearTextOnFocus = false,
+    Text = '',
+    PlaceholderText = 'Search packages and tools',
+    PlaceholderColor3 = FAINT,
+    TextColor3 = Color3.fromRGB(244, 244, 245),
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    FontFace = Font.fromEnum(Enum.Font.BuilderSans),
+  }
+
   box:GetPropertyChangedSignal('Text'):Connect(function() props.on_change(box.Text) end)
   box.Focused:Connect(function() focused = true end)
   box.FocusLost:Connect(function() focused = false end)

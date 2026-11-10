@@ -7,7 +7,7 @@ import { create } from '@packages/svelte-aly'
 import { Icon } from './Icon'
 import { SearchField } from './SearchField'
 import { Tab } from './Tab'
-import { BRAND } from './theme'
+import { BRAND, LOGO } from './theme'
 
 --- The props of [Header].
 export type HeaderProps = {
@@ -21,7 +21,11 @@ export type HeaderProps = {
 export function Header(props: HeaderProps) -> Instance
   return <Frame ClassName="w-full h-auto bg-zinc-950 flex-col gap-3 px-4 pt-4 pb-3">
     <Frame ClassName="ghost w-full h-6 flex items-center gap-2">
-      <Icon name="fire" weight="fill" size={20} color={BRAND} />
+      {#if LOGO ~= ''}
+        <ImageLabel ClassName="ghost w-5 h-5" Image={LOGO} ScaleType={Enum.ScaleType.Fit} />
+      {:else}
+        <Icon name="fire" weight="fill" size={20} color={BRAND} />
+      {/if}
       <TextLabel ClassName="ghost w-auto h-6 text-base font-bold text-zinc-100">ember</TextLabel>
       <Frame ClassName="ghost h-6 fill" />
       <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-600">emberpm.dev</TextLabel>

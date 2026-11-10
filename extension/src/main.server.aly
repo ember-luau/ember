@@ -6,9 +6,10 @@
 
 import { mount } from '@packages/svelte-aly'
 import { App } from './App'
+import { LOGO } from './theme'
 
 const toolbar = plugin:CreateToolbar('Ember')
-local button = toolbar:CreateButton('Ember', 'Browse packages and tools on Ember', '', 'Ember')
+local button = toolbar:CreateButton('Ember', 'Browse packages and tools on Ember', LOGO, 'Ember')
 button.ClickableWhenViewportHidden = true
 
 const info = new DockWidgetPluginGuiInfo(Enum.InitialDockState.Right, false, false, 380, 640, 300, 360)
