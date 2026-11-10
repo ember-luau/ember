@@ -19,7 +19,11 @@ for arg in "$@"; do
 done
 
 alloy build
-sed -i "s#require('@packages/#require('./Packages/#g" build/*.luau
+# Alloy writes a package require as an alias or as its place in the
+# DataModel, @game/Packages/x. A plugin is not in the DataModel, so both
+# must become a path to the Packages folder beside the modules.
+sed -i -e "s#require('@packages/#require('./Packages/#g" \
+	-e "s#require('@game/Packages/#require('./Packages/#g" build/*.luau
 rojo build plugin.project.json -o Ember.rbxm
 echo "built Ember.rbxm"
 

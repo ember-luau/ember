@@ -1,6 +1,11 @@
 -- The colors that a prop takes as a Color3. enamel.aly at the project
 -- root holds the same brand color for the classes.
 
+--- The Ember mark, assets/ember-mark.png uploaded to Roblox. Studio shows
+--- an image by its asset ID alone. Empty until the upload: the toolbar
+--- button then has no icon, and the header shows the fire icon.
+export const LOGO = ''
+
 --- The Ember orange, for the brand mark and the active parts.
 export const BRAND = Color3.fromRGB(242, 60, 27)
 --- Text that leads.
