@@ -1564,7 +1564,12 @@ TestEZ = "roblox/testez@0.4.1"
         let index_of = |name: &str| ember_index(name);
         assert_eq!(
             crater_dependency("luarocks#rocks/inspect@3.1.3", &index_of, None),
-            Some(("inspect".into(), "rocks/inspect".into(), "^3.1.3".into(), "luarocks"))
+            Some((
+                "inspect".into(),
+                "rocks/inspect".into(),
+                "^3.1.3".into(),
+                "luarocks"
+            ))
         );
         assert_eq!(ember_index("https://luarocks.org/"), Some("luarocks"));
     }
