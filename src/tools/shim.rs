@@ -83,8 +83,6 @@ script that called `embr install`), so an up to date shim is left alone and
 a stale one is swapped by rename instead of being written over. */
 pub fn write(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
-    // a shim swapped out while running is only removable once it exits
-    let _ = fs::remove_file(binary::retired_path(shim));
     let embr = embr_executable()?;
     if !binary::same_contents(&embr, shim) {
         binary::replace(&embr, shim)?;
