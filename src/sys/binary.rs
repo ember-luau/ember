@@ -196,36 +196,83 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /** a running exe on windows is open without FILE_SHARE_WRITE but with
-    FILE_SHARE_DELETE, which is what lets it be renamed. holding a handle
-    with that share mode reproduces the lock a live `rojo.exe` puts on its
-    shim, the os error 32 an install used to fail with. */
+    /** a copy of cmd.exe left waiting on stdin, killed on drop. only a real
+    running image reproduces the lock: a handle opened with any share mode
+    still lets rename replace the file, so it would never reach the
+    fallback in `replace`. */
+    #[cfg(windows)]
+    struct Running(std::process::Child);
+
+    #[cfg(windows)]
+    impl Running {
+        fn spawn(exe: &Path) -> Self {
+            use std::process::{Command, Stdio};
+            let child = Command::new(exe)
+                .args(["/q", "/k"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            Self(child)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    fn parked_count(swap: &Path) -> usize {
+        fs::read_dir(swap)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".old"))
+            .count()
+    }
+
+    /** the os error 32 `embr install` used to fail with, and the next swap
+    while the parked copy still runs. bytes appended to an exe don't stop
+    it running, so each generation is cmd.exe plus a marker. */
     #[cfg(windows)]
     #[test]
-    fn replaces_a_target_locked_like_a_running_exe() {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 0x1;
-        const FILE_SHARE_DELETE: u32 = 0x4;
+    fn replaces_a_running_exe_twice_while_both_keep_running() {
+        let cmd = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        let cmd_bytes = fs::read(&cmd).unwrap();
+        let dir = scratch("embr-test-replace-running");
+        let swap = dir.join(SWAP_DIR);
+        let target = dir.join("rojo.exe");
+        let generation = |marker: &[u8]| {
+            let path = dir.join(format!("gen-{}.exe", String::from_utf8_lossy(marker)));
+            fs::write(&path, [cmd_bytes.as_slice(), marker].concat()).unwrap();
+            path
+        };
+        let (first, second, third) = (generation(b"1"), generation(b"2"), generation(b"3"));
+        fs::copy(&first, &target).unwrap();
 
-        let dir = scratch("embr-test-replace-locked");
-        let (source, target) = (dir.join("embr.exe"), dir.join("rojo.exe"));
-        fs::write(&source, b"new").unwrap();
-        fs::write(&target, b"old").unwrap();
-
-        let held = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-            .open(&target)
-            .unwrap();
-
+        let first_running = Running::spawn(&target);
         assert!(
-            fs::copy(&source, &target).is_err(),
-            "a plain copy should hit the lock"
+            fs::copy(&second, &target).is_err(),
+            "a plain copy over a running exe should fail"
         );
-        replace(&source, &target).unwrap();
-        assert_eq!(fs::read(&target).unwrap(), b"new");
+        replace(&second, &target).unwrap();
+        assert!(same_contents(&second, &target));
+        assert_eq!(parked_count(&swap), 1, "the running copy is parked");
 
-        drop(held);
+        let second_running = Running::spawn(&target);
+        replace(&third, &target).unwrap();
+        assert!(same_contents(&third, &target));
+        assert_eq!(parked_count(&swap), 2, "both running copies are parked");
+
+        drop((first_running, second_running));
+        replace(&third, &target).unwrap();
+        assert_eq!(parked_count(&swap), 0, "exited copies are swept");
         let _ = fs::remove_dir_all(&dir);
     }
 }
