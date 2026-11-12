@@ -93,6 +93,17 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/** one ordinary path segment, no separators, no drive letter, not `.` or
+`..`. for names that come from a manifest, where a TOML key can be quoted
+anything, before they are joined onto a folder embr writes into. */
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && !Path::new(name).is_absolute()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::net::http::responses::Release;
-use crate::sys::paths;
+use crate::sys::{binary, paths};
 use clap::Subcommand;
 use semver::Version;
 use std::env;
@@ -120,7 +120,7 @@ fn install() -> Result<(), Error> {
     if target.exists() && paths::same_file(&current, &target) {
         println!("embr is already installed at {}", target.display());
     } else {
-        replace_binary(&current, &target)?;
+        binary::replace(&current, &target)?;
         println!(
             "Installed embr v{} to {}",
             env!("CARGO_PKG_VERSION"),
@@ -177,49 +177,6 @@ fn embx_name() -> String {
     format!("embx{}", env::consts::EXE_SUFFIX)
 }
 
-/** Puts `source` at `target`, replacing whatever is there, even while that
-file is running.
-
-A plain copy opens the destination for writing, and on unix writing a file
-some process is currently executing fails with ETXTBSY -- "Text file busy".
-~/.ember/bin/embr is exactly that whenever another embr is alive: a second
-terminal, a long `embr run`, an embx, a tool shim. Installing should not
-require hunting those down first.
-
-So the new bytes land beside the target and a rename swaps the directory
-entry. Anything already running keeps the old inode and finishes on it
-undisturbed; the next run picks up the new one. fs::copy carries the
-executable bit over on unix, and rename preserves it. */
-fn replace_binary(source: &Path, target: &Path) -> Result<(), Error> {
-    let staged = paths::with_suffix(target, ".new");
-    // a leftover from an interrupted install would fail the copy below
-    let _ = fs::remove_file(&staged);
-    fs::copy(source, &staged)?;
-
-    let Err(error) = fs::rename(&staged, target) else {
-        return Ok(());
-    };
-
-    /* windows refuses to replace a file that is open for execution, but it
-    does allow renaming that file away -- the running image follows the
-    inode, not the name. unix never reaches here, the rename above works. */
-    let retired = paths::with_suffix(target, ".old");
-    let _ = fs::remove_file(&retired);
-    if fs::rename(target, &retired).is_err() {
-        let _ = fs::remove_file(&staged);
-        return Err(error.into());
-    }
-    if let Err(error) = fs::rename(&staged, target) {
-        // put back what was working rather than leave nothing installed
-        let _ = fs::rename(&retired, target);
-        let _ = fs::remove_file(&staged);
-        return Err(error.into());
-    }
-    // still locked until it exits; swept by the next install either way
-    let _ = fs::remove_file(&retired);
-    Ok(())
-}
-
 /** copies `source` over ~/.ember/bin/embx. best-effort with a warning: on
 windows the launcher stays locked for as long as anything it started is
 still running, and that must never sink the install or update this rides
@@ -228,7 +185,7 @@ fn write_embx_launcher(bin_dir: &Path, source: &Path) -> bool {
     let embx = bin_dir.join(embx_name());
     /* the same running-binary problem as embr itself, and more likely here:
     an `embx` in another terminal is a whole separate process holding it */
-    match replace_binary(source, &embx) {
+    match binary::replace(source, &embx) {
         Ok(()) => true,
         Err(error) => {
             eprintln!(
