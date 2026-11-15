@@ -1,0 +1,81 @@
+--[[
+  The scripts of ember.luau, each with a Run button. A run reads the
+  manifest again, so an edit since the last refresh counts, and writes to
+  the Output window.
+]]
+
+import { create } from '@packages/svelte-aly'
+import { Icon } from './Icon'
+import * as manifest from './manifest'
+import { run } from './scripts'
+import { BRAND } from './theme'
+
+--- The props of [ScriptList].
+export type ScriptListProps = {
+  --- The script names, sorted.
+  names: { string },
+  --- Hears the result of a run, for the status line.
+  on_status: (string) -> (),
+}
+
+--- Runs `name` from a fresh read of the manifest.
+local function start(name: string, on_status: (string) -> (), on_end: () -> ()) -> ()
+  const found = manifest.find()
+
+  if found == nil then
+    on_status('The place has no ember.luau')
+    on_end()
+
+    return
+  end
+
+  match Result.pcall(manifest.read, found) with
+    case Ok(project) then
+      const commands = project.scripts[name]
+
+      if commands == nil then
+        on_status(`ember.luau has no script {name}`)
+        on_end()
+
+        return
+      end
+
+      on_status(`Running {name}; its output goes to the Output window`)
+      run(name, commands, function(failed: number)
+        on_status(if failed == 0 then `{name} finished` else `{name}: {failed} failed, see the Output window`)
+        on_end()
+      end)
+    case Err(message) then
+      on_status(message)
+      on_end()
+  end
+end
+
+--- The SCRIPTS list of the Project tab.
+export function ScriptList(props: ScriptListProps) -> Instance
+  local running: { [string]: boolean } = $state({})
+
+  local function run_named(name: string)
+    if running[name] then
+      return
+    end
+
+    running = { [name] = true }
+    start(name, props.on_status, function() running = {} end)
+  end
+
+  return <Frame ClassName="ghost w-full h-auto flex-col gap-2">
+    <TextLabel ClassName="ghost w-full h-4 text-xs font-bold text-zinc-500 text-left">SCRIPTS</TextLabel>
+
+    {#each props.names as name (name)}
+      <Frame ClassName="card w-full h-9 px-3 flex items-center gap-2">
+        <Icon name="terminal" size={14} color={BRAND} />
+        <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-zinc-100">{name}</TextLabel>
+        <Frame ClassName="ghost h-5 fill" />
+        <TextButton ClassName="w-auto h-6 px-3 rounded-md bg-zinc-800 hover:bg-zinc-700 transition-colors text-xs text-zinc-200 no-auto-color font-sans" Text={function() return if running[name] then 'Running' else 'Run' end} Activated={function() run_named(name) end} />
+      </Frame>
+    {:else}
+      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-left text-wrap font-sans">ember.luau has no scripts. Add one to its scripts table: Luau code, an @game/ path to a ModuleScript, a function, or a list that runs at once.</TextLabel>
+    {/each}
+  </Frame>
+end

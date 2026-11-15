@@ -52,9 +52,9 @@ export function ToolDetail(props: ToolDetailProps) -> Instance
     ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
     BorderSizePixel={0}
   >
-    <TextButton ClassName="ghost w-auto h-6 flex items-center gap-1.5 no-auto-color" Text="" Activated={function() props.on_back() end}>
+    <TextButton ClassName="ghost w-auto h-6 flex items-center gap-1.5 no-auto-color font-sans" Text="" Activated={function() props.on_back() end}>
       <Icon name="arrow-left" weight="bold" size={14} />
-      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-400 hover:text-zinc-100">Back</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-400 hover:text-zinc-100 font-sans">Back</TextLabel>
     </TextButton>
 
     <Frame ClassName="ghost w-full h-auto flex-col gap-1.5">
@@ -65,7 +65,7 @@ export function ToolDetail(props: ToolDetailProps) -> Instance
           <TextLabel ClassName="w-auto h-5 px-2 rounded bg-zinc-800 text-xs font-mono text-zinc-300">v{tool.latest}</TextLabel>
         {/if}
       </Frame>
-      <TextLabel ClassName="ghost w-full h-auto text-sm text-zinc-400 text-left text-wrap leading-[1.2]">
+      <TextLabel ClassName="ghost w-full h-auto text-sm text-zinc-400 text-left text-wrap leading-[1.2] font-sans">
         {tool.description}
       </TextLabel>
     </Frame>
@@ -74,31 +74,31 @@ export function ToolDetail(props: ToolDetailProps) -> Instance
 
     <Frame ClassName="ghost w-full h-auto flex flex-wrap gap-1.5">
       {#each tool.tags as tag (tag)}
-        <TextLabel ClassName="w-auto h-6 px-2.5 rounded-full bg-zinc-900 stroke stroke-zinc-800 text-xs text-zinc-300">{tag}</TextLabel>
+        <TextLabel ClassName="w-auto h-6 px-2.5 rounded-full bg-zinc-900 stroke stroke-zinc-800 text-xs text-zinc-300 font-sans">{tag}</TextLabel>
       {/each}
     </Frame>
 
     <Frame ClassName="ghost w-full h-auto flex flex-wrap gap-x-4 gap-y-1.5">
       <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
         <Icon name="download-simple" size={12} />
-        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{count(tool.downloads)} downloads</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{count(tool.downloads)} downloads</TextLabel>
       </Frame>
       {#if tool.source == 'github'}
         <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
           <Icon name="github-logo" size={12} />
-          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">Pinned from {tool.repository or 'GitHub'}</TextLabel>
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">Pinned from {tool.repository or 'GitHub'}</TextLabel>
         </Frame>
       {/if}
       {#if tool.org}
         <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
           <Icon name="buildings" size={12} />
-          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{org_name(tool)}</TextLabel>
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{org_name(tool)}</TextLabel>
         </Frame>
       {/if}
     </Frame>
 
     {#if failed}
-      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-wrap">Ember did not send the versions. Try again soon.</TextLabel>
+      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-500 text-wrap font-sans">Ember did not send the versions. Try again soon.</TextLabel>
     {:else if not loaded}
       <Spinner label="Loading the versions" />
     {:else}

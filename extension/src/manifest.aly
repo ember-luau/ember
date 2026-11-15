@@ -7,6 +7,7 @@
 
 import ScriptEditorService from '@game/ScriptEditorService'
 import ServerStorage from '@game/ServerStorage'
+import { commands_of, type Command } from './scripts'
 
 --- A dependency as the user writes it: `'scope/name'`, `'scope/name@^1.2'`,
 --- or a table with the other keys.
@@ -25,6 +26,8 @@ export type Project = {
   dependencies: { [string]: Spec },
   dev_dependencies: { [string]: Spec },
   overrides: { [string]: Spec },
+  --- Name -> its commands.
+  scripts: { [string]: { Command } },
 }
 
 -- The factory module. Its types are what the editor completes in the
@@ -51,7 +54,14 @@ export type Dependency = string | {
 	default_features: boolean?,
 }
 
+--- Luau code, a ModuleScript at "@game/Service/Path", or a function. Each
+--- one gets a print and a warn that tag its lines in a list.
+export type Command = string | ((print: (...any) -> (), warn: (...any) -> ()) -> ())
+
 export type Project = {
+	--- Name -> a command, or a list of commands that run at once. The
+	--- Ember panel runs them, and their output goes to the Output window.
+	scripts: { [string]: Command | { Command } }?,
 	--- Alias -> package. `require(ReplicatedStorage.Packages.<alias>)`.
 	dependencies: { [string]: Dependency }?,
 	--- Packages for tests and tools, under ServerStorage.DevPackages.
@@ -81,6 +91,9 @@ return Ember.project({
 	dependencies = {
 	},
 	dev_dependencies = {
+	},
+	scripts = {
+		hello = 'print("hello from", game.Name)',
 	},
 })
 ]==]
@@ -185,6 +198,28 @@ local function specs_of(table_name: string, value: unknown) -> { [string]: Spec 
   return specs
 end
 
+local function scripts_of(value: unknown) -> { [string]: { Command } }
+  local found: { [string]: { Command } } = {}
+
+  if value == nil then
+    return found
+  end
+
+  if not (value is table) then
+    error('scripts is a table of name = command', 0)
+  end
+
+  for name, entry in value do
+    if not (name is string) then
+      error('scripts: each key is a name', 0)
+    end
+
+    found[name] = commands_of(name, entry)
+  end
+
+  return found
+end
+
 --- Runs a fresh copy of the manifest, so an edit since the last read
 --- counts, and checks what it gives.
 export function read(manifest: ModuleScript) -> Project
@@ -204,6 +239,7 @@ export function read(manifest: ModuleScript) -> Project
         dependencies = specs_of('dependencies', value.dependencies),
         dev_dependencies = specs_of('dev_dependencies', value.dev_dependencies),
         overrides = specs_of('overrides', value.overrides),
+        scripts = scripts_of(value.scripts),
       }
 
       for alias in project.dependencies do
@@ -295,6 +331,68 @@ export function add_dependency(source: string, alias: string, spec: string) -> s
   return `{source:sub(1, finish)}\n\t\t["{alias}"] = "{spec}",{source:sub(finish + 1)}`
 end
 
+--- The source with the entry of `alias` removed from its table: the key,
+--- its value, a string or a table over many lines, and the comma after
+--- it. Nil when the source has no such entry.
+export function remove_dependency(source: string, alias: string) -> string?
+  const escaped = alias:gsub('%p', '%%%0')
+  const start = source:find('\n[ \t]*%["' .. escaped .. '"%]%s*=') or source:find('\n[ \t]*' .. escaped .. '%s*=')
+
+  if start == nil then
+    return nil
+  end
+
+  const equals = source:find('=', start, true) :: number
+  const value = source:find('%S', equals + 1) :: number
+  local finish = value
+
+  if source:sub(value, value) == '{' then
+    local depth = 0
+
+    for i = value, #source do
+      const c = source:sub(i, i)
+      depth += if c == '{' then 1 elseif c == '}' then -1 else 0
+
+      if depth == 0 then
+        finish = i
+        break
+      end
+    end
+  else
+    const quote = source:sub(value, value)
+    finish = (source:find(quote, value + 1, true) or value) :: number
+  end
+
+  -- The comma after the value goes with it.
+  const comma = source:match('^%s*,()', finish + 1)
+  finish = if comma then comma - 1 else finish
+
+  return source:sub(1, start - 1) .. source:sub(finish + 1)
+end
+
+--- Removes `alias` from the manifest through the script editor, so an
+--- open tab of the file keeps in step.
+export function remove(alias: string) -> ()
+  const manifest = find()
+
+  if manifest == nil then
+    error('the place has no ember.luau', 0)
+  end
+
+  local removed = false
+
+  ScriptEditorService:UpdateSourceAsync(manifest, function(old: string) -> string
+    const next = remove_dependency(old, alias)
+    removed = next ~= nil
+
+    return next or old
+  end)
+
+  if not removed then
+    error(`ember.luau has no entry {alias} to remove`, 0)
+  end
+end
+
 --- Adds `name` at `^version` to the manifest, made when the place has
 --- none, under the last part of the name as its alias. Gives the line it
 --- wrote, or an error that says why it could not.
@@ -326,6 +424,14 @@ end
     $assert(added:find('dev_dependencies = {\n\t},', 1, true) ~= nil)
     $assert(add_dependency(added, 'svelte', 'x') == nil)
     $assert(add_dependency('return {}', 'svelte', 'x') == nil)
+  end
+
+  public function a_dependency_comes_out_with_its_comma() -> ()
+    const added = add_dependency(TEMPLATE, 'svelte', 'alloy/svelte-aly@^0.1.2') :: string
+    $assert(remove_dependency(added, 'svelte') == TEMPLATE)
+    const long = 'return { dependencies = {\n\t\tcore = { name = "a/core", features = { "x" } },\n\t\tb = "a/b@^1",\n\t} }'
+    $assert(remove_dependency(long, 'core') == 'return { dependencies = {\n\t\tb = "a/b@^1",\n\t} }')
+    $assert(remove_dependency(long, 'missing') == nil)
   end
 
   public function the_string_form_names_the_package_and_the_version() -> ()

@@ -58,9 +58,9 @@ export function PackageDetail(props: PackageDetailProps) -> Instance
     ScrollBarImageColor3={Color3.fromRGB(63, 63, 70)}
     BorderSizePixel={0}
   >
-    <TextButton ClassName="ghost w-auto h-6 flex items-center gap-1.5 no-auto-color" Text="" Activated={function() props.on_back() end}>
+    <TextButton ClassName="ghost w-auto h-6 flex items-center gap-1.5 no-auto-color font-sans" Text="" Activated={function() props.on_back() end}>
       <Icon name="arrow-left" weight="bold" size={14} />
-      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-400 hover:text-zinc-100">Back</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-6 text-xs text-zinc-400 hover:text-zinc-100 font-sans">Back</TextLabel>
     </TextButton>
 
     <Frame ClassName="ghost w-full h-auto flex-col gap-1.5">
@@ -69,17 +69,17 @@ export function PackageDetail(props: PackageDetailProps) -> Instance
         <TextLabel ClassName="ghost w-auto h-7 text-lg font-bold text-zinc-100 truncate">{pkg.name}</TextLabel>
         <TextLabel ClassName="w-auto h-5 px-2 rounded bg-zinc-800 text-xs font-mono text-zinc-300">v{pkg.version}</TextLabel>
       </Frame>
-      <TextLabel ClassName="ghost w-full h-auto text-sm text-zinc-400 text-left text-wrap leading-[1.2]">
+      <TextLabel ClassName="ghost w-full h-auto text-sm text-zinc-400 text-left text-wrap leading-[1.2] font-sans">
         {pkg.description or 'No description.'}
       </TextLabel>
     </Frame>
 
-    <TextButton ClassName="w-full h-9 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors flex items-center justify-center gap-2 no-auto-color" Text="" Activated={add}>
+    <TextButton ClassName="w-full h-9 rounded-lg bg-brand hover:bg-[#ff5533] transition-colors flex items-center justify-center gap-2 no-auto-color font-sans" Text="" Activated={add}>
       <Icon name="plus" weight="bold" size={14} color={new Color3(1, 1, 1)} />
       <TextLabel ClassName="ghost w-auto h-5 text-sm font-bold text-white">Add to ember.luau</TextLabel>
     </TextButton>
     {#if added}
-      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap" Text={added} />
+      <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap font-sans" Text={added} />
     {/if}
 
     <CopyField text={`embr add {pkg.name}`} />
@@ -101,7 +101,7 @@ export function PackageDetail(props: PackageDetailProps) -> Instance
       {/if}
 
       <Frame ClassName="card w-full h-auto p-4 flex-col">
-        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-300 text-left text-wrap leading-[1.3]" RichText={true}>
+        <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-300 text-left text-wrap leading-[1.3] font-sans" RichText={true}>
           {notes}
         </TextLabel>
       </Frame>
@@ -122,27 +122,27 @@ export function PackageFacts(props: { pkg: Package }) -> Instance
       {#if by}
         <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
           <Icon name="user" size={12} />
-          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{by}</TextLabel>
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{by}</TextLabel>
         </Frame>
       {/if}
       {#if pkg.org}
         <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
           <Icon name="buildings" size={12} />
-          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{org_name(pkg)}</TextLabel>
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{org_name(pkg)}</TextLabel>
         </Frame>
       {/if}
       <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
         <Icon name="clock" size={12} />
-        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{ago_iso(pkg.published_at)}</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{ago_iso(pkg.published_at)}</TextLabel>
       </Frame>
       <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
         <Icon name="code" size={12} />
-        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{pkg.language or 'luau'}</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{pkg.language or 'luau'}</TextLabel>
       </Frame>
       {#if pkg.downloads}
         <Frame ClassName="ghost w-auto h-4 flex items-center gap-1">
           <Icon name="download-simple" size={12} />
-          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{count(pkg.downloads or 0)} downloads</TextLabel>
+          <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{count(pkg.downloads or 0)} downloads</TextLabel>
         </Frame>
       {/if}
     </Frame>

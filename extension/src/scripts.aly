@@ -1,0 +1,174 @@
+-- The scripts of ember.luau, the Luau form of `[scripts]` in ember.toml.
+-- A command is Luau code, a path to a ModuleScript, `@game/...`, or a
+-- function. A script that is a list runs its commands at once, as
+-- `embr run` does, and each line of output names its command, `[1]`.
+-- The output goes to Studio's Output window.
+
+--- One command of a script.
+export type Command = {
+  kind: string,
+  --- The code, or the path, as the manifest writes it.
+  text: string,
+  --- The function, for a command that is one.
+  run: Runnable?,
+}
+
+--- A print or warn that the runner hands each command.
+export type Out = (...unknown) -> ()
+
+--- What a command runs: it gets the print and the warn of its command.
+export type Runnable = (Out, Out) -> ()
+
+-- The text that names a command in the banner.
+local function label(command: Command) -> string
+  return if command.kind == 'function' then '<function>' else command.text
+end
+
+--- The instance at `@game/Service/Child/...`, or an error that names the
+--- part that is missing.
+export function at_path(path: string) -> Instance
+  const parts = string.split(path:gsub('^@game/', ''), '/')
+  local found: Instance = game:GetService(parts[1])
+
+  for i = 2, #parts do
+    const child = found:FindFirstChild(parts[i])
+
+    if child == nil then
+      error(`{path}: {found:GetFullName()} has no child {parts[i]}`, 0)
+    end
+
+    found = child :: Instance
+  end
+
+  return found
+end
+
+-- Runs code as a fresh ModuleScript, so it gets its own stack trace and
+-- the `print` and `warn` of its command.
+local function run_code(name: string, code: string, print: Out, warn: Out) -> ()
+  local module = new Instance('ModuleScript')
+  module.Name = name
+  module.Source = `return function(print, warn)\n{code}\nend`
+  const ran = Result.pcall(require, module)
+  module:Destroy()
+
+  match ran with
+    case Ok(chunk) then (chunk :: Runnable)(print, warn)
+    case Err(problem) then error(problem, 0)
+  end
+end
+
+-- Runs one command to its end.
+local function run_one(name: string, command: Command, print: Out, warn: Out) -> ()
+  if command.kind == 'function' then
+    (command.run :: Runnable)(print, warn)
+  elseif command.kind == 'path' then
+    const target = at_path(command.text)
+
+    if not target:IsA('ModuleScript') then
+      error(`{command.text} is a {target.ClassName}; a script runs a ModuleScript`, 0)
+    end
+
+    -- A copy runs, so a second run reads the module again.
+    const copy = target:Clone()
+    const ran = Result.pcall(require, copy)
+    copy:Destroy()
+
+    match ran with
+      case Ok(value) then
+        if value is function then
+          (value :: Runnable)(print, warn)
+        end
+      case Err(problem) then error(problem, 0)
+    end
+  else
+    run_code(name, command.text, print, warn)
+  end
+end
+
+-- The values of a print, as one line.
+local function join(...: unknown) -> string
+  const parts: { string } = {}
+
+  for i = 1, select('#', ...) do
+    table.insert(parts, tostring((select(i, ...))))
+  end
+
+  return table.concat(parts, ' ')
+end
+
+--- Runs the script `name`. One command runs as it is; a list runs at
+--- once, and its output is tagged. `done` hears the number of commands
+--- that failed once every one has ended.
+export function run(name: string, commands: { Command }, done: (number) -> ()) -> ()
+  const tagged = #commands > 1
+  local left = #commands
+  local failed = 0
+
+  print(`> {name}`)
+
+  for i, command in commands do
+    const tag = if tagged then `[{i}] ` else ''
+
+    if tagged then
+      print(`> {tag}{label(command)}`)
+    end
+
+    const out = function(...: unknown) print(tag .. join(...)) end
+    const warned = function(...: unknown) warn(tag .. join(...)) end
+
+    task.spawn(function()
+      match Result.pcall(run_one, `{name}{if tagged then i else ''}`, command, out, warned) with
+        case Ok(_) then
+        case Err(problem) then
+          failed += 1
+          warn(`{tag}{name} failed: {problem}`)
+      end
+
+      left -= 1
+
+      if left == 0 then
+        done(failed)
+      end
+    end)
+  end
+end
+
+--- The commands of one entry of `scripts`: a string, a function, or a
+--- list of them.
+export function commands_of(name: string, value: unknown) -> { Command }
+  const one = function(entry: unknown) -> Command
+    if entry is function then
+      return { kind = 'function', text = '', run = entry :: Runnable }
+    elseif entry is string then
+      return { kind = if entry:match('^@game/') then 'path' else 'code', text = entry }
+    end
+
+    error(`scripts.{name}: a command is Luau code, an @game/ path, or a function`, 0)
+  end
+
+  if value is table then
+    const list: { Command } = {}
+
+    for _, entry in value :: { unknown } do
+      table.insert(list, one(entry))
+    end
+
+    if #list == 0 then
+      error(`scripts.{name} is an empty list`, 0)
+    end
+
+    return list
+  end
+
+  return [ one(value) ]
+end
+
+@test namespace Scripts
+  public function a_list_is_its_commands_and_a_string_is_one() -> ()
+    const list = commands_of('serve', [ 'print(1)', '@game/ServerStorage/Tools/seed' ])
+    $assert(#list == 2 and list[1].kind == 'code' and list[2].kind == 'path')
+    $assert(#commands_of('one', 'print(1)') == 1)
+    $assert(commands_of('fn', function() end)[1].kind == 'function')
+  end
+end

@@ -18,7 +18,7 @@ export function PackageCard(props: PackageCardProps) -> Instance
   const facts = [ pkg.language or 'luau', pkg.target or 'roblox', ago_iso(pkg.published_at) ]
 
   return <TextButton
-    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color"
+    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color font-sans"
     Text=""
     Activated={function() props.on_open(pkg) end}
   >
@@ -29,19 +29,19 @@ export function PackageCard(props: PackageCardProps) -> Instance
       <Frame ClassName="ghost h-5 fill" />
       {#if pkg.downloads}
         <Icon name="download-simple" size={12} />
-        <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400">{count(pkg.downloads or 0)}</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400 font-sans">{count(pkg.downloads or 0)}</TextLabel>
       {/if}
     </Frame>
-    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15]">
+    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15] font-sans">
       {pkg.description or 'No description.'}
     </TextLabel>
     <Frame ClassName="ghost w-full h-4 flex items-center gap-1.5">
       {#if pkg.org}
         <Icon name="buildings" size={12} />
-        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400">{org_name(pkg)}</TextLabel>
-        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600">·</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-400 font-sans">{org_name(pkg)}</TextLabel>
+        <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-600 font-sans">·</TextLabel>
       {/if}
-      <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500">{table.concat(facts, '  ·  ')}</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500 font-sans">{table.concat(facts, '  ·  ')}</TextLabel>
     </Frame>
   </TextButton>
 end

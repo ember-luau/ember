@@ -19,7 +19,7 @@ export function ToolCard(props: ToolCardProps) -> Instance
   const tags = table.move(tool.tags, 1, math.min(#tool.tags, 3), 1, {})
 
   return <TextButton
-    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color"
+    ClassName="card w-full h-auto p-3 flex-col gap-1.5 hover:bg-zinc-800 hover:stroke-zinc-700 transition-colors no-auto-color font-sans"
     Text=""
     Activated={function() props.on_open(tool) end}
   >
@@ -31,14 +31,14 @@ export function ToolCard(props: ToolCardProps) -> Instance
       {/if}
       <Frame ClassName="ghost h-5 fill" />
       <Icon name="download-simple" size={12} />
-      <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400">{count(tool.downloads)}</TextLabel>
+      <TextLabel ClassName="ghost w-auto h-5 text-xs text-zinc-400 font-sans">{count(tool.downloads)}</TextLabel>
     </Frame>
-    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15]">
+    <TextLabel ClassName="ghost w-full h-auto text-xs text-zinc-400 text-left text-wrap leading-[1.15] font-sans">
       {tool.description}
     </TextLabel>
     <Frame ClassName="ghost w-full h-5 flex items-center gap-1.5">
       {#each tags as tag (tag)}
-        <TextLabel ClassName="w-auto h-5 px-2 rounded-full bg-zinc-800 text-xs text-zinc-300">{tag}</TextLabel>
+        <TextLabel ClassName="w-auto h-5 px-2 rounded-full bg-zinc-800 text-xs text-zinc-300 font-sans">{tag}</TextLabel>
       {/each}
       {#if tool.source == 'github'}
         <Icon name="github-logo" size={12} />

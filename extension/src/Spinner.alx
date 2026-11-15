@@ -24,6 +24,6 @@ export function Spinner(props: { label: string? }) -> Instance
     <Frame ClassName="ghost size-5" Rotation={angle}>
       <Icon name="circle-notch" weight="bold" size={20} color={BRAND} />
     </Frame>
-    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500">{props.label or 'Loading'}</TextLabel>
+    <TextLabel ClassName="ghost w-auto h-4 text-xs text-zinc-500 font-sans">{props.label or 'Loading'}</TextLabel>
   </Frame>
 end

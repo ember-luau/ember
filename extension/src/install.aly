@@ -264,6 +264,39 @@ export function install(plan: Plan, progress: (string) -> ()) -> number
   return count
 end
 
+--- Removes what the installs wrote, in one undoable step: the `.ember`
+--- folders and the links, and a Packages folder they leave empty. Gives
+--- how many it removed.
+export function clear() -> number
+  const recording = ChangeHistoryService:TryBeginRecording('Clear Ember packages')
+  local removed = 0
+
+  for _, where in PLACES do
+    const root = where.parent:FindFirstChild(where.name)
+
+    if root == nil then
+      continue
+    end
+
+    for _, child in root:GetChildren() do
+      if child.Name == '.ember' or child:GetAttribute('Ember') then
+        child:Destroy()
+        removed += 1
+      end
+    end
+
+    if #root:GetChildren() == 0 then
+      root:Destroy()
+    end
+  end
+
+  if recording then
+    ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+  end
+
+  return removed
+end
+
 @test namespace Install
   public function a_folder_with_an_init_file_is_that_module() -> ()
     const tree = tree_of({

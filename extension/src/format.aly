@@ -61,37 +61,184 @@ end
 -- ends with a pointer to the site.
 const MAX_CHARS = 16000
 
+-- The colors of code, after the site's highlighter.
+const CODE = {
+  plain = '#d4d4d8',
+  keyword = '#ff7b72',
+  string = '#a5d6ff',
+  comment = '#71717a',
+  number = '#79c0ff',
+  call = '#d2a8ff',
+}
+
+local keywords: { [string]: boolean } = {}
+
+for _, word in string.split('and break const continue do else elseif end export false for function if import in local match case nil not or repeat return then true type until while from as struct enum impl trait', ' ') do
+  keywords[word] = true
+end
+
+local function paint(color: string, text: string) -> string
+  return `<font color="{color}">{escape(text)}</font>`
+end
+
+--- One line of Lua, Luau, or Alloy with its keywords, strings, comments,
+--- numbers, and calls colored. A string or comment that spans lines is
+--- colored on its first line alone.
+export function highlight(line: string) -> string
+  const out: { string } = {}
+  local i = 1
+
+  while i <= #line do
+    const rest = line:sub(i)
+    const ws = rest:match('^%s+')
+    const word = rest:match('^[%a_][%w_]*')
+    const number = rest:match('^0x%x+') or rest:match('^%d[%d_%.]*')
+    const quote = rest:sub(1, 1)
+
+    if ws then
+      table.insert(out, ws)
+      i += #ws
+    elseif rest:sub(1, 2) == '--' or rest:sub(1, 1) == '#' then
+      table.insert(out, paint(CODE.comment, rest))
+      break
+    elseif quote == '"' or quote == "'" or quote == '`' then
+      local close = i + 1
+
+      while close <= #line and line:sub(close, close) ~= quote do
+        close += if line:sub(close, close) == '\\' then 2 else 1
+      end
+
+      table.insert(out, paint(CODE.string, line:sub(i, close)))
+      i = close + 1
+    elseif word then
+      const after = line:sub(i + #word):match('^%s*[({"\']')
+      const color = if keywords[word] then CODE.keyword elseif after then CODE.call else CODE.plain
+      table.insert(out, paint(color, word))
+      i += #word
+    elseif number then
+      table.insert(out, paint(CODE.number, number))
+      i += #number
+    else
+      table.insert(out, paint(CODE.plain, rest:sub(1, 1)))
+      i += 1
+    end
+  end
+
+  return table.concat(out)
+end
+
+-- Bold, italic, links, and code inside one line of prose. Code spans are
+-- set aside first, so a `*` in code stays a `*`.
+local function inline(line: string) -> string
+  const spans: { string } = {}
+  local text = line:gsub('`([^`]+)`', function(code: string)
+    table.insert(spans, `<font face="RobotoMono" color="#e4e4e7">{escape(code)}</font>`)
+
+    return '\0' .. #spans .. '\0'
+  end)
+
+  text = escape(text)
+  text = text:gsub('%*%*(.-)%*%*', '<b>%1</b>')
+  text = text:gsub('__(.-)__', '<b>%1</b>')
+  text = text:gsub('%f[%w%*]%*([^%*]+)%*', '<i>%1</i>')
+  text = text:gsub('!?%[([^%]]*)%]%(([^%)]*)%)', '<font color="#ff7b5c"><u>%1</u></font>')
+  text = text:gsub('\0(%d+)\0', function(n: string) return spans[tonumber(n) :: number] end)
+
+  return text
+end
+
+-- A table row as text: its cells, apart. The first row of a table is bold.
+local function table_row(line: string, head: boolean) -> string
+  const cells: { string } = {}
+
+  for _, cell in string.split(line:gsub('^%s*|', ''):gsub('|%s*$', ''), '|') do
+    table.insert(cells, inline(cell:match('^%s*(.-)%s*$') or cell))
+  end
+
+  const row = table.concat(cells, '   <font color="#52525b">│</font>   ')
+
+  return if head then `<b>{row}</b>` else row
+end
+
+-- The fence languages that read as Lua, or close enough to color.
+const COLORED: { [string]: boolean } = { [''] = true, lua = true, luau = true, alloy = true, aly = true, alx = true, sh = true, bash = true, toml = true }
+
+-- One line of prose: a heading, a rule, a list item, a quote, or text.
+local function prose(line: string) -> string
+  const hashes, heading = line:match('^(#+)%s+(.*)$')
+  const indent, item = line:match('^(%s*)[%-%*%+]%s+(.*)$')
+  const quote = line:match('^>%s?(.*)$')
+
+  if heading and hashes then
+    const size = if #hashes == 1 then 20 elseif #hashes == 2 then 17 else 15
+
+    return `<b><font size="{size}" color="#f4f4f5">{inline(heading)}</font></b>`
+  elseif line:match('^%s*%-%-%-+%s*$') or line:match('^%s*%*%*%*+%s*$') then
+    return '<font color="#3f3f46">────────────────</font>'
+  elseif item and indent then
+    return `{indent}<font color="#71717a">•</font>  {inline(item)}`
+  elseif quote then
+    return `<font color="#a1a1aa"><i>{inline(quote)}</i></font>`
+  end
+
+  return inline(line)
+end
+
 --- Markdown as Roblox RichText: headings are bold and larger, code is
---- monospace, and the rest stays as written.
+--- monospace and colored, and bold, italics, links, lists, quotes, and
+--- tables read as they do on the site.
 export function rich(markdown: string) -> string
   const lines: { string } = {}
   local in_code = false
+  local colored = false
+  local table_head = true
   local text = markdown
 
   if #text > MAX_CHARS then
-    text = `{text:sub(1, MAX_CHARS)}\n\n…`
+    text = text:sub(1, MAX_CHARS) .. '\n\n…'
   end
 
   for _, line in string.split(text:gsub('\r', ''), '\n') do
-    if line:match('^%s*```') then
-      in_code = not in_code
-    elseif in_code then
-      table.insert(lines, `<font face="RobotoMono" color="#a1a1aa">{escape(line)}</font>`)
-    else
-      const hashes, heading = line:match('^(#+)%s+(.*)$')
+    const fence = line:match('^%s*```%s*([%w_%-]*)')
 
-      if heading and hashes then
-        const size = if #hashes == 1 then 20 elseif #hashes == 2 then 17 else 15
-        table.insert(lines, `<b><font size="{size}" color="#f4f4f5">{escape(heading)}</font></b>`)
-      else
-        -- Inline code in backticks, as monospace.
-        table.insert(
-          lines,
-          (escape(line):gsub('`([^`]+)`', '<font face="RobotoMono" color="#e4e4e7">%1</font>'))
-        )
+    if fence then
+      in_code = not in_code
+      colored = in_code and COLORED[fence] == true
+    elseif in_code then
+      const body = if colored then highlight(line) else paint(CODE.plain, line)
+      table.insert(lines, `<font face="RobotoMono" size="12">{body}</font>`)
+    elseif line:match('^%s*|') then
+      if not line:match('^%s*|[%s%-:|]+|%s*$') then
+        table.insert(lines, table_row(line, table_head))
+        table_head = false
       end
+    else
+      table_head = true
+      table.insert(lines, prose(line))
     end
   end
 
   return table.concat(lines, '\n')
+end
+
+@test namespace Markdown
+  public function prose_gets_bold_links_and_code() -> ()
+    const out = rich('A **bold** [link](https://x.y) and `a*b*c`.')
+    $assert(out:find('<b>bold</b>', 1, true) ~= nil)
+    $assert(out:find('<u>link</u>', 1, true) ~= nil)
+    $assert(out:find('a*b*c', 1, true) ~= nil)
+  end
+
+  public function code_is_colored_and_escaped() -> ()
+    const out = highlight('local x = "<a>" -- note')
+    $assert(out:find('#ff7b72">local', 1, true) ~= nil)
+    $assert(out:find('&lt;a&gt;', 1, true) ~= nil)
+    $assert(out:find('#71717a">-- note', 1, true) ~= nil)
+  end
+
+  public function a_table_drops_its_rule_and_bolds_its_head() -> ()
+    const out = rich('| A | B |\n| --- | --- |\n| 1 | 2 |')
+    $assert(out:find('<b>A', 1, true) ~= nil)
+    $assert(out:find('---', 1, true) == nil)
+  end
 end

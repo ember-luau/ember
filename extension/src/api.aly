@@ -209,8 +209,21 @@ end
 --- follows the redirect.
 export type Files = { main: string, files: { [string]: string } }
 
+-- The environments of index keys from before the renames.
+const RENAMED: { [string]: string } = { shared = 'roblox', server = 'roblox_server', portable = 'luau' }
+
+--- A target ID with its environment in today's name: `shared` is
+--- `roblox`, `server-alloy` is `roblox_server-alloy`. The files route
+--- takes today's names alone.
+export function current_target(target: string) -> string
+  const environment, rest = target:match('^([^%-]+)(.*)$')
+
+  return if environment and RENAMED[environment] then RENAMED[environment] .. (rest or '') else target
+end
+
 --- The sources of `name@version` for one target ID.
 export function package_files(name: string, version: string, target: string) -> Files
+  target = current_target(target)
   const rock = rock_of(name)
 
   if rock then
