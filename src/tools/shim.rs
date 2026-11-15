@@ -7,6 +7,7 @@ their projects. */
 use super::stored_executable;
 use crate::error::Error;
 use crate::project::manifest::{Tool, manifest_in};
+use crate::sys::binary;
 use crate::sys::paths;
 use crate::sys::process;
 use serde::Deserialize;
@@ -71,15 +72,30 @@ pub fn run(alias: &str) -> Result<i32, Error> {
     }
 }
 
-/// the shim an alias is invoked through, e.g. ~/.ember/bin/stylua.
+/** the shim an alias is invoked through, e.g. ~/.ember/bin/stylua. aliases
+are TOML keys from a manifest, possibly a cloned project's, and a "../.."
+one would put the shim, and the files written while swapping it, outside
+the bin folder. */
 pub fn path(alias: &str) -> Result<PathBuf, Error> {
+    if !paths::is_plain_file_name(alias) {
+        return Err(Error::InvalidToolAlias(alias.to_string()));
+    }
     Ok(paths::bin_dir()?.join(format!("{alias}{}", env::consts::EXE_SUFFIX)))
 }
 
-/// writes the alias shim, a copy of embr.
+/** writes the alias shim, a copy of embr. installs refresh every shim, and
+any of them can be running (an editor's `rojo sourcemap --watch`, the lune
+script that called `embr install`), so an up to date shim is left alone and
+a stale one is swapped by rename instead of being written over. */
 pub fn write(shim: &Path) -> Result<(), Error> {
     fs::create_dir_all(shim.parent().expect("bin dir has a parent"))?;
-    fs::copy(embr_executable()?, shim)?;
+    let embr = embr_executable()?;
+    if !binary::same_contents(&embr, shim) {
+        binary::replace(&embr, shim).map_err(|source| Error::ShimWrite {
+            path: shim.to_path_buf(),
+            source,
+        })?;
+    }
     super::make_executable(shim)
 }
 
@@ -199,6 +215,18 @@ fn get_tool<'a>(tools: &'a BTreeMap<String, Tool>, alias: &str) -> Option<&'a To
 mod tests {
     use super::*;
     use crate::project::manifest::MANIFEST_FILE;
+
+    #[test]
+    fn shim_paths_refuse_aliases_that_leave_the_bin_folder() {
+        for alias in ["../../notes", "a/b", r"a\b", "C:x", "..", ""] {
+            assert!(
+                matches!(path(alias), Err(Error::InvalidToolAlias(_))),
+                "{alias:?} should be refused"
+            );
+        }
+        assert!(!matches!(path("rojo"), Err(Error::InvalidToolAlias(_))));
+        assert!(!matches!(path("foo.old"), Err(Error::InvalidToolAlias(_))));
+    }
 
     #[test]
     fn shim_aliases_exclude_embr_itself() {

@@ -1188,7 +1188,7 @@ fn assert_links_fit(jobs: &[Job]) -> Result<(), Error> {
             .filter_map(|job| Some((job.link.as_deref()?, job.context)))
     };
     for (link, context) in links() {
-        if is_plain_file_name(link) {
+        if paths::is_plain_file_name(link) {
             continue;
         }
         let (scope, _) = manifest::split_package_name(link)
@@ -1294,7 +1294,7 @@ fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
             .filter(|package| package.context() == environment)
             .filter_map(|package| package.link.as_deref())
             // the lock is a file on disk, so a link must not climb out of the folder
-            .filter(|link| link.split('/').all(is_plain_file_name));
+            .filter(|link| link.split('/').all(paths::is_plain_file_name));
         for link in links {
             let file = legacy.join(format!("{link}.luau"));
             let _ = fs::remove_file(&file);
@@ -1883,7 +1883,7 @@ fn link_nested_dependencies(packages: &[StoredPackage], warn: &mut impl FnMut(St
             /* aliases are TOML keys from a downloaded manifest, and TOML
             keys can be quoted anything. a "../.." or absolute one would put
             the link outside the package or outside the project */
-            if !is_plain_file_name(&alias) {
+            if !paths::is_plain_file_name(&alias) {
                 warn(format!(
                     "warning: {} declares dependency {dependency} under the unusable alias '{alias}'; no nested link generated",
                     package.name
@@ -2035,15 +2035,6 @@ fn relative_root(from: &Path, to: &Path) -> String {
     } else {
         format!("./{root}")
     }
-}
-
-/// one ordinary path segment, no separators, no drive letter, not `.` or `..`.
-fn is_plain_file_name(alias: &str) -> bool {
-    !alias.is_empty()
-        && alias != "."
-        && alias != ".."
-        && !alias.contains(['/', '\\', ':'])
-        && !Path::new(alias).is_absolute()
 }
 
 /** exported types have to be restated in the link file to survive the

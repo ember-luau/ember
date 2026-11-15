@@ -351,6 +351,20 @@ pub enum Error {
     #[error("Alias '{0}' is reserved for embr itself and can't name a tool")]
     ReservedToolAlias(String),
 
+    #[error(
+        "Alias '{0}' can't name a tool: it has to be a plain file name, without '/', '\\' or ':'"
+    )]
+    InvalidToolAlias(String),
+
+    #[error(
+        "Could not write the tool shim {}: {source}. If a program started through it is still running, close it and run the install again",
+        .path.display()
+    )]
+    ShimWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
     #[error("Invalid spec '{0}': expected a name or 'owner/repo', optionally with '@version'")]
     ExecuteSpecInvalid(String),
 
