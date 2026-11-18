@@ -10,8 +10,11 @@ on:
   # the latest release and push nothing. The Nix job builds the flake.
   workflow_dispatch:
 
+# Read-only by default. The two jobs that write to the release, build and
+# checksums, ask for that themselves, so a step in any other job cannot
+# change a release with the workflow's token.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +27,7 @@ jobs:
     name: Verify tag matches Cargo.toml
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check version
         run: |
           crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
@@ -51,9 +54,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Verification is left on deliberately. It builds the packaged crate,
       # which is the only thing that catches an `exclude` in Cargo.toml having
       # dropped a file the build needs, and the job above never sees that.
@@ -111,12 +116,19 @@ jobs:
             target: x86_64-apple-darwin
             asset: embr-macos-x86_64
     runs-on: ${{ matrix.os }}
+    # contents: write uploads the assets to the release. id-token and
+    # attestations sign the build provenance below.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install zig and cargo-zigbuild
         if: matrix.zig
         run: |
@@ -177,9 +189,20 @@ jobs:
             (cd pack && zip -q "../dist/$asset.zip" "$binary")
           fi
           ls -l dist
+      # A signed statement that these files were built by this workflow, from
+      # this commit. `embr self update` checks a download against the SHA-256
+      # that GitHub lists, and whoever can publish a release can list any
+      # hash. This is the check that such a release would fail:
+      #
+      #   gh attestation verify embr-linux-x86_64.zip --repo ember-luau/ember
+      - name: Attest the build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/*
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           # No generated notes: this step runs once per matrix platform, and
@@ -210,6 +233,9 @@ jobs:
     name: SHA256SUMS
     needs: build
     runs-on: ubuntu-latest
+    # uploads SHA256SUMS to the release
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.sum.outputs.version }}
     env:
@@ -235,7 +261,7 @@ jobs:
       - name: Upload SHA256SUMS to the release
         if: startsWith(github.ref, 'refs/tags/')
         run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS -R "$REPO" --clobber
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SHA256SUMS
           path: assets/SHA256SUMS
@@ -261,8 +287,8 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: SHA256SUMS
       - name: Write and test the formula
@@ -295,8 +321,8 @@ jobs:
     env:
       VERSION: ${{ needs.checksums.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: SHA256SUMS
       - name: Write the manifest
@@ -332,8 +358,8 @@ jobs:
     env:
       VERSION: ${{ needs.checksums.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: SHA256SUMS
       - name: Write the manifests
@@ -381,7 +407,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       - name: Check the flake
         run: nix flake check --print-build-logs

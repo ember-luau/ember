@@ -26,6 +26,50 @@ const SKIP_NAMES: [&str; 7] = [
 /// `src/*`. `excludes` subtracts from the selection, and ember.toml always
 /// ships.
 pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
+    Ok(select(root, manifest)?.0)
+}
+
+/** the files that publish holds back because their names say they hold a
+secret, see [`is_secret`], sorted. `embr publish` prints them, so that
+nobody wonders where a file went. */
+pub fn held_back(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Error> {
+    Ok(select(root, manifest)?.1)
+}
+
+/** whether a file of this name holds a secret more often than not: an env
+file, a private key, a token file of a package manager. a published
+version cannot be taken back, and a walk of the project folder takes every
+file it finds, so these stay out. `.env.example` and its kind are
+templates and ship. a file that has to ship anyway is named in
+`includes` by its whole path. */
+fn is_secret(file: &Path) -> bool {
+    let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let template = [".example", ".sample", ".template", ".dist", ".defaults"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix));
+    let env = name == ".env" || (name.starts_with(".env.") && !template);
+    let key = [".pem", ".key", ".p12", ".pfx", ".keystore"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix));
+    let named = [
+        ".npmrc",
+        ".netrc",
+        ".pypirc",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials.toml",
+    ]
+    .contains(&name.as_str());
+    env || key || named
+}
+
+/// the files to publish, and the ones held back as secrets, both sorted.
+fn select(root: &Path, manifest: &Manifest) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Error> {
     let mut out_dirs: Vec<PathBuf> = Environment::ALL
         .into_iter()
         .map(|environment| manifest.packages_out(environment))
@@ -62,6 +106,7 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
         .as_ref()
         .and_then(|package| package.logo.as_deref())
         .map(|logo| PathBuf::from(logo.replace('\\', "/").trim_start_matches("./")));
+    let mut held = Vec::new();
     files.retain(|file| {
         if is_manifest(file) || logo.as_deref() == Some(file.as_path()) {
             return true;
@@ -69,11 +114,20 @@ pub fn packed_files(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>, Er
         if !includes.is_empty() && !includes.matches(file) {
             return false;
         }
-        !excludes.matches(file)
+        if excludes.matches(file) {
+            return false;
+        }
+        // `includes = ["src"]` does not ask for src/.env, `includes = ["src/.env"]` does
+        if is_secret(file) && !includes.names(file) {
+            held.push(file.clone());
+            return false;
+        }
+        true
     });
 
     files.sort();
-    Ok(files)
+    held.sort();
+    Ok((files, held))
 }
 
 /** One includes/excludes list, compiled. Entries with glob metacharacters
@@ -111,6 +165,11 @@ impl PathFilter {
 
     fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.globs.is_empty()
+    }
+
+    /// whether an entry is `file` itself, not a folder above it and not a glob.
+    fn names(&self, file: &Path) -> bool {
+        self.paths.iter().any(|path| path == file)
     }
 
     pub(crate) fn matches(&self, file: &Path) -> bool {
@@ -635,6 +694,70 @@ mod tests {
             check(traits),
             refused("feature-files needs a main module that ships; set `main` under [target]")
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn files_named_like_secrets_stay_out_unless_named() {
+        let base = std::env::temp_dir().join("embr-test-pack-secrets");
+        let _ = fs::remove_dir_all(&base);
+        write(&base, "ember.toml", "");
+        write(&base, "src/init.luau", "return {}");
+        write(&base, ".env", "TOKEN=x");
+        write(&base, ".env.production", "TOKEN=x");
+        write(&base, ".env.example", "TOKEN=");
+        write(&base, "src/.ENV", "TOKEN=x");
+        write(&base, "deploy/server.pem", "");
+        write(&base, "deploy/id_ed25519", "");
+        write(&base, ".npmrc", "//registry.npmjs.org/:_authToken=x");
+        write(&base, "src/environment.luau", "return {}");
+        write(&base, "src/keys.luau", "return {}");
+
+        let plain = parse_manifest("[package]\nname = \"acme/rocket\"\nversion = \"1.0.0\"");
+        let paths = |files: Vec<PathBuf>| -> Vec<String> {
+            files.iter().map(|file| tar_path(file)).collect()
+        };
+        assert_eq!(
+            paths(packed_files(&base, &plain).unwrap()),
+            [
+                ".env.example",
+                "ember.toml",
+                "src/environment.luau",
+                "src/init.luau",
+                "src/keys.luau"
+            ]
+        );
+        assert_eq!(
+            paths(held_back(&base, &plain).unwrap()),
+            [
+                ".env",
+                ".env.production",
+                ".npmrc",
+                "deploy/id_ed25519",
+                "deploy/server.pem",
+                "src/.ENV"
+            ]
+        );
+
+        /* a folder in `includes` does not ask for the secret inside it, the
+        file's own path does. an excluded file is not reported as held back */
+        let named = parse_manifest(
+            "[package]\nname = \"acme/rocket\"\nversion = \"1.0.0\"\n\n\
+             [target]\nenvironment = \"luau\"\n\
+             includes = [\"src\", \"deploy/server.pem\", \"deploy/id_ed25519\"]\n\
+             excludes = [\"deploy/id_ed25519\"]",
+        );
+        assert_eq!(
+            paths(packed_files(&base, &named).unwrap()),
+            [
+                "deploy/server.pem",
+                "ember.toml",
+                "src/environment.luau",
+                "src/init.luau",
+                "src/keys.luau"
+            ]
+        );
+        assert_eq!(paths(held_back(&base, &named).unwrap()), ["src/.ENV"]);
         let _ = fs::remove_dir_all(&base);
     }
 }

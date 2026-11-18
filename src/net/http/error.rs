@@ -22,6 +22,12 @@ pub enum HttpError {
 
     #[error("rate limited")]
     RateLimited,
+
+    #[error("{url} is not in a cache, and --offline lets embr download nothing")]
+    Offline { url: String },
+
+    #[error("the response is larger than {} MiB, the most embr downloads", limit >> 20)]
+    BodyTooLarge { limit: u64 },
 }
 
 /* Boxed because ureq::Error is big enough to bloat every Result<_, Error>
@@ -31,6 +37,18 @@ impl From<ureq::Error> for HttpError {
         match error {
             ureq::Error::Status(404, _) => HttpError::NotFound,
             ureq::Error::Status(403 | 429, _) => HttpError::RateLimited,
+            // the name lookup is where `--offline` stops a request, see `net::offline`
+            ureq::Error::Transport(transport)
+                if crate::net::offline::is_enabled()
+                    && transport.kind() == ureq::ErrorKind::Dns =>
+            {
+                HttpError::Offline {
+                    url: transport
+                        .url()
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
+                }
+            }
             other => HttpError::Request(Box::new(other)),
         }
     }

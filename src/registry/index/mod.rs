@@ -11,6 +11,7 @@ use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language};
 use crate::registry::local;
 use crate::sys;
 use crate::sys::hash::{fnv1a, fnv1a_parts, sha256_hex};
+use crate::sys::limit;
 use crate::sys::paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -388,7 +389,7 @@ pub fn download_with(
     `git::export`. the commit is its integrity, so it has no archive hash */
     if let DownloadSource::Git { url, rev, .. } = source {
         git::export(url, rev, dest)?;
-        remove_links(dest)?;
+        remove_unsafe(dest)?;
         return Ok(String::new());
     }
     let entry = match source {
@@ -456,13 +457,15 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
     match source {
         DownloadSource::Zip { .. } => {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+            limit::check_zip(&mut archive, limit::PACKAGE_BYTES)?;
             archive.extract(dest)?;
         }
         DownloadSource::TarGz { .. } => {
             /* ureq already gunzips Content-Encoding: gzip bodies, leaving a
             raw tar, so sniff the magic bytes instead of assuming. */
             if bytes.starts_with(&[0x1f, 0x8b]) {
-                let decoder = flate2::read::GzDecoder::new(bytes);
+                let decoder =
+                    limit::Capped::new(flate2::read::GzDecoder::new(bytes), limit::PACKAGE_BYTES);
                 tar::Archive::new(decoder).unpack(dest)?;
             } else {
                 tar::Archive::new(bytes).unpack(dest)?;
@@ -474,27 +477,51 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
             unreachable!("rejected by download")
         }
     }
-    remove_links(dest)
+    remove_unsafe(dest)
 }
 
-/** removes every symbolic link under `dir`. the tar and zip crates refuse
-to write through a link, but they keep the link itself. a link to a file
-out of the package folder then reaches the steps after the extract: the
-require rewrite reads that file and writes it back, and Rojo syncs it into
-the place. a package needs no links, so none stay. */
-fn remove_links(dir: &Path) -> Result<(), Error> {
+/** removes every symbolic link and every `.git` entry under `dir`.
+
+the tar and zip crates refuse to write through a link, but they keep the
+link itself. a link to a file out of the package folder then reaches the
+steps after the extract: the require rewrite reads that file and writes it
+back, and Rojo syncs it into the place. a package needs no links, so none
+stay.
+
+a `.git` that an archive ships is a repository of the publisher's making.
+git obeys its config, and `core.fsmonitor` there names a program that git
+runs. `embr patch` runs git in the extracted folder, and so does anyone who
+types a git command in the installed package. `embr publish` never packs
+one, so only a hand-made archive holds it, and it goes at any depth. */
+fn remove_unsafe(dir: &Path) -> Result<(), Error> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;
+        let path = entry.path();
         if kind.is_symlink() {
             // a link to a folder is a folder entry on Windows
-            let path = entry.path();
             fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))?;
+        } else if is_git_name(&entry.file_name()) {
+            if kind.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
         } else if kind.is_dir() {
-            remove_links(&entry.path())?;
+            remove_unsafe(&path)?;
         }
     }
     Ok(())
+}
+
+/** whether git would read a file or folder of this name as its `.git`.
+case does not matter on Windows and macOS, and Windows drops the dots and
+spaces that end a name, so `.GIT` and `.git.` name the same folder there. */
+fn is_git_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(".git")
+    })
 }
 
 /** the archive's bytes and their SHA-256, from the cache when allowed and
@@ -694,6 +721,12 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
     let stamp = dir.join(REFRESH_STAMP);
 
     if dir.join(".git").exists() {
+        // offline, the copy on disk is the index, however old it is
+        let refresh = if crate::net::offline::is_enabled() {
+            Refresh::Never
+        } else {
+            refresh
+        };
         let wanted = match refresh {
             Refresh::Never => false,
             Refresh::Force => true,
@@ -720,16 +753,39 @@ fn ensure_cached(url: &str, refresh: Refresh) -> Result<(PathBuf, bool), Error> 
         return Ok((dir, false));
     }
 
+    check_index_url(url)?;
     std::fs::create_dir_all(dir.parent().expect("cache dir has a parent"))?;
     let started = std::time::Instant::now();
     fetch(
         url,
-        &["clone", "--depth", "1", url, &dir.to_string_lossy()],
+        &["clone", "--depth", "1", "--", url, &dir.to_string_lossy()],
         STALL_SECS,
     )?;
     crate::ui::timing(&format!("index-clone {url}"), started);
     touch(&stamp);
     Ok((dir, false))
+}
+
+/** refuses an index URL that git would not read as a place to clone from.
+the URL comes from [indices], from ember.lock, or from an index entry, so
+it is text that someone else may have written. a leading `-` would reach
+git as an option, and `<transport>::<address>` names a remote helper such
+as `ext::`, which runs a program. the clone also passes `--` before it. */
+fn check_index_url(url: &str) -> Result<(), Error> {
+    let helper = url.split_once("::").is_some_and(|(transport, _)| {
+        !transport.is_empty()
+            && transport
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if url.is_empty() || url.starts_with('-') || helper || url.chars().any(char::is_control) {
+        return Err(Error::IndexFetch {
+            url: url.to_string(),
+            reason: "this is not a URL that embr clones an index from; use an https or ssh URL"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /** git sets no deadline of its own. a host that holds the connection open,
@@ -744,6 +800,10 @@ const FETCH_ATTEMPTS: u32 = 3;
 a stall can pass, so it gets FETCH_ATTEMPTS tries with a short wait between
 them. any other failure, a 404 or a bad url, fails at once. */
 fn fetch(url: &str, args: &[&str], stall_secs: u32) -> Result<(), Error> {
+    // every clone, pull and fetch of an index or a git dependency comes through here
+    if crate::net::offline::is_enabled() {
+        return Err(Error::Offline(format!("{url} is not in the cache")));
+    }
     let stall = format!("http.lowSpeedTime={stall_secs}");
     let mut full = vec!["-c", "http.lowSpeedLimit=1", "-c", &stall];
     full.extend_from_slice(args);
@@ -1359,5 +1419,67 @@ mod tests {
             pesde,
             cache_dir("https://github.com/pesde-pkg/index").unwrap()
         );
+    }
+
+    #[test]
+    fn extraction_drops_links_and_git_folders() {
+        let dir = std::env::temp_dir().join("embr-test-remove-unsafe");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("src/nested/.GIT")).unwrap();
+        fs::create_dir_all(dir.join("src/.github")).unwrap();
+        fs::write(dir.join(".git/config"), "[core]\n\tfsmonitor = \"x\"\n").unwrap();
+        fs::write(dir.join("src/nested/.GIT/config"), "").unwrap();
+        // a submodule's `.git` is a file that points at the real folder
+        fs::write(dir.join("src/.git"), "gitdir: ../elsewhere\n").unwrap();
+        fs::write(dir.join("src/.gitignore"), "out\n").unwrap();
+        fs::write(dir.join("src/init.luau"), "return 1\n").unwrap();
+
+        remove_unsafe(&dir).unwrap();
+
+        assert!(!dir.join(".git").exists());
+        assert!(!dir.join("src/nested/.GIT").exists());
+        assert!(!dir.join("src/.git").exists());
+        // names that only start like it stay
+        assert!(dir.join("src/.gitignore").exists());
+        assert!(dir.join("src/.github").exists());
+        assert!(dir.join("src/init.luau").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_names_match_what_windows_and_macos_would_open() {
+        for name in [".git", ".GIT", ".Git", ".git.", ".git ", ".git. ."] {
+            assert!(is_git_name(std::ffi::OsStr::new(name)), "{name}");
+        }
+        for name in [".gitignore", ".github", "git", ".gitattributes", "a.git"] {
+            assert!(!is_git_name(std::ffi::OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn index_urls_that_git_would_read_as_something_else_are_refused() {
+        for bad in [
+            "",
+            "--upload-pack=touch /tmp/x;",
+            "-c",
+            "ext::sh -c id",
+            "fd::3",
+            "https://example.com/in\ndex",
+        ] {
+            assert!(
+                matches!(check_index_url(bad), Err(Error::IndexFetch { .. })),
+                "{bad:?}"
+            );
+        }
+        for good in [
+            "https://github.com/ember-luau/index",
+            "git@github.com:acme/index.git",
+            "ssh://git@example.com/acme/index",
+            "/tmp/a local index",
+            "C:\\Users\\me\\index",
+        ] {
+            assert!(check_index_url(good).is_ok(), "{good}");
+        }
     }
 }

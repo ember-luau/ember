@@ -47,6 +47,11 @@ pub fn install(package: &str, version: &str) -> Result<bool, Error> {
     if is_stored(package, version)? {
         return Ok(false);
     }
+    if crate::net::offline::is_enabled() {
+        return Err(Error::Offline(format!(
+            "the npm tool {package}@{version} is not stored"
+        )));
+    }
     let storage = storage_dir(package, version)?;
     let staging = Staging(paths::with_suffix(
         &storage,
@@ -59,7 +64,7 @@ pub fn install(package: &str, version: &str) -> Result<bool, Error> {
 
     let spec = format!("{package}@{version}");
     let output = npm()
-        .args(install_args(&staging.0, &spec))
+        .args(install_args(&staging.0, &spec, scripts_allowed()))
         .stdin(Stdio::null())
         .output()
         .map_err(not_found_is_node_missing)?;
@@ -90,12 +95,30 @@ pub fn install(package: &str, version: &str) -> Result<bool, Error> {
     Ok(true)
 }
 
+/** lets the install scripts of an npm tool run, when it is set to `1`.
+see [`install_args`]. */
+pub const SCRIPTS_VAR: &str = "EMBER_NPM_SCRIPTS";
+
+/// whether the user asked for npm's install scripts with [`SCRIPTS_VAR`].
+fn scripts_allowed() -> bool {
+    std::env::var(SCRIPTS_VAR).is_ok_and(|value| value.trim() == "1")
+}
+
 /** the npm arguments that install `spec` into `prefix`, apart from every
 other project. no package.json and no lockfile get written there, and the
-dev dependencies of the tool stay out. */
-fn install_args(prefix: &Path, spec: &str) -> Vec<std::ffi::OsString> {
+dev dependencies of the tool stay out.
+
+`--ignore-scripts` unless `scripts` is true. the tool is pinned, but the
+packages it depends on are not, and each of them may hold a `postinstall`
+that npm would run during `embr install`, before anyone ran the tool. a
+tool that needs its scripts, to fetch a binary say, installs with
+`EMBER_NPM_SCRIPTS=1`. */
+fn install_args(prefix: &Path, spec: &str, scripts: bool) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec!["install".into(), "--prefix".into()];
     args.push(prefix.into());
+    if !scripts {
+        args.push("--ignore-scripts".into());
+    }
     for flag in [
         "--no-save",
         "--no-package-lock",
@@ -275,9 +298,13 @@ mod tests {
 
     #[test]
     fn install_writes_into_its_own_prefix_only() {
-        let args = install_args(Path::new("/stage"), "azul-sync@2.4.0");
+        let args = install_args(Path::new("/stage"), "azul-sync@2.4.0", false);
         let args: Vec<_> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
         assert_eq!(args[..3], ["install", "--prefix", "/stage"]);
+        // no script of the tool or of its dependencies runs, unless the user asks
+        assert!(args.contains(&"--ignore-scripts"));
+        let with_scripts = install_args(Path::new("/stage"), "azul-sync@2.4.0", true);
+        assert!(!with_scripts.iter().any(|arg| arg == "--ignore-scripts"));
         assert!(args.contains(&"--no-save"));
         assert!(args.contains(&"--no-package-lock"));
         assert!(args.contains(&"--omit=dev"));

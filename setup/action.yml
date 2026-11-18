@@ -1,0 +1,82 @@
+# Installs embr on a runner, restores its caches, and installs the project.
+#
+#   - uses: actions/checkout@v4
+#   - uses: ember-luau/ember/setup@v1.0.0
+#
+# After it, the project's packages are installed, and embr and the pinned
+# tools (rojo, stylua, ...) are on PATH for the steps that follow.
+#
+# The install is `embr install --locked`: exactly what ember.lock records,
+# and an error when ember.toml has changed since the lock was written. So a
+# pull request that edits ember.toml and forgets ember.lock fails here.
+name: Set up Ember
+description: Install embr, restore its caches, and install the packages and tools that ember.lock pins
+branding:
+  icon: package
+  color: red
+
+inputs:
+  version:
+    description: The embr to install, such as 1.0.0. `latest` is the newest stable release.
+    default: latest
+  install:
+    description: Whether to run `embr install --locked` in the project.
+    default: "true"
+  working-directory:
+    description: The folder that holds ember.toml.
+    default: "."
+  cache:
+    description: Whether to keep embr's downloads (indices, package archives, git dependencies, tools) between runs.
+    default: "true"
+  verify-provenance:
+    description: Whether to check the build provenance of the embr download with `gh attestation verify`. Works for releases that attest their builds.
+    default: "false"
+  token:
+    description: The token embr asks the GitHub API with, for the releases of the pinned tools. The default token of the workflow avoids the rate limit of anonymous requests.
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The version of embr that was installed.
+    value: ${{ steps.embr.outputs.version }}
+  cache-hit:
+    description: Whether the cache had an entry for this exact ember.lock.
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install embr
+      id: embr
+      shell: bash
+      env:
+        EMBR_VERSION: ${{ inputs.version }}
+        EMBR_PROVENANCE: ${{ inputs.verify-provenance }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"
+
+    # The downloads, not the installed tree: `embr install` builds the
+    # packages folders from these in well under a second. ~/.ember/bin and
+    # the login file stay out. embr writes the shims again on each install,
+    # and a cache is no place for a token.
+    - name: Restore embr's caches
+      if: inputs.cache == 'true'
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.ember/index-cache
+          ~/.ember/archive-cache
+          ~/.ember/git-cache
+          ~/.ember/tools
+        key: embr-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/ember.lock', '**/ember.toml') }}
+        restore-keys: |
+          embr-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install packages and tools
+      if: inputs.install == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: embr install --locked

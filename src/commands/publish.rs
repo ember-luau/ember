@@ -147,6 +147,7 @@ fn publish_project(
     if building && manifest.all_dependencies().next().is_some() {
         let args = super::install::InstallArgs {
             locked: false,
+            offline: false,
             refresh: false,
             strict_peers: false,
             update: Vec::new(),
@@ -289,6 +290,19 @@ fn publish_target(
     }
 
     let files = pack::packed_files(root, manifest)?;
+    let held_back = pack::held_back(root, manifest)?;
+    if !held_back.is_empty() {
+        let names: Vec<String> = held_back.iter().map(|file| pack::tar_path(file)).collect();
+        eprintln!(
+            "warning: embr leaves {} out of {package}, because {} named like a file that holds a secret; to publish one anyway, name it in `includes` by its whole path",
+            names.join(", "),
+            if names.len() == 1 {
+                "it is"
+            } else {
+                "they are"
+            }
+        );
+    }
     let owned = pack::check_file_features(root, manifest, &files)?;
     if let Some(highlight) = &manifest.highlight {
         highlight::check(highlight).map_err(Error::HighlightInvalid)?;

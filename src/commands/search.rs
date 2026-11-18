@@ -3,8 +3,8 @@ use crate::commands::mcp;
 use crate::error::Error;
 use crate::net::registry;
 use crate::project::manifest::{Environment, Language};
+use crate::ui::Stylize;
 use clap::Args;
-use crossterm::style::Stylize;
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {

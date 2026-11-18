@@ -24,8 +24,38 @@ pub const FORMAT: u32 = 2;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Lockfile {
     pub version: u32,
+    /** what ember.toml asked for at the install that wrote this lock, as
+    [`crate::project::manifest::Manifest::dependency_hash`] has it.
+    `--locked` refuses to install when ember.toml asks for something else
+    now. additive within v2: a lock from before it has none, and `--locked`
+    then says so and installs. */
+    #[serde(
+        rename = "manifest-hash",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub manifest_hash: Option<String>,
     #[serde(default, rename = "package")]
     pub packages: Vec<LockedPackage>,
+    /** the release assets of the project's [tools] that an install has
+    downloaded, each with its SHA-256. a GitHub release can be replaced
+    under the same version, and this is what notices. additive within v2. */
+    #[serde(default, rename = "tool", skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LockedTool>,
+}
+
+/** one release asset of a pinned tool. a tool has one asset for each
+platform, so a lock that two platforms have written holds two entries for
+the tool. a tool that npm publishes has none: npm checks its own. */
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockedTool {
+    /// the tool as [tools] names it, "owner/repo" or "ember:scope/name".
+    pub name: String,
+    pub version: String,
+    /// the file name of the release asset.
+    pub asset: String,
+    /// lowercase hex SHA-256 of the asset as it was downloaded.
+    pub sha256: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -132,8 +162,24 @@ impl Lockfile {
             /* in v2 `link` went optional, absent on transitives, and `context`
             arrived. v1 locks load fine. */
             version: FORMAT,
+            manifest_hash: None,
             packages,
+            tools: Vec::new(),
         }
+    }
+
+    /// this lock, written for the ember.toml with the dependency hash `hash`.
+    pub fn for_manifest(mut self, hash: String) -> Self {
+        self.manifest_hash = Some(hash);
+        self
+    }
+
+    /// this lock with the tool assets `tools`, in a fixed order.
+    pub fn with_tools(mut self, mut tools: Vec<LockedTool>) -> Self {
+        tools.sort();
+        tools.dedup();
+        self.tools = tools;
+        self
     }
 
     pub fn load() -> Result<Self, Error> {
@@ -154,7 +200,50 @@ impl Lockfile {
         {
             return Err(Error::LockfileNewer(version));
         }
-        Ok(toml::from_str(text)?)
+        let lock: Lockfile = toml::from_str(text)?;
+        lock.check()?;
+        Ok(lock)
+    }
+
+    /** refuses the values that embr never writes and that would reach git
+    or a path. a lockfile is text that a pull request can change, and few
+    people read its diff. ember.toml gets the same checks when it loads,
+    but `--locked` installs from here alone. */
+    fn check(&self) -> Result<(), Error> {
+        for package in &self.packages {
+            if let DownloadSource::Git { url, rev, .. } = &package.source {
+                crate::registry::index::git::check_url(url).map_err(|_| {
+                    Error::LockfileInvalid(format!(
+                        "has the git URL '{url}' for {}, which is not an https or ssh URL",
+                        package.name
+                    ))
+                })?;
+                // git would read a leading dash as an option, and a commit is hex
+                if rev.is_empty() || !rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(Error::LockfileInvalid(format!(
+                        "has the git commit '{rev}' for {}, which is not a commit id",
+                        package.name
+                    )));
+                }
+            }
+            if let Some(sha256) = &package.sha256
+                && !crate::sys::hash::is_sha256_hex(sha256)
+            {
+                return Err(Error::LockfileInvalid(format!(
+                    "has a sha256 for {} that is not 64 lowercase hex characters",
+                    package.name
+                )));
+            }
+        }
+        for tool in &self.tools {
+            if !crate::sys::hash::is_sha256_hex(&tool.sha256) {
+                return Err(Error::LockfileInvalid(format!(
+                    "has a sha256 for the tool {} that is not 64 lowercase hex characters",
+                    tool.name
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> Result<(), Error> {
@@ -195,6 +284,12 @@ mod tests {
         "package.branch",
         "package.tag",
         "package.sha256",
+        "manifest-hash",
+        "tool",
+        "tool.name",
+        "tool.version",
+        "tool.asset",
+        "tool.sha256",
     ];
 
     /// the dotted path of each key in `table`. a map of names, such as `redirects`, is one key.
@@ -205,7 +300,7 @@ mod tests {
                 toml::Value::Table(inner) if key != "redirects" => {
                     keys(&format!("{path}."), inner, out)
                 }
-                toml::Value::Array(items) if key == "package" => {
+                toml::Value::Array(items) if key == "package" || key == "tool" => {
                     for item in items.iter().filter_map(toml::Value::as_table) {
                         keys(&format!("{path}."), item, out);
                     }
@@ -259,8 +354,18 @@ mod tests {
                 sha256: Some(crate::sys::hash::sha256_hex(b"thing")),
             })
             .collect();
-        let written: toml::Table =
-            toml::from_str(&toml::to_string(&Lockfile::new(packages)).unwrap()).unwrap();
+        let lock = Lockfile::new(packages)
+            .for_manifest(crate::sys::hash::sha256_hex(b"manifest"))
+            .with_tools(vec![LockedTool {
+                name: "rojo-rbx/rojo".to_string(),
+                version: "7.4.4".to_string(),
+                asset: "rojo-7.4.4-linux-x86_64.zip".to_string(),
+                sha256: crate::sys::hash::sha256_hex(b"rojo"),
+            }]);
+        let text = toml::to_string(&lock).unwrap();
+        // what embr writes, embr reads
+        Lockfile::parse(&text).unwrap();
+        let written: toml::Table = toml::from_str(&text).unwrap();
         let mut found = std::collections::BTreeSet::new();
         keys("", &written, &mut found);
         let known: std::collections::BTreeSet<String> =
@@ -502,5 +607,69 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.packages[0].link.as_deref(), Some("thing"));
         assert_eq!(parsed.packages[0].context(), Environment::Roblox);
+    }
+
+    fn git_lock(url: &str, rev: &str) -> String {
+        format!(
+            "version = 2\n\n[[package]]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+             environment = \"luau\"\nindex = \"git\"\ntype = \"git\"\n\
+             url = \"{url}\"\nrev = \"{rev}\"\n"
+        )
+    }
+
+    /** `--locked` hands the URL and the commit of a git package to git
+    with no look at ember.toml, so the lock itself has to refuse the ones
+    that the manifest check refuses. */
+    #[test]
+    fn a_git_source_that_embr_never_writes_is_refused() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert!(Lockfile::parse(&git_lock("https://github.com/acme/lib", commit)).is_ok());
+        for url in [
+            "ext::sh -c id",
+            "--upload-pack=id",
+            "file:///etc",
+            "http://github.com/acme/lib",
+        ] {
+            let error = Lockfile::parse(&git_lock(url, commit)).unwrap_err();
+            assert!(
+                matches!(&error, Error::LockfileInvalid(reason) if reason.contains("git URL")),
+                "{url}: {error}"
+            );
+        }
+        for rev in ["--output=/tmp/x", "", "main", "HEAD~1"] {
+            let error = Lockfile::parse(&git_lock("https://github.com/acme/lib", rev)).unwrap_err();
+            assert!(
+                matches!(&error, Error::LockfileInvalid(reason) if reason.contains("commit")),
+                "{rev}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_that_is_not_a_sha256_is_refused() {
+        let tool = |sha256: &str| {
+            format!(
+                "version = 2\n\n[[tool]]\nname = \"rojo-rbx/rojo\"\nversion = \"7.4.4\"\n\
+                 asset = \"rojo.zip\"\nsha256 = \"{sha256}\"\n"
+            )
+        };
+        assert!(Lockfile::parse(&tool(&crate::sys::hash::sha256_hex(b"x"))).is_ok());
+        assert!(matches!(
+            Lockfile::parse(&tool("abc")),
+            Err(Error::LockfileInvalid(_))
+        ));
+    }
+
+    /// an embr from before the keys reads a lock that has them, and the other way round.
+    #[test]
+    fn the_new_keys_are_optional() {
+        let old = Lockfile::parse("version = 2\n").unwrap();
+        assert_eq!(old.manifest_hash, None);
+        assert!(old.tools.is_empty());
+        let text = toml::to_string(&Lockfile::new(Vec::new())).unwrap();
+        assert!(
+            !text.contains("manifest-hash") && !text.contains("tool"),
+            "{text}"
+        );
     }
 }

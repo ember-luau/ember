@@ -3,6 +3,7 @@ how to unpack it, and which of the unpacked files is the tool. */
 
 use crate::error::Error;
 use crate::net::http::responses::Asset;
+use crate::sys::limit;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -100,17 +101,21 @@ pub fn extract(
     raw_target: &Path,
 ) -> Result<(), Error> {
     match kind(asset_name, bytes) {
+        /* each format is held to `limit::TOOL_BYTES` unpacked. gzip and xz
+        unpack into memory first, where a small file of zeroes would
+        otherwise take all of it */
         Kind::Zip => {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+            limit::check_zip(&mut archive, limit::TOOL_BYTES)?;
             archive.extract(dest)?;
         }
         Kind::TarGz => {
-            let mut decoded = Vec::new();
+            let mut decoded = limit::CappedBytes::new(limit::TOOL_BYTES);
             std::io::copy(&mut flate2::read::GzDecoder::new(bytes), &mut decoded)?;
-            unpack_tar_or_raw(&decoded, dest, raw_target)?;
+            unpack_tar_or_raw(&decoded.bytes, dest, raw_target)?;
         }
         Kind::TarXz => {
-            let mut decoded = Vec::new();
+            let mut decoded = limit::CappedBytes::new(limit::TOOL_BYTES);
             lzma_rs::xz_decompress(&mut std::io::BufReader::new(bytes), &mut decoded).map_err(
                 |error| Error::AssetUnpackFailed {
                     asset: asset_name.to_string(),
@@ -118,7 +123,7 @@ pub fn extract(
                     reason: error.to_string(),
                 },
             )?;
-            unpack_tar_or_raw(&decoded, dest, raw_target)?;
+            unpack_tar_or_raw(&decoded.bytes, dest, raw_target)?;
         }
         Kind::Tar => {
             tar::Archive::new(bytes).unpack(dest)?;

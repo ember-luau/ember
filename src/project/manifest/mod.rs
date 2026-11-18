@@ -1195,7 +1195,9 @@ impl Tool {
 
         if let Some(package) = spec.trim().strip_prefix(NPM_PREFIX) {
             return match split_npm_spec(package) {
-                Some((name, Some(version))) if !version.is_empty() && !version.contains('@') => {
+                Some((name, Some(version)))
+                    if !version.contains('@') && crate::sys::paths::is_safe_version(version) =>
+                {
                     Ok(Tool {
                         repository: format!("{NPM_PREFIX}{name}"),
                         version: version.to_string(),
@@ -1206,7 +1208,8 @@ impl Tool {
         }
 
         let (repository, version) = spec.trim().split_once('@').ok_or_else(invalid)?;
-        if version.is_empty() || version.contains('@') {
+        // the version names a folder under ~/.ember/tools, see `is_safe_version`
+        if version.contains('@') || !crate::sys::paths::is_safe_version(version) {
             return Err(invalid());
         }
         Self::split_repository(repository).map_err(|_| invalid())?;
@@ -1479,6 +1482,47 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /** a SHA-256 over what this manifest asks an install for: the project's
+    environment and language, [indices], [dependencies],
+    [dev-dependencies], [features], [overrides] and [patches]. ember.lock
+    keeps it, and `embr install --locked` compares, so a lock that was not
+    written for this ember.toml is an error and not a quiet install of the
+    old packages.
+
+    it reads the manifest as it loads, so a value that `workspace = true`
+    inherits counts, and a comment or the order of the keys does not. the
+    tables that resolve nothing stay out: an edit to [scripts] or [package]
+    leaves the lock as good as it was. it is a hash of the request, not of
+    its meaning: `^1` and `^1.0` differ here, and one install without
+    `--locked` writes the new hash. */
+    pub fn dependency_hash(&self) -> String {
+        #[derive(Serialize)]
+        struct Request<'a> {
+            environment: Option<&'a str>,
+            language: Option<&'a str>,
+            indices: &'a BTreeMap<String, String>,
+            dependencies: &'a BTreeMap<String, Dependency>,
+            dev_dependencies: &'a BTreeMap<String, Dependency>,
+            features: &'a features::Features,
+            overrides: &'a BTreeMap<String, Override>,
+            patches: &'a BTreeMap<String, String>,
+        }
+        let target = self.target();
+        let request = Request {
+            environment: target.map(|target| target.environment.as_str()),
+            language: target.map(|target| target.language.as_str()),
+            indices: &self.indices,
+            dependencies: &self.dependencies,
+            dev_dependencies: &self.dev_dependencies,
+            features: &self.features,
+            overrides: &self.overrides,
+            patches: &self.patches,
+        };
+        // every map is a BTreeMap, so the JSON has one order
+        let text = serde_json::to_string(&request).expect("the dependency tables serialize");
+        crate::sys::hash::sha256_hex(text.as_bytes())
     }
 
     /// [dependencies] and then [dev-dependencies], for the readers that treat both the same.
@@ -3506,5 +3550,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_dependency_hash_moves_with_what_an_install_reads() {
+        let hash = |text: &str| toml::from_str::<Manifest>(text).unwrap().dependency_hash();
+        let base = "[package]\nname = \"acme/app\"\nversion = \"1.0.0\"\n\n\
+                    [dependencies]\na = { name = \"acme/a\", version = \"^1\" }\n\
+                    b = { name = \"acme/b\", version = \"^2\" }\n";
+        assert_eq!(hash(base).len(), 64);
+
+        // the order of the keys, a comment, and the tables that resolve nothing
+        let same = "# a comment\n[scripts]\nbuild = \"rojo build\"\n\n\
+                    [tools]\nrojo = \"rojo-rbx/rojo@7.4.4\"\n\n\
+                    [dependencies]\nb = { name = \"acme/b\", version = \"^2\" }\n\
+                    a = { name = \"acme/a\", version = \"^1\" }\n\n\
+                    [package]\nname = \"acme/renamed\"\nversion = \"9.0.0\"\n";
+        assert_eq!(hash(base), hash(same));
+
+        for changed in [
+            // a requirement, a new dependency, and one that left
+            base.replace("^1", "^1.2"),
+            format!("{base}c = {{ name = \"acme/c\", version = \"^1\" }}\n"),
+            base.replace("b = { name = \"acme/b\", version = \"^2\" }\n", ""),
+            format!("{base}\n[dev-dependencies]\nt = {{ name = \"acme/t\", version = \"^1\" }}\n"),
+            format!("{base}\n[indices]\nwally = \"https://github.com/UpliftGames/wally-index\"\n"),
+            format!("{base}\n[patches]\n\"acme/a@1.0.0\" = \"patches/a.patch\"\n"),
+            format!("{base}\n[target]\nenvironment = \"roblox\"\n"),
+        ] {
+            assert_ne!(hash(base), hash(&changed), "{changed}");
+        }
+    }
+
+    /// the version of a tool names a folder under ~/.ember/tools.
+    #[test]
+    fn a_tool_version_that_leaves_its_folder_is_no_tool() {
+        for spec in [
+            "rojo-rbx/rojo@../../../../tmp/x",
+            "rojo-rbx/rojo@7.4.4/../../..",
+            "rojo-rbx/rojo@..",
+            "rojo-rbx/rojo@C:\\x",
+            "rojo-rbx/rojo@/etc",
+            "npm:azul-sync@../../x",
+            "npm:azul-sync@https://example.com/x.tgz",
+        ] {
+            assert!(
+                matches!(Tool::parse(spec), Err(Error::InvalidToolSpec(_))),
+                "{spec}"
+            );
+        }
+        assert!(Tool::parse("rojo-rbx/rojo@7.4.4").is_ok());
+        assert!(Tool::parse("acme/tool@release/1.0").is_ok());
+        assert!(Tool::parse("npm:azul-sync@latest").is_ok());
     }
 }

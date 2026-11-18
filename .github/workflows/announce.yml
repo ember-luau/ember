@@ -98,7 +98,7 @@ jobs:
 
       - name: Look for a message already posted for this release
         if: steps.embed.outputs.skip != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: message-id
           key: discord-message-${{ github.event.release.id }}
@@ -159,7 +159,7 @@ jobs:
       # that already exists is a warning and a wasted upload.
       - name: Remember the message
         if: steps.send.outputs.posted == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: message-id
           key: discord-message-${{ github.event.release.id }}

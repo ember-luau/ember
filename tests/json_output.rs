@@ -67,15 +67,26 @@ fn fixture(name: &str) -> PathBuf {
     base
 }
 
+/** runs embr with colour forced on. a test reads embr through a pipe,
+which gets no colour by itself, and the `--json` checks only mean something
+where the text mode would paint. */
 fn embr(base: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_embr"))
+    command(base, args)
+        .env("FORCE_COLOR", "1")
+        .output()
+        .expect("embr runs")
+}
+
+fn command(base: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_embr"));
+    command
         .args(args)
         .current_dir(base.join("game"))
         .env("HOME", base.join("home"))
         .env_remove("NO_COLOR")
-        .env_remove("EMBER_TOKEN")
-        .output()
-        .expect("embr runs")
+        .env_remove("FORCE_COLOR")
+        .env_remove("EMBER_TOKEN");
+    command
 }
 
 /// the one JSON document of a run, once stdout is known to hold nothing else.
@@ -150,8 +161,8 @@ fn audit_json_keeps_the_exit_code_of_a_finding() {
     let _ = fs::remove_dir_all(&base);
 }
 
-/** the checks above would see colour and the time line: the text mode
-prints both to stdout, also into a pipe. */
+/** the checks above would see colour and the time line: where colour is
+on, the text mode prints both to stdout. */
 #[test]
 fn the_text_mode_paints_stdout() {
     let base = fixture("text");
@@ -159,5 +170,25 @@ fn the_text_mode_paints_stdout() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains('\x1b'), "{stdout}");
     assert!(stdout.contains("Done in"), "{stdout}");
+    let _ = fs::remove_dir_all(&base);
+}
+
+/** a pipe is what a CI log and a redirect to a file are. it gets the text
+with no escape in it, on stdout and on stderr, and NO_COLOR wins over
+FORCE_COLOR. */
+#[test]
+fn a_pipe_gets_no_colour_unless_it_is_forced() {
+    let base = fixture("pipe");
+    let escapes = |output: &Output| output.stdout.contains(&0x1b) || output.stderr.contains(&0x1b);
+    for args in [&["notices"][..], &["audit"], &["no-such-script"]] {
+        let piped = command(&base, args).output().expect("embr runs");
+        assert!(!escapes(&piped), "{args:?}: {piped:?}");
+        let refused = command(&base, args)
+            .env("FORCE_COLOR", "1")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("embr runs");
+        assert!(!escapes(&refused), "{args:?}: {refused:?}");
+    }
     let _ = fs::remove_dir_all(&base);
 }

@@ -21,6 +21,7 @@ pub fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
+            .resolver(crate::net::offline::resolve)
             .timeout_connect(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
             .max_idle_connections_per_host(8)
@@ -36,6 +37,7 @@ pub fn bulk_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
+            .resolver(crate::net::offline::resolve)
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(30))
             .timeout_write(Duration::from_secs(30))
@@ -51,6 +53,7 @@ pub fn manual_redirect_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
+            .resolver(crate::net::offline::resolve)
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(30))
             .timeout_write(Duration::from_secs(30))
@@ -115,14 +118,34 @@ pub fn read_body(
     let total = response
         .header("content-length")
         .and_then(|length| length.parse::<u64>().ok());
+    read_capped(response.into_reader(), total, MAX_BODY, on_bytes)
+}
+
+/** the largest body embr reads into memory, 2 GiB. the largest tool
+archives are a few hundred megabytes, and a package is far smaller. a
+server that never stops sending would otherwise fill the memory. */
+pub const MAX_BODY: u64 = 2 << 30;
+
+fn read_capped(
+    mut reader: impl Read,
+    total: Option<u64>,
+    cap: u64,
+    on_bytes: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, HttpError> {
+    // a Content-Length over the cap fails before the first byte
+    if total.is_some_and(|total| total > cap) {
+        return Err(HttpError::BodyTooLarge { limit: cap });
+    }
     let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
-    let mut reader = response.into_reader();
     let mut chunk = [0u8; 64 * 1024];
     on_bytes(0, total);
     loop {
         let read = reader.read(&mut chunk)?;
         if read == 0 {
             break;
+        }
+        if bytes.len() as u64 + read as u64 > cap {
+            return Err(HttpError::BodyTooLarge { limit: cap });
         }
         bytes.extend_from_slice(&chunk[..read]);
         on_bytes(bytes.len() as u64, total);
@@ -189,5 +212,31 @@ pub(crate) mod mock {
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_body_over_the_cap_is_refused() {
+        let body = [7u8; 100];
+        let read = |total, cap| read_capped(&body[..], total, cap, &mut |_, _| {});
+        assert_eq!(read(Some(100), 100).unwrap().len(), 100);
+        assert_eq!(read(None, 100).unwrap().len(), 100);
+        // by the header before a byte, and by the count when the header is wrong or absent
+        assert!(matches!(
+            read(Some(101), 100),
+            Err(HttpError::BodyTooLarge { limit: 100 })
+        ));
+        assert!(matches!(
+            read(Some(10), 99),
+            Err(HttpError::BodyTooLarge { .. })
+        ));
+        assert!(matches!(
+            read(None, 99),
+            Err(HttpError::BodyTooLarge { .. })
+        ));
     }
 }

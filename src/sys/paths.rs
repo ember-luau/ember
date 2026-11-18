@@ -93,6 +93,57 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/** a new, empty folder in the temp folder that only this user can enter,
+`<prefix>-<16 random hex characters>`. the caller removes it.
+
+the temp folder is shared between the users of a computer. a name that
+follows from the pid can be made first by somebody else, who then owns the
+folder that embr writes a binary or a git folder into. so the name is
+random, the folder must not exist yet, and on unix its mode is 0700. */
+pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, Error> {
+    use ring::rand::SecureRandom;
+
+    let random = ring::rand::SystemRandom::new();
+    for _ in 0..8 {
+        let mut bytes = [0u8; 8];
+        random
+            .fill(&mut bytes)
+            .map_err(|_| std::io::Error::other("the system gave no random bytes"))?;
+        let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{name}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not make a new folder in the temp folder",
+    )
+    .into())
+}
+
+/** whether `version` is safe as the name of a storage folder: the version
+of a tool, which comes from [tools] and is joined onto ~/.ember/tools. a
+release tag may hold a `/`, so the folders it names may nest, but no part
+may be empty, `.` or `..`, and it holds no backslash, no drive letter and
+no control character. `owner/repo@../../x` named a folder outside the
+tools folder before this. */
+pub fn is_safe_version(version: &str) -> bool {
+    !version.is_empty()
+        && !version.starts_with('-')
+        && !version.contains(['\\', ':'])
+        && !version.chars().any(char::is_control)
+        && version
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
 /** one ordinary path segment, no separators, no drive letter, not `.` or
 `..`. for names that come from a manifest, where a TOML key can be quoted
 anything, before they are joined onto a folder embr writes into. */
@@ -144,5 +195,50 @@ mod tests {
     #[test]
     fn missing_paths_are_never_the_same_file() {
         assert!(!same_file(Path::new("/nope/a"), Path::new("/nope/a")));
+    }
+
+    #[test]
+    fn a_private_temp_dir_is_new_and_closed_to_others() {
+        let first = private_temp_dir("embr-test-private").unwrap();
+        let second = private_temp_dir("embr-test-private").unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && std::fs::read_dir(&first).unwrap().next().is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir(&first);
+        let _ = std::fs::remove_dir(&second);
+    }
+
+    #[test]
+    fn tool_versions_stay_inside_their_folder() {
+        for good in [
+            "7.4.4",
+            "v2.0.0-rc.1",
+            "0.1.0+build.5",
+            "release/1.0",
+            "nightly",
+        ] {
+            assert!(is_safe_version(good), "{good}");
+        }
+        for bad in [
+            "",
+            "..",
+            "../../../../tmp/x",
+            "1.0/../../..",
+            "/etc",
+            "1.0/",
+            "a//b",
+            "C:\\x",
+            "c:x",
+            "..\\..\\x",
+            "-rf",
+            "1.0\n",
+        ] {
+            assert!(!is_safe_version(bad), "{bad:?}");
+        }
     }
 }

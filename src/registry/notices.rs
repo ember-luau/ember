@@ -29,7 +29,7 @@ use crate::project::manifest::DEFAULT_INDEX_URL;
 use crate::registry::index::{self, DownloadSource, Index, Refresh, forest, hidden, pesde};
 use crate::registry::local;
 use crate::ui;
-use crossterm::style::Stylize;
+use crate::ui::Stylize;
 use std::collections::{BTreeSet, HashMap};
 use toml::Value;
 

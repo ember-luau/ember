@@ -119,7 +119,10 @@ fn read(file: &Path) -> Option<Shorthands> {
 }
 
 fn fetch(api: &str) -> Result<List, HttpError> {
-    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+    let agent = ureq::AgentBuilder::new()
+        .resolver(crate::net::offline::resolve)
+        .timeout(TIMEOUT)
+        .build();
     let response = agent
         .get(&format!("{api}/v1/shorthands"))
         .set("User-Agent", http::USER_AGENT)
