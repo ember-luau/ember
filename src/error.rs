@@ -302,6 +302,28 @@ pub enum Error {
         received: String,
     },
 
+    /** a tool's release asset does not have the SHA-256 that ember.lock
+    records for it. the release was changed after the lock was written. */
+    #[error(
+        "The asset {asset} of {tool} does not match the sha256 in ember.lock\n  expected sha256 {expected}\n  received sha256 {received}\nembr did not store it. The release changed after ember.lock recorded it. If the publisher replaced it on purpose, run `embr install --refresh` to record the new one"
+    )]
+    ToolLockMismatch {
+        tool: String,
+        asset: String,
+        expected: String,
+        received: String,
+    },
+
+    /// the download of an embr release does not have the SHA-256 that GitHub lists for it.
+    #[error(
+        "The download of {asset} does not match the sha256 that GitHub lists for it\n  expected sha256 {expected}\n  received sha256 {received}\nembr did not install it"
+    )]
+    UpdateMismatch {
+        asset: String,
+        expected: String,
+        received: String,
+    },
+
     /// tool.toml, or a file of `embr tool publish`, breaks a rule of the Ember API.
     #[error("{0}")]
     ToolPublishInvalid(String),
@@ -590,6 +612,23 @@ pub enum Error {
         "ember.lock is version {0}, which a newer embr wrote and this embr cannot read; update embr with `embr self update`"
     )]
     LockfileNewer(i64),
+
+    /// ember.lock holds a value that embr never writes there.
+    #[error(
+        "ember.lock {0}; run `embr install` without --locked to write it again, and check who changed it"
+    )]
+    LockfileInvalid(String),
+
+    /** `--locked`, and ember.toml asks for other packages than the ones
+    ember.lock was written for. */
+    #[error(
+        "ember.toml asks for other dependencies than the ones ember.lock was written for, so --locked installs nothing; run `embr install` without --locked and commit ember.lock"
+    )]
+    LockfileDrift,
+
+    /// `--offline`, and embr needs something that is not on this computer.
+    #[error("{0}; --offline lets embr download nothing")]
+    Offline(String),
 
     /** a downloaded archive does not have the SHA-256 that its index entry
     or ember.lock records. embr did not extract or cache it. */

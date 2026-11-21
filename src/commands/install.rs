@@ -38,9 +38,13 @@ folder, and a repository that commits its packages folders (those packages \
 really are present, and tools still verify). --refresh forces the full \
 pipeline.")]
 pub struct InstallArgs {
-    /// Install exactly what ember.lock records, without re-resolving
+    /// Install exactly what ember.lock records, without re-resolving and without writing it; fail when ember.toml has changed since ember.lock was written
     #[arg(long)]
     pub locked: bool,
+
+    /// Download nothing: install from the caches on this computer, and fail when something is not in them
+    #[arg(long, conflicts_with = "refresh")]
+    pub offline: bool,
 
     /// Move every package to the newest version that ember.toml takes, re-fetch indices, and re-download archives even when caches are fresh
     #[arg(long)]
@@ -280,6 +284,9 @@ fn pinned_versions() -> resolver::Pinned {
 }
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
+    if args.offline {
+        crate::net::offline::enable();
+    }
     let manifest = Manifest::load()?;
 
     /* the root's hooks bracket the whole command, members included, so a
@@ -447,6 +454,19 @@ fn install_steps(
         instead of shipping a broken tree forever */
         if lock.version < 2 {
             return Err(Error::LockfileOutdated(lock.version));
+        }
+        /* the lock is replayed as it stands, so it has to be the lock of
+        this ember.toml. without the check, a dependency that was added to
+        ember.toml and never installed passes CI, and so does one that was
+        removed from ember.toml and is still in the lock */
+        match &lock.manifest_hash {
+            Some(hash) if *hash != manifest.dependency_hash() => {
+                return Err(Error::LockfileDrift);
+            }
+            Some(_) => {}
+            None => progress.warn(
+                "warning: ember.lock is from an embr that did not record what ember.toml asked for, so --locked cannot tell whether ember.toml has changed since; run `embr install` once without --locked and commit ember.lock",
+            ),
         }
         /* --locked replays the lock's own patch records without consulting
         [patches] at all. a recorded file that's gone or edited is drift
@@ -633,13 +653,24 @@ fn install_steps(
     // stamps land in the folders actually written, the contexts
     let environments: BTreeSet<Environment> =
         locked.iter().map(|package| package.context()).collect();
+    let previous_tools = previous
+        .as_ref()
+        .map_or_else(Vec::new, |lock| lock.tools.clone());
     if !args.locked {
-        // written even when empty, so ember.lock always mirrors the manifest
-        Lockfile::new(locked).save()?;
+        /* written even when empty, so ember.lock always mirrors the
+        manifest. the tool entries are the last lock's until the tools below
+        are in, so a tool that fails to install loses no pin */
+        Lockfile::new(locked)
+            .for_manifest(manifest.dependency_hash())
+            .with_tools(previous_tools.clone())
+            .save()?;
     }
 
-    /* tool versions are exact pins, so no lockfile entries. normal and
-    --locked runs install them the same way. global tools from
+    /* a tool version is an exact pin, so the lock holds no version for it.
+    it holds the SHA-256 of each release asset that an install downloaded,
+    because a release can be replaced under its version, see `tools::Pins`.
+    normal and --locked runs install the tools the same way, and both
+    refuse an asset that is not the pinned one. global tools from
     ~/.ember/tools.toml install here too, `tool add` never downloads, this
     is the one place every tool gets installed */
     let tool_jobs = tool_jobs(manifest, include_global_tools)?;
@@ -650,8 +681,22 @@ fn install_steps(
         }
         progress.phase("tools", tool_count as u64);
     }
-    let tools = install_tools(&tool_jobs, &progress)?;
+    let pins = tools::Pins::new(previous_tools.clone(), args.refresh);
+    let tools = install_tools(&tool_jobs, &pins, &progress)?;
     drop(progress);
+
+    /* the assets that this install stored join the lock. only the project's
+    own tools: a global tool is this computer's, not the project's. before
+    the stamps below, which hash the lock as it is on disk */
+    if !args.locked {
+        let locked_tools =
+            tools::locked_assets(manifest.tools.values(), &previous_tools, args.refresh);
+        if locked_tools != previous_tools
+            && let Ok(lock) = Lockfile::load()
+        {
+            lock.with_tools(locked_tools).save()?;
+        }
+    }
 
     /* everything succeeded, record what this install saw so the next run
     can skip itself when nothing changed. never on --locked, that path
@@ -838,6 +883,11 @@ fn fast_path(
     let Ok(lock) = Lockfile::load() else {
         return Ok(FastPath::Full); // unparseable lockfile, the full path deals with it
     };
+    /* a lock from before `manifest-hash` gets it on a full install, as one
+    from before the archive hashes gets those. `--locked` needs it */
+    if lock.manifest_hash.is_none() {
+        return Ok(FastPath::Full);
+    }
 
     /* an empty lock matches an empty manifest and nothing else. with no
     output dirs there are no stamps to consult, but resolving zero
@@ -1242,7 +1292,13 @@ fn finish_up_to_date(manifest: &Manifest, include_global_tools: bool) -> Result<
             section("Installing tools", &mut false);
         }
         progress.phase("tools", count as u64);
-        let tools = install_tools(&missing, &progress)?;
+        /* the pins hold here too. a tool that this path downloads gets its
+        own pin at the next full install, which an edit to [tools] brings */
+        let pins = tools::Pins::new(
+            Lockfile::load().map_or_else(|_| Vec::new(), |lock| lock.tools),
+            false,
+        );
+        let tools = install_tools(&missing, &pins, &progress)?;
         drop(progress);
         if print_changes(manifest, &BTreeMap::new(), &tools) {
             println!();
@@ -2151,12 +2207,19 @@ struct InstalledTool {
     downloaded: bool,
 }
 
-fn install_tools(jobs: &[ToolJob], progress: &Progress) -> Result<Vec<InstalledTool>, Error> {
+fn install_tools(
+    jobs: &[ToolJob],
+    pins: &tools::Pins,
+    progress: &Progress,
+) -> Result<Vec<InstalledTool>, Error> {
     let github = GithubAPI::new();
+    let none = tools::Pins::none();
     let mut installed = Vec::new();
     for (alias, tool, global) in jobs {
         let task = progress.task(format!("{}@{}", tool.repository, tool.version));
-        let downloaded = tools::install_tool(alias, tool, &github, &mut |done, total| {
+        // the project's lock says nothing about a tool that is this computer's own
+        let pins = if *global { &none } else { pins };
+        let downloaded = tools::install_tool(alias, tool, &github, pins, &mut |done, total| {
             task.bytes(done, total)
         })?;
         let mut notes = Vec::new();
@@ -2312,7 +2375,7 @@ fn print_changes(
     packages: &BTreeMap<Environment, Vec<Change>>,
     tools: &[InstalledTool],
 ) -> bool {
-    use crossterm::style::Stylize;
+    use crate::ui::Stylize;
 
     // a path folder has no version in the lock
     let version_text = |version: &str| {

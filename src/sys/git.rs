@@ -59,6 +59,11 @@ publisher never wrote. `core.eol` covers the same conversion arriving
 through a package's own .gitattributes, and `core.safecrlf` keeps git
 from objecting to files it isn't converting.
 
+`core.fsmonitor=false` is for safety, not for bytes. these commands run in
+a folder of package files, and a config that names an fsmonitor program
+makes git run it. the extract already drops a `.git` that a package ships,
+see `index::remove_unsafe`, and this holds if one gets through.
+
 deliberately not folded into `run`. the index cache clones and pulls
 real repos, and flipping conversion under a checkout someone already has
 would make every file read as locally modified. */
@@ -70,6 +75,8 @@ pub fn verbatim<'a>(args: &[&'a str]) -> Vec<&'a str> {
         "core.eol=lf",
         "-c",
         "core.safecrlf=false",
+        "-c",
+        "core.fsmonitor=false",
     ];
     full.extend_from_slice(args);
     full

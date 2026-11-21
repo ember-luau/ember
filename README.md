@@ -381,6 +381,10 @@ language, the ID is the environment and the language: `roblox`,
   the files, the `main`, and the build output of its target only.
 - `embr publish --target roblox-alloy` publishes only that target. Repeat
   `--target` to publish more than one.
+- `embr publish` leaves out a file whose name says that it holds a secret:
+  `.env` and `.env.*` (not `.env.example`), `.npmrc`, `.netrc`, `*.pem`,
+  `*.key`, `id_rsa` and their kind. It prints each one. To publish such a
+  file anyway, name it in `includes` by its whole path.
 - `embr yank` and `embr deprecate` take `--target <id>` to change one
   target of a version.
 
@@ -932,6 +936,31 @@ extracts it. `ember.lock` keeps the hash of each package as `sha256`.
   A git dependency has none either: its commit in `ember.lock` is its
   integrity.
 
+### Tool hashes
+
+A GitHub release keeps its version when its files are replaced, so
+`ember.lock` also keeps the SHA-256 of each tool that `embr install`
+downloads, under `[[tool]]`.
+
+- An install refuses a release asset that does not match its entry, on a
+  download and for a copy that is already stored.
+- A tool has one asset for each platform. Each platform adds its own entry
+  the first time it downloads the tool.
+- When GitHub or Ember lists a SHA-256 for an asset, embr checks the
+  download against that too. GitHub lists one for each asset uploaded
+  since June 2025.
+- If the publisher replaced a release on purpose, run
+  `embr install --refresh` to record the new hash.
+- A tool from npm has no entry. Global tools have none either: they
+  belong to the computer, not to the project.
+- npm runs no install script while it installs an npm tool, the tool's own
+  or one of its dependencies. Set `EMBER_NPM_SCRIPTS=1` for a tool that
+  needs its scripts.
+- `embr self update` checks its download against the SHA-256 that GitHub
+  lists. Each release also attests its build, so
+  `gh attestation verify embr-linux-x86_64.zip --repo ember-luau/ember`
+  shows that the file came from this repository's release workflow.
+
 ## Sign in
 
 `embr publish`, `embr yank` and `embr deprecate` need a login. To sign in,
@@ -1120,7 +1149,52 @@ version that `ember.toml` still takes, as Cargo does. A version moves only
 when its requirement no longer takes it, when its entry is new, with
 `embr install --update <scope/name>`, or with `embr install --refresh`,
 which moves all of them. `embr install --locked` installs the lock as it
-is.
+is, and never writes it.
+
+- `--locked` fails when `ember.toml` asks for other dependencies than the
+  ones `ember.lock` was written for. A dependency that was added to
+  `ember.toml` and never installed does not pass CI. The lock keeps a hash
+  of `[indices]`, `[dependencies]`, `[dev-dependencies]`, `[features]`,
+  `[overrides]`, `[patches]` and the project's environment as
+  `manifest-hash`. An edit to another table is no change.
+- A lockfile from before the hash gets it on the next `embr install`.
+  Until then `--locked` prints a warning and installs.
+- `embr install --offline` downloads nothing. It installs from the caches
+  in `~/.ember`, and fails when a package, an index or a tool is not in
+  them. With `--locked` it is a way to prove that a cached CI run needs no
+  network.
+
+## Continuous integration
+
+The `setup` action installs embr, restores its caches and runs
+`embr install --locked`:
+
+```yaml
+# .github/workflows/ci.yml
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ember-luau/ember/setup@master
+      - run: embr audit            # exits 1 on a security notice
+      - run: rojo build -o game.rbxl
+```
+
+- After it, embr and the tools of `[tools]` are on PATH.
+- `version` picks the embr, `latest` or a version such as `1.0.0`.
+  `working-directory` names the folder of `ember.toml`. `install: false`
+  only installs embr. `cache: false` keeps nothing between runs.
+- The cache holds embr's downloads, keyed on `ember.lock` and `ember.toml`.
+- `@master` follows this repository. Name a release tag or a commit in
+  its place to stay on one version of the action.
+- Output that goes to a pipe or a file has no colour in it. `NO_COLOR`
+  turns colour off everywhere, and `FORCE_COLOR=1` turns it on for a CI log
+  that shows it.
+
+To publish from a workflow with no token, see
+[Trusted publishing](#trusted-publishing).
 
 ## Compatibility
 

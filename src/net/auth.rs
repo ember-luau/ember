@@ -227,7 +227,7 @@ fn hostname() -> Option<String> {
 }
 
 fn print_instructions(started: &Started) {
-    use crossterm::style::Stylize;
+    use crate::ui::Stylize;
 
     let (r, g, b) = ui::ACCENT;
     let accent = crossterm::style::Color::Rgb { r, g, b };

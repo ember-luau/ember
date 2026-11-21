@@ -8,8 +8,8 @@ use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, manifest_in};
 use crate::project::package::{self, DependencyKind};
 use crate::ui;
+use crate::ui::Stylize;
 use clap::Args;
-use crossterm::style::Stylize;
 use serde_json::{Value, json};
 use std::path::Path;
 

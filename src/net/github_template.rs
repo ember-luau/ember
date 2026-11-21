@@ -227,8 +227,8 @@ pub fn push_with_git(
     branch: &str,
     login: &str,
 ) -> Result<(), Error> {
-    let git_dir = std::env::temp_dir().join(format!("embr-template-git-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&git_dir);
+    // git runs the hooks and reads the config of this folder, so nobody else may make it
+    let git_dir = crate::sys::paths::private_temp_dir("embr-template-git")?;
     let refspec = format!("HEAD:refs/heads/{branch}");
     let steps: [&[&str]; 4] = [
         &["init", "-q"],

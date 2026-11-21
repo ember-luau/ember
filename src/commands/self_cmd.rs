@@ -246,12 +246,17 @@ fn update(prerelease: bool) -> Result<(), Error> {
     println!("Downloading embr v{latest}");
 
     let bytes = crate::net::http::get_bytes(&asset.browser_download_url, &[])?;
+    verify_update(&asset.name, asset.sha256.as_deref(), &bytes)?;
 
     /* the path is captured before the swap. current_exe() itself can go
     stale after self_replace renames the running file out of the way,
     but the path keeps pointing at the freshly installed binary */
     let exe_path = env::current_exe()?;
-    let staging = env::temp_dir().join(format!("embr-update-{}", std::process::id()));
+    /* a folder that only this user can enter, under a name nobody can
+    know first. in a shared /tmp, another user could make a folder with a
+    name that follows from the pid and swap the binary in it before embr
+    installs it */
+    let staging = paths::private_temp_dir("embr-update")?;
     // the staging dir goes whether or not the swap worked
     let replaced = unpack_update(&asset_name, &bytes, &staging)
         .and_then(|binary| Ok(self_replace::self_replace(&binary)?));
@@ -267,6 +272,30 @@ fn update(prerelease: bool) -> Result<(), Error> {
     }
 
     println!("Updated embr v{current} -> v{latest}");
+    Ok(())
+}
+
+/** refuses a download that is not the asset GitHub lists. the API gives
+the SHA-256 of each asset, and the API and the download come from two
+hosts, so a changed file on the download host does not pass. an asset
+with no listed hash passes as it did before: GitHub lists one for every
+upload since June 2025, which covers each release that has the zip.
+
+this is no signature. someone who can publish a release of embr can list
+a matching hash. the build provenance that release.yml attests is the
+check for that, with `gh attestation verify`. */
+fn verify_update(asset: &str, listed: Option<&str>, bytes: &[u8]) -> Result<(), Error> {
+    let Some(expected) = listed else {
+        return Ok(());
+    };
+    let received = crate::sys::hash::sha256_hex(bytes);
+    if received != expected {
+        return Err(Error::UpdateMismatch {
+            asset: asset.to_string(),
+            expected: expected.to_string(),
+            received,
+        });
+    }
     Ok(())
 }
 
@@ -789,6 +818,23 @@ mod update_tests {
             assets: Vec::new(),
             draft,
         }
+    }
+
+    #[test]
+    fn an_update_that_is_not_the_listed_asset_is_refused() {
+        let bytes = b"the new embr";
+        let listed = crate::sys::hash::sha256_hex(bytes);
+        assert!(verify_update("embr-linux-x86_64.zip", Some(&listed), bytes).is_ok());
+        // an asset from before GitHub listed hashes
+        assert!(verify_update("embr-linux-x86_64.zip", None, bytes).is_ok());
+        let Err(Error::UpdateMismatch {
+            expected, received, ..
+        }) = verify_update("embr-linux-x86_64.zip", Some(&listed), b"another file")
+        else {
+            panic!("a changed download fails");
+        };
+        assert_eq!(expected, listed);
+        assert_eq!(received, crate::sys::hash::sha256_hex(b"another file"));
     }
 
     #[test]

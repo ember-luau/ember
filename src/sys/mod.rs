@@ -4,5 +4,6 @@ programs, and how it shells out to git. */
 pub mod binary;
 pub mod git;
 pub mod hash;
+pub mod limit;
 pub mod paths;
 pub mod process;

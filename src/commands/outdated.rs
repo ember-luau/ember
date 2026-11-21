@@ -5,8 +5,8 @@ use crate::project::manifest::{
 };
 use crate::registry::index::{Index, Refresh};
 use crate::ui;
+use crate::ui::Stylize;
 use clap::Args;
-use crossterm::style::Stylize;
 use std::collections::HashMap;
 
 #[derive(Args, Debug)]

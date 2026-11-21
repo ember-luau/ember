@@ -227,7 +227,12 @@ fn report_parse_error(err: clap::Error) -> ! {
         eprintln!("{hint}");
     }
 
-    let styled = err.render().ansi().to_string();
+    // the usage and tip lines keep clap's styling where output carries colour
+    let styled = if ui::want_color() {
+        err.render().ansi().to_string()
+    } else {
+        plain.clone()
+    };
     if let Some((_error_line, extra)) = styled.split_once('\n') {
         /* clap renders suggestions as "tip: a similar subcommand
         exists". drop the "tip:" label and recapitalize. */

@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::error::Error;
 use clap::builder::styling;
-use crossterm::style::Stylize;
 use inquire::ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled};
 
 /// theme accent #F23C1B. the only place the colour lives, everything derives from it.
@@ -58,10 +57,96 @@ pub fn is_terminal() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/** whether stdout should carry colour: a real terminal, and NO_COLOR unset.
-same rule `sys::process` applies to the commands scripts run. */
+/** whether output carries colour. NO_COLOR set means no, whatever else is
+set. FORCE_COLOR set to anything but `0` means yes, for a CI log that
+renders colour though it is no terminal. with neither, a terminal gets
+colour and a pipe or a file gets none. read once: the answer holds for the
+run. `sys::process` applies the terminal half to the commands scripts run. */
 pub fn want_color() -> bool {
-    is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+    static COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COLOR.get_or_init(|| {
+        let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        color_for(
+            set("NO_COLOR").is_some(),
+            set("FORCE_COLOR").map(|value| value != "0"),
+            is_terminal(),
+        )
+    })
+}
+
+fn color_for(no_color: bool, force_color: Option<bool>, terminal: bool) -> bool {
+    !no_color && force_color.unwrap_or(terminal)
+}
+
+/** crossterm's `Stylize` behind [`want_color`]. crossterm writes its
+escapes wherever the text goes, so a CI log, a pipe and a file all got
+`\x1b[38;2;242;60;27m` around each ✓. the methods have crossterm's names,
+so a file styles its text by importing this trait in place of that one. */
+pub trait Stylize: std::fmt::Display + Sized {
+    /// the text with no style yet, the start of each chain.
+    fn stylize(self) -> Painted<Self> {
+        Painted(crossterm::style::StyledContent::new(
+            crossterm::style::ContentStyle::new(),
+            self,
+        ))
+    }
+    fn with(self, color: crossterm::style::Color) -> Painted<Self> {
+        self.stylize().with(color)
+    }
+    fn bold(self) -> Painted<Self> {
+        self.stylize().bold()
+    }
+    fn dark_grey(self) -> Painted<Self> {
+        self.stylize().dark_grey()
+    }
+    fn red(self) -> Painted<Self> {
+        self.stylize().red()
+    }
+    fn yellow(self) -> Painted<Self> {
+        self.stylize().yellow()
+    }
+}
+
+impl Stylize for &str {}
+impl Stylize for String {}
+impl Stylize for &String {}
+impl Stylize for char {}
+
+/// styled text that prints its style only when [`want_color`] says so.
+#[derive(Clone)]
+pub struct Painted<D: std::fmt::Display>(crossterm::style::StyledContent<D>);
+
+impl<D: std::fmt::Display> Painted<D> {
+    pub fn with(self, color: crossterm::style::Color) -> Self {
+        Painted(crossterm::style::Stylize::with(self.0, color))
+    }
+    pub fn bold(self) -> Self {
+        Painted(crossterm::style::Stylize::bold(self.0))
+    }
+    pub fn dark_grey(self) -> Self {
+        Painted(crossterm::style::Stylize::dark_grey(self.0))
+    }
+    pub fn red(self) -> Self {
+        Painted(crossterm::style::Stylize::red(self.0))
+    }
+    pub fn yellow(self) -> Self {
+        Painted(crossterm::style::Stylize::yellow(self.0))
+    }
+
+    fn render(&self, color: bool, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if color {
+            write!(f, "{}", self.0)
+        } else {
+            // as crossterm writes it: a width on the outer `{}` pads neither form
+            write!(f, "{}", self.0.content())
+        }
+    }
+}
+
+impl<D: std::fmt::Display> std::fmt::Display for Painted<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.render(want_color(), f)
+    }
 }
 
 /// terminal width. COLUMNS wins, then the tty, then a sane default.
@@ -415,7 +500,10 @@ pub fn render_config() -> RenderConfig<'static> {
 mod tests {
     use std::time::Duration;
 
-    use super::{ACCENT, RESET, fg, format_duration, printable, strip_controls, visible_width};
+    use super::{
+        ACCENT, Painted, RESET, Stylize, accent, color_for, fg, format_duration, printable,
+        strip_controls, visible_width,
+    };
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {
@@ -503,5 +591,34 @@ mod tests {
         }
         // the joiners and other format characters are text, emoji use them
         assert_eq!(printable("👩\u{200d}💻"), "👩\u{200d}💻");
+    }
+
+    #[test]
+    fn colour_follows_no_color_then_force_color_then_the_terminal() {
+        // (NO_COLOR set, FORCE_COLOR, terminal) -> colour
+        assert!(color_for(false, None, true));
+        assert!(!color_for(false, None, false), "a pipe gets no escapes");
+        assert!(color_for(false, Some(true), false), "a CI log can ask");
+        assert!(!color_for(false, Some(false), true));
+        assert!(!color_for(true, Some(true), true), "NO_COLOR wins");
+    }
+
+    #[test]
+    fn painted_text_keeps_its_escapes_for_a_terminal_only() {
+        struct As<'a>(&'a Painted<&'static str>, bool);
+        impl std::fmt::Display for As<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.render(self.1, f)
+            }
+        }
+        let painted = "ok".with(accent()).bold();
+        assert_eq!(As(&painted, false).to_string(), "ok");
+        let coloured = As(&painted, true).to_string();
+        assert!(
+            coloured.contains('\x1b') && coloured.contains("ok"),
+            "{coloured:?}"
+        );
+        // a width pads neither form, so a table lines up the same either way
+        assert_eq!(format!("{:>6}", As(&painted, false)), "ok");
     }
 }

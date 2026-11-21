@@ -18,7 +18,7 @@ instead and a CI log still says what happened.
 use std::cell::Cell;
 use std::time::Duration;
 
-use crossterm::style::Stylize;
+use crate::ui::Stylize;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::ui;

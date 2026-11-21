@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::net::http;
 use crate::net::http::responses::Release;
+use crate::project::lockfile::LockedTool;
 use crate::project::manifest::{EMBER_PREFIX, Tool, split_package_name};
 use crate::sys::{hash, paths};
 use std::env;
@@ -143,6 +144,128 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
     Ok(stored && shim::path(alias)?.exists())
 }
 
+/** the SHA-256 that ember.lock records for the release assets of the
+project's tools. a GitHub release keeps its version when its files are
+replaced, so the version alone does not say that this computer gets what
+the last one got. an asset with a pin must match it, and an asset with
+none is taken as it comes and pinned by the install that downloads it. */
+#[derive(Default)]
+pub struct Pins {
+    tools: Vec<LockedTool>,
+    /// `--refresh`: a pin that does not match is replaced, not enforced.
+    replace: bool,
+}
+
+impl Pins {
+    /// no pins, for a tool that no project's lock covers: `embx`, a global tool.
+    pub fn none() -> Self {
+        Pins::default()
+    }
+
+    pub fn new(tools: Vec<LockedTool>, replace: bool) -> Self {
+        Pins { tools, replace }
+    }
+
+    /// the pinned SHA-256 of `asset` in `repository`@`version`.
+    fn sha256(&self, repository: &str, version: &str, asset: &str) -> Option<&str> {
+        if self.replace {
+            return None;
+        }
+        self.tools
+            .iter()
+            .find(|tool| {
+                tool.name.eq_ignore_ascii_case(repository)
+                    && tool.version == version
+                    && tool.asset == asset
+            })
+            .map(|tool| tool.sha256.as_str())
+    }
+
+    /// the mismatch error when `asset` has a pin and `received` is not it.
+    fn check(
+        &self,
+        repository: &str,
+        version: &str,
+        asset: &str,
+        received: &str,
+    ) -> Result<(), Error> {
+        match self.sha256(repository, version, asset) {
+            Some(expected) if expected != received => Err(Error::ToolLockMismatch {
+                tool: format!("{repository}@{version}"),
+                asset: asset.to_string(),
+                expected: expected.to_string(),
+                received: received.to_string(),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/** the file in a stored version's folder that names the release asset it
+was unpacked from and that asset's SHA-256, in the form `sha256sum` prints.
+a version stored by an embr from before the file has none. */
+const ASSET_RECORD: &str = ".embr-asset";
+
+/** the asset name and SHA-256 that the stored `version` of `repository`
+came from. None for a version that an older embr stored, and for a tool
+that npm installs. */
+pub fn stored_asset(repository: &str, version: &str) -> Option<(String, String)> {
+    let text =
+        fs::read_to_string(storage_dir(repository, version).ok()?.join(ASSET_RECORD)).ok()?;
+    let (sha256, asset) = text.trim_end().split_once("  ")?;
+    (hash::is_sha256_hex(sha256) && !asset.is_empty())
+        .then(|| (asset.to_string(), sha256.to_string()))
+}
+
+/** the entries of ember.lock's `[[tool]]` after an install of `tools`, the
+project's own GitHub and Ember tools. each tool keeps the assets that
+`previous` holds for its version, which other platforms wrote, and gains
+the asset that this computer has stored. a tool that left [tools], or
+moved to another version, loses its entries. */
+pub fn locked_assets<'a>(
+    tools: impl Iterator<Item = &'a Tool>,
+    previous: &[LockedTool],
+    replace: bool,
+) -> Vec<LockedTool> {
+    let mut locked = Vec::new();
+    for tool in tools.filter(|tool| tool.npm_package().is_none()) {
+        let stored = stored_asset(&tool.repository, &tool.version);
+        locked.extend(
+            previous
+                .iter()
+                .filter(|entry| {
+                    entry.name.eq_ignore_ascii_case(&tool.repository)
+                        && entry.version == tool.version
+                })
+                // the asset stored here is written below, with the hash it has now
+                .filter(|entry| {
+                    !replace
+                        || stored
+                            .as_ref()
+                            .is_none_or(|(asset, _)| *asset != entry.asset)
+                })
+                .cloned(),
+        );
+        if let Some((asset, sha256)) = stored
+            && !locked.iter().any(|entry: &LockedTool| {
+                entry.name.eq_ignore_ascii_case(&tool.repository)
+                    && entry.version == tool.version
+                    && entry.asset == asset
+            })
+        {
+            locked.push(LockedTool {
+                name: tool.repository.clone(),
+                version: tool.version.clone(),
+                asset,
+                sha256,
+            });
+        }
+    }
+    locked.sort();
+    locked.dedup();
+    locked
+}
+
 /** Installs a manifest tool, skipping the network when the version is
 already stored. true = downloaded, false = cache reused. the bin shim
 gets refreshed either way. `on_bytes` hears the asset download, see
@@ -151,6 +274,7 @@ pub fn install_tool(
     alias: &str,
     tool: &Tool,
     github: &GithubAPI,
+    pins: &Pins,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<bool, Error> {
     if is_reserved_alias(alias) {
@@ -163,12 +287,25 @@ pub fn install_tool(
     }
     let stored = stored_executable(&tool.repository, &tool.version)?;
     if stored_is_usable(&stored) {
+        check_stored(&tool.repository, &tool.version, pins)?;
         shim::write(&shim::path(alias)?)?;
         return Ok(false);
     }
 
     let release = get_release(&tool.repository, &tool.version, github)?;
-    install_release(alias, &tool.repository, &release, on_bytes)
+    let (_, downloaded) = store_release(&tool.repository, &release, alias, pins, on_bytes)?;
+    shim::write(&shim::path(alias)?)?;
+    Ok(downloaded)
+}
+
+/** refuses a stored version that came from another asset than the one
+ember.lock pins. a version stored with no record of its asset passes: it
+is from before embr kept one, and there is nothing to compare. */
+fn check_stored(repository: &str, version: &str, pins: &Pins) -> Result<(), Error> {
+    match stored_asset(repository, version) {
+        Some((asset, sha256)) => pins.check(repository, version, &asset, &sha256),
+        None => Ok(()),
+    }
 }
 
 /** Downloads the platform asset of a fetched release, extracts it, stores
@@ -181,7 +318,7 @@ pub fn install_release(
     release: &Release,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<bool, Error> {
-    let (_, downloaded) = store_release(repository, release, alias, on_bytes)?;
+    let (_, downloaded) = store_release(repository, release, alias, &Pins::none(), on_bytes)?;
     shim::write(&shim::path(alias)?)?;
     Ok(downloaded)
 }
@@ -195,6 +332,7 @@ pub fn store_release(
     repository: &str,
     release: &Release,
     name_hint: &str,
+    pins: &Pins,
     on_bytes: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(PathBuf, bool), Error> {
     let version = release.tag_name.trim_start_matches('v');
@@ -203,6 +341,7 @@ pub fn store_release(
 
     let stored = storage.join(executable_name(repo));
     if stored_is_usable(&stored) {
+        check_stored(repository, version, pins)?;
         return Ok((stored, false));
     }
 
@@ -213,18 +352,22 @@ pub fn store_release(
         })?;
     let bytes = http::get_bytes_with(&asset.browser_download_url, &[], on_bytes)?;
     /* before anything reaches disk, so a bad download leaves nothing
-    behind. GitHub lists no hash, an upload to Ember does */
-    if let Some(expected) = &asset.sha256 {
-        let received = hash::sha256_hex(&bytes);
-        if !received.eq_ignore_ascii_case(expected) {
-            return Err(Error::ToolAssetMismatch {
-                tool: format!("{repository}@{version}"),
-                asset: asset.name.clone(),
-                expected: expected.clone(),
-                received,
-            });
-        }
+    behind. Ember lists a hash for an upload, and GitHub for each asset
+    uploaded since June 2025. that hash comes from the same place as the
+    release, so it catches a bad transfer or a changed mirror. the pin in
+    ember.lock is what catches a release that was replaced */
+    let received = hash::sha256_hex(&bytes);
+    if let Some(expected) = &asset.sha256
+        && !received.eq_ignore_ascii_case(expected)
+    {
+        return Err(Error::ToolAssetMismatch {
+            tool: format!("{repository}@{version}"),
+            asset: asset.name.clone(),
+            expected: expected.clone(),
+            received,
+        });
     }
+    pins.check(repository, version, &asset.name, &received)?;
 
     /* extract into a staging sibling first so a failed install never
     leaves a half-written storage dir behind, same dance as install.rs.
@@ -247,6 +390,11 @@ pub fn store_release(
     let found = archive::pick_executable(&files, repo, name_hint, env::consts::EXE_SUFFIX)
         .ok_or_else(|| Error::NoExecutableInAsset(name_hint.to_string()))?;
     place_executable(&found, &target)?;
+    // what ember.lock pins, and what a later install compares its pin with
+    fs::write(
+        staging.0.join(ASSET_RECORD),
+        format!("{received}  {}\n", asset.name),
+    )?;
 
     /* a concurrent run may have stored this version while we downloaded.
     its copy of the same release is just as good, and possibly already
@@ -284,6 +432,7 @@ pub fn ensure_stored(
         repository,
         &release,
         repo_short_name(repository),
+        &Pins::none(),
         &mut |_, _| {},
     )?
     .0)
@@ -347,6 +496,7 @@ pub fn ensure_latest(
         repository,
         &release,
         repo_short_name(repository),
+        &Pins::none(),
         &mut |_, _| {},
     )?
     .0;
@@ -525,7 +675,13 @@ mod tests {
             draft: false,
         };
 
-        let refused = store_release("ember:acme/sha-test", &release, "sha-test", &mut |_, _| {});
+        let refused = store_release(
+            "ember:acme/sha-test",
+            &release,
+            "sha-test",
+            &Pins::none(),
+            &mut |_, _| {},
+        );
         let Err(Error::ToolAssetMismatch {
             expected, received, ..
         }) = refused
@@ -690,7 +846,13 @@ mod tests {
             Err(Error::ReservedToolAlias(_))
         ));
         assert!(matches!(
-            install_tool("EMBR", &tool, &GithubAPI::new(), &mut |_, _| {}),
+            install_tool(
+                "EMBR",
+                &tool,
+                &GithubAPI::new(),
+                &Pins::none(),
+                &mut |_, _| {}
+            ),
             Err(Error::ReservedToolAlias(_))
         ));
     }
@@ -732,5 +894,129 @@ mod tests {
         assert_eq!(stamped_version(&stamp).as_deref(), Some("2.0.2"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// a release whose one asset is the bare executable `body`, served by a mock.
+    fn raw_release(body: &'static str) -> (Release, String) {
+        let (cdn, _) = mock::serve(move |_| mock::reply("200 OK", body));
+        let asset = format!("tool-{}-{}", env::consts::OS, env::consts::ARCH);
+        let release = Release {
+            tag_name: "0.0.0-embr-test".to_string(),
+            assets: vec![http::responses::Asset {
+                name: asset.clone(),
+                browser_download_url: format!("{cdn}/{asset}"),
+                sha256: None,
+            }],
+            draft: false,
+        };
+        (release, asset)
+    }
+
+    fn pin(name: &str, version: &str, asset: &str, of: &[u8]) -> LockedTool {
+        LockedTool {
+            name: name.to_string(),
+            version: version.to_string(),
+            asset: asset.to_string(),
+            sha256: hash::sha256_hex(of),
+        }
+    }
+
+    /** the release was replaced after ember.lock recorded it: the asset has
+    the name and the version that the lock pins, and other bytes. */
+    #[test]
+    fn an_asset_that_is_not_the_pinned_one_is_not_stored() {
+        let repository = "ember:acme/pin-refused";
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+        let (release, asset) = raw_release("a replaced tool");
+        let pins = Pins::new(
+            vec![pin(repository, "0.0.0-embr-test", &asset, b"the tool")],
+            false,
+        );
+
+        let refused = store_release(repository, &release, "pin-refused", &pins, &mut |_, _| {});
+        let Err(Error::ToolLockMismatch {
+            expected, received, ..
+        }) = refused
+        else {
+            panic!("a changed release fails: {:?}", refused.err());
+        };
+        assert_eq!(expected, hash::sha256_hex(b"the tool"));
+        assert_eq!(received, hash::sha256_hex(b"a replaced tool"));
+        assert!(!tool_root(repository).unwrap().exists());
+    }
+
+    #[test]
+    fn a_stored_tool_remembers_its_asset_and_answers_to_the_pin() {
+        let repository = "ember:acme/pin-kept";
+        let version = "0.0.0-embr-test";
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+        let (release, asset) = raw_release("the tool");
+
+        // the pin of another platform's asset says nothing about this one
+        let other = pin(repository, version, "tool-plan9-mips", b"another build");
+        let pins = Pins::new(vec![other.clone()], false);
+        let (stored, downloaded) =
+            store_release(repository, &release, "pin-kept", &pins, &mut |_, _| {}).unwrap();
+        assert!(downloaded && stored.is_file());
+        assert_eq!(
+            stored_asset(repository, version),
+            Some((asset.clone(), hash::sha256_hex(b"the tool")))
+        );
+
+        // the lock gains this asset, keeps the other platform's, and drops an old version
+        let tool = Tool {
+            repository: repository.to_string(),
+            version: version.to_string(),
+        };
+        let old = pin(repository, "0.0.0-older", &asset, b"an older tool");
+        let locked = locked_assets([&tool].into_iter(), &[other.clone(), old], false);
+        let mine = pin(repository, version, &asset, b"the tool");
+        let mut expected = vec![mine.clone(), other.clone()];
+        expected.sort();
+        assert_eq!(locked, expected);
+
+        // stored already: the same pin passes with no download, another one fails
+        let (_, again) = store_release(
+            repository,
+            &release,
+            "pin-kept",
+            &Pins::new(vec![mine], false),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert!(!again);
+        let wrong = vec![pin(repository, version, &asset, b"what the lock expected")];
+        assert!(matches!(
+            store_release(
+                repository,
+                &release,
+                "pin-kept",
+                &Pins::new(wrong.clone(), false),
+                &mut |_, _| {}
+            ),
+            Err(Error::ToolLockMismatch { .. })
+        ));
+
+        // --refresh takes the stored asset as the new pin
+        assert!(
+            store_release(
+                repository,
+                &release,
+                "pin-kept",
+                &Pins::new(wrong.clone(), true),
+                &mut |_, _| {}
+            )
+            .is_ok()
+        );
+        let repinned = locked_assets([&tool].into_iter(), &wrong, true);
+        assert_eq!(repinned, [pin(repository, version, &asset, b"the tool")]);
+
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+    }
+
+    #[test]
+    fn a_tool_that_npm_installs_gets_no_pin() {
+        let tool = Tool::parse("npm:azul-sync@2.4.0").unwrap();
+        assert!(locked_assets([&tool].into_iter(), &[], false).is_empty());
     }
 }
