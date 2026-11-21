@@ -474,6 +474,33 @@ pub enum Error {
     #[error("'{alias}' is in [dependencies] and in [{table}]; an alias goes in one of the two")]
     AliasInBothTables { alias: String, table: &'static str },
 
+    #[error("{flag} names one package, and this `embr add` names several; add that package alone")]
+    AddOneOnly { flag: &'static str },
+
+    #[error("'{0}' gives a version and so does --version; give one of the two")]
+    AddVersionTwice(String),
+
+    #[error(
+        "{first} and {second} both get the key '{alias}'; pass --scoped to key each by its full name"
+    )]
+    AddAliasTwice {
+        alias: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("Scope '{scope}' has no packages on {index}")]
+    ScopeEmpty { scope: String, index: String },
+
+    #[error(
+        "`embr add {0}/` adds a whole scope and asks first; no terminal can answer, so pass --yes"
+    )]
+    AddNeedsYes(String),
+
+    /// each failure of an `embr add` that names several packages.
+    #[error("{} packages failed, and ember.toml is unchanged:{}", .0.len(), .0.iter().map(|error| format!("\n  - {error}")).collect::<String>())]
+    AddFailed(Vec<Error>),
+
     #[error("Invalid features in ember.toml: {0}")]
     FeaturesInvalid(String),
 

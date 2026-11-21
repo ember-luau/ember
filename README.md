@@ -148,6 +148,24 @@ embr init --kind package --language alloy --environment lune --name me/tool --ye
 Without a terminal, or with `--yes`, each question that has no flag takes
 its default: a Roblox project in Luau.
 
+`embr add` takes several packages in one run, and `scope/` for every
+package of a scope:
+
+```sh
+embr add acme/maid acme/signal@^1.2   # a requirement goes after `@`
+embr add acme/                        # every package of the scope `acme`
+```
+
+- embr resolves every package first. If one fails, `ember.toml` does not
+  change, and embr lists each failure.
+- `--index`, `--scoped`, `--refresh`, `--dev` and the other flags apply to
+  every package. `--alias` and `--version` take one package.
+- Two packages with one short name, such as `acme/signal` and
+  `beta/signal`, need `--scoped`.
+- `scope/` prints the packages and asks first. `--yes` skips the question,
+  and a run with no terminal needs it. A package that the table already
+  has is left as it is. An unlisted or private package is not in the list.
+
 `embr add scope/name` asks which index to use. To skip the question and
 use the default index, run `embr self index-prompt off`. Run
 `embr self index-prompt on` to get it back.

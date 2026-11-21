@@ -7,7 +7,7 @@ pub mod wally;
 
 use crate::error::Error;
 use crate::net::{http, registry};
-use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language};
+use crate::project::manifest::{DEFAULT_INDEX_URL, Environment, Language, split_package_name};
 use crate::registry::local;
 use crate::sys;
 use crate::sys::hash::{fnv1a, fnv1a_parts, sha256_hex};
@@ -326,6 +326,31 @@ impl Index {
             Kind::Forest => forest::resolve(&self.url, name, req),
             Kind::LuaRocks => luarocks::resolve(&self.url, name, req),
         }
+    }
+
+    /** the full name of every package in `scope`, sorted. a git index keeps
+    one file per package in a folder named after the scope. an owners file
+    has a `.` in its name, which no package name has, so it is left out.
+    an API index has no folder to list and is refused. */
+    pub fn scope(&self, scope: &str) -> Result<Vec<String>, Error> {
+        if matches!(self.kind, Kind::Forest | Kind::LuaRocks) {
+            return Err(Error::IndexFetch {
+                url: self.url.clone(),
+                reason: "this index cannot list the packages of a scope".to_string(),
+            });
+        }
+        // the scope is user input and goes into a path
+        split_package_name(&format!("{scope}/x"))?;
+        let mut names: Vec<String> = fs::read_dir(self.root.join(scope))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| format!("{scope}/{}", entry.file_name().to_string_lossy()))
+            .filter(|name| split_package_name(name).is_ok())
+            .collect();
+        names.sort();
+        Ok(names)
     }
 
     /** the package file of `name`, parsed, from a pesde-format index. None
