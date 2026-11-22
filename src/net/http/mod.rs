@@ -166,6 +166,11 @@ pub(crate) mod mock {
     takes the request, as the log keeps it, and gives a whole response.
     each connection serves one request, so ureq's pool cannot mix them. */
     pub fn serve(answer: impl Fn(&str) -> String + Send + 'static) -> (String, Log) {
+        serve_bytes(move |request| answer(request).into_bytes())
+    }
+
+    /// [`serve`] for an answer whose body is not text, such as a tarball.
+    pub fn serve_bytes(answer: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (String, Log) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let log: Log = Arc::default();
@@ -186,7 +191,7 @@ pub(crate) mod mock {
                 let request = String::from_utf8_lossy(&request).to_lowercase();
                 let response = answer(&request);
                 seen.lock().unwrap().push(request);
-                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&response);
             }
         });
         (base, log)
@@ -204,6 +209,15 @@ pub(crate) mod mock {
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(0);
         request.len() >= end + 4 + length
+    }
+
+    /// a whole 200 response with the bytes `body`.
+    pub fn reply_bytes(body: &[u8]) -> Vec<u8> {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        [head.as_bytes(), body].concat()
     }
 
     /// a whole response with `status` (like "200 OK") and `body`.

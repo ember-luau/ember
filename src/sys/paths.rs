@@ -51,6 +51,11 @@ pub fn templates_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("templates"))
 }
 
+/// ~/.ember/presets, one `<name>.toml` per preset that `embr preset save` keeps.
+pub fn presets_dir() -> Result<PathBuf, Error> {
+    Ok(ember_dir()?.join("presets"))
+}
+
 /// ~/.ember/local, the registry that `embr publish --local` writes.
 pub fn local_dir() -> Result<PathBuf, Error> {
     Ok(ember_dir()?.join("local"))

@@ -1,4 +1,4 @@
-use crate::commands::template;
+use crate::commands::{preset, template};
 use crate::error::Error;
 use crate::net::auth;
 use crate::project::manifest::{
@@ -24,9 +24,12 @@ pub struct InitArgs {
     /// The package name, as scope/name
     #[arg(long)]
     pub name: Option<String>,
-    /// Start from a template: a saved name, owner/repo[#ref] on GitHub, or a folder
+    /// Start from a template: a saved name, a folder, ember:scope/name[@version], github:owner/repo[@ref], or owner/repo, which asks Ember and then GitHub
     #[arg(long, conflicts_with_all = ["kind", "language", "environment"])]
     pub template: Option<String>,
+    /// Merge a preset into the new ember.toml: a saved name, or scope/name[@version] on Ember
+    #[arg(long)]
+    pub preset: Option<String>,
     /// Take the default for every question that no flag answers
     #[arg(short, long)]
     pub yes: bool,
@@ -218,12 +221,24 @@ fn sanitize_name_part(part: &str) -> String {
         .to_lowercase()
 }
 
-pub fn run(args: InitArgs) -> Result<(), Error> {
+pub fn run(mut args: InitArgs) -> Result<(), Error> {
     let manifest_path = Path::new("ember.toml");
     if manifest_path.exists() {
         return Err(Error::ManifestExists);
     }
+    /* found before anything is written, so a preset that does not exist
+    leaves the folder as it is. applied last: with a template, the tree
+    first, then the preset */
+    let Some(spec) = args.preset.take() else {
+        return create(args, manifest_path);
+    };
+    let text = preset::resolve(&spec)?;
+    create(args, manifest_path)?;
+    preset::apply_to_new(manifest_path, &spec, &text)
+}
 
+/// writes the new project, without its preset.
+fn create(args: InitArgs, manifest_path: &Path) -> Result<(), Error> {
     /* a flag answers its question. without one, a terminal gets the
     question, and anything else (CI, a script, --yes) gets the default */
     let interactive = !args.yes && std::io::stdin().is_terminal();

@@ -92,6 +92,14 @@ pub enum Error {
     #[error("{0}")]
     Template(String),
 
+    /// a preset that embr cannot save, find, or apply
+    #[error("{0}")]
+    Preset(String),
+
+    /// Ember has no template or preset of this name. `kind` is "template" or "preset".
+    #[error("No {kind} named {name} is on Ember")]
+    EmberListingMissing { kind: &'static str, name: String },
+
     #[error("No GitHub token found; log in with `gh auth login`, or set GH_TOKEN or GITHUB_TOKEN")]
     GithubTokenMissing,
 
