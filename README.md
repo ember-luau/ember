@@ -170,6 +170,112 @@ embr add acme/                        # every package of the scope `acme`
 use the default index, run `embr self index-prompt off`. Run
 `embr self index-prompt on` to get it back.
 
+## Templates: start from a project tree
+
+A template is a whole project tree: a folder with an `ember.toml` at its
+root. `embr init --template` copies a template into an empty folder.
+
+```sh
+embr template save starter            # keep the current project in ~/.ember/templates
+embr template list                    # also `show <name>` and `remove <name>`
+embr init --template starter          # a saved template
+embr init --template ember:ada/roblox-game          # a template on Ember
+embr init --template ember:ada/roblox-game@1.2.0    # one version of it
+embr init --template github:octocat/game@v2         # a GitHub repository, at a branch or a tag
+embr init --template octocat/game     # Ember first, then GitHub
+```
+
+- A name with no `/` is a saved template, or a folder.
+- `ember:scope/name[@version]` is a template on Ember.
+- `github:owner/repo[@ref]` is a GitHub repository. The older form
+  `owner/repo#ref` also reads GitHub only.
+- A bare `owner/repo` asks Ember first. When Ember has no such template,
+  embr reads the GitHub repository.
+
+`save` leaves out secrets, lockfiles, installed packages and the files
+that `.gitignore` names. embr checks the SHA-256 of a template from Ember
+before it writes a file.
+
+Find a template on Ember:
+
+```sh
+embr template search roblox --tag game   # --tag can repeat; --json prints one document
+embr template info ada/roblox-game       # versions, files and details
+```
+
+Publish a saved template. Ember and GitHub are two separate commands:
+
+```sh
+embr template publish starter --description "A Roblox game with Rojo" --tag game --tag luau
+embr template github starter             # make a GitHub template repository
+```
+
+> [!NOTE]
+> `embr template publish` now publishes to Ember. Before, it made a GitHub
+> repository. That command is now `embr template github`, with the same
+> flags: `--private`, `--repo owner/name` and `--yes`.
+
+`embr template publish` uses the login of `embr publish`. Its flags:
+
+- `--as scope/name` sets the name on Ember. The default is your login and
+  the saved name.
+- `--version` sets the version. The default is the next patch version
+  after the latest one, or `1.0.0` for a new template.
+- `--description` is one line of 1 to 200 characters. The default is the
+  `[package] description` of the template, or the description that Ember
+  has.
+- `--tag` adds a tag, at most 8: `luau`, `alloy`, `loom`, `luwu`, `game`,
+  `library`, `plugin`, `cli`, `ui` or `monorepo`.
+- `--dry-run` checks everything and uploads nothing.
+
+A template on Ember holds at most 2000 files and 10 MB. Ember shows the
+`README.md` of the template when it is 20 000 characters or less.
+
+## Presets: a part of a manifest
+
+A preset is a part of an `ember.toml`, and no other file. Use a preset
+for the scripts, tools and settings that your projects share.
+
+```sh
+embr preset save strict               # keep the manifest of this project in ~/.ember/presets
+embr preset list                      # also `show <name>` and `remove <name>`
+embr preset apply strict              # merge a saved preset into ember.toml
+embr preset apply ada/strict          # a preset on Ember, also `ember:ada/strict@1.0.0`
+embr init --preset strict             # a new project with the preset
+embr init --template starter --preset strict   # the tree first, then the preset
+```
+
+A preset holds these tables: `[target]`, `[config]`, `[indices]`,
+`[dependencies]`, `[dev-dependencies]`, `[peer-dependencies]`,
+`[features]`, `[feature-files]`, `[highlight]`, `[overrides]`,
+`[patches]`, `[tools]`, `[scripts]` and `[studio]`. From `[package]`, a
+preset holds `private` and `visibility` only. `save` leaves out
+`[workspace]` and the other keys of `[package]`, such as `name` and
+`version`, because they belong to one project. `apply` and `publish`
+refuse a preset that has one of them.
+
+`embr preset apply` merges by these rules:
+
+- A key that `ember.toml` lacks is added.
+- A key that `ember.toml` has keeps its value, and embr lists it as
+  skipped. `--force` takes the value of the preset.
+- A table merges key by key. An array is one value.
+- The comments and the key order of `ember.toml` stay.
+
+embr prints the changes and asks before it writes. `--yes` skips the
+question. With no terminal and no `--yes`, embr writes nothing and exits
+with 1. `--dry-run` prints the changes and stops.
+
+`embr init --preset` has no question, and the values of the preset win,
+because the manifest is new.
+
+A preset from Ember can add `[scripts]` and `[tools]`. Read the changes
+before you answer.
+
+`embr preset publish`, `embr preset search` and `embr preset info` work
+as the template commands do, with the same flags. A preset is never on
+GitHub. A preset on Ember holds at most 64 KB.
+
 ## Move from pesde, Wally, Forest, or Crater
 
 `embr migrate` moves `pesde.toml`, `wally.toml`, `forest.json`, and
@@ -389,8 +495,8 @@ sequences and control characters from them before it prints them.
 ## `--json`: output for scripts
 
 `embr info`, `embr tree`, `embr why`, `embr outdated`, `embr notices`,
-`embr audit`, `embr search`, `embr tool list` and `embr template list` take
-`--json`. The command then prints one JSON document on stdout, with no
+`embr audit`, `embr search`, `embr tool list`, and `list`, `search` and
+`info` of `embr template` and `embr preset` take `--json`. The command then prints one JSON document on stdout, with no
 colour and no progress line. Warnings and errors go to stderr.
 
 ```sh

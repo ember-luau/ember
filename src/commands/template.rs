@@ -1,7 +1,9 @@
 /*! `embr template`: project templates. a template is a project folder.
-`save` keeps a copy of the current project under ~/.ember/templates,
-`embr init --template` copies a template into a new project, and `publish`
-puts a saved template on GitHub as a template repository.
+`save` keeps a copy of the current project under ~/.ember/templates, and
+`embr init --template` copies a template into a new project. `publish` puts
+a saved template on the Ember registry, and `search` and `info` read the
+registry. `github` puts a saved template on GitHub as a template
+repository. the two are separate: neither one does the other.
 
 a saved template is a folder with two entries:
 
@@ -12,7 +14,11 @@ a saved template is a folder with two entries:
 
 use crate::error::Error;
 use crate::net::github_template::{self as github, API, NewRepository};
-use crate::project::manifest::{Environment, MANIFEST_FILE, Manifest, is_github_username};
+use crate::net::listing::{self, Kind};
+use crate::net::registry;
+use crate::project::manifest::{
+    EMBER_PREFIX, Environment, MANIFEST_FILE, Manifest, is_github_username,
+};
 use crate::registry::pack::tar_path;
 use crate::sys::{git, paths};
 use crate::ui;
@@ -56,8 +62,28 @@ pub enum TemplateCommand {
         name: String,
     },
 
-    /// Create a GitHub template repository from a saved template
+    /// Publish a saved template to Ember
     Publish {
+        #[command(flatten)]
+        args: listing::PublishArgs,
+        // the flags `publish` took when it made a GitHub repository. they
+        // stay as hidden flags so an old script gets the message below.
+        #[arg(long, hide = true)]
+        private: bool,
+        #[arg(long, hide = true)]
+        repo: Option<String>,
+        #[arg(short, long, hide = true)]
+        yes: bool,
+    },
+
+    /// Search the templates on Ember
+    Search(listing::SearchArgs),
+
+    /// Show a template on Ember: its versions, files and details
+    Info(listing::InfoArgs),
+
+    /// Create a GitHub template repository from a saved template
+    Github {
         /// Name of the saved template
         name: String,
 
@@ -75,6 +101,18 @@ pub enum TemplateCommand {
     },
 }
 
+impl TemplateCommand {
+    /// whether the command prints one JSON document, so no other line may follow it.
+    pub fn is_json(&self) -> bool {
+        match self {
+            TemplateCommand::List { json } => *json,
+            TemplateCommand::Search(args) => args.json,
+            TemplateCommand::Info(args) => args.json,
+            _ => false,
+        }
+    }
+}
+
 pub fn run(command: TemplateCommand) -> Result<(), Error> {
     match command {
         TemplateCommand::Save { name, force } => save(&name, force),
@@ -82,13 +120,23 @@ pub fn run(command: TemplateCommand) -> Result<(), Error> {
         TemplateCommand::Show { name } => show(&name),
         TemplateCommand::Remove { name } => remove(&name),
         TemplateCommand::Publish {
+            private, repo, yes, ..
+        } if private || repo.is_some() || yes => Err(Error::Template(MOVED_TO_GITHUB.to_string())),
+        TemplateCommand::Publish { args, .. } => publish(&args),
+        TemplateCommand::Search(args) => listing::run_search(Kind::Template, args),
+        TemplateCommand::Info(args) => listing::run_info(Kind::Template, args),
+        TemplateCommand::Github {
             name,
             private,
             repo,
             yes,
-        } => publish(&name, private, repo.as_deref(), yes),
+        } => to_github(&name, private, repo.as_deref(), yes),
     }
 }
+
+/// what `publish` says to a script that still gives it a GitHub flag.
+const MOVED_TO_GITHUB: &str = "`embr template publish` now publishes to Ember. \
+     Use `embr template github` to create a GitHub repository.";
 
 /// what template.toml records about a saved template.
 #[derive(Serialize, Deserialize)]
@@ -97,13 +145,20 @@ struct Meta {
     source: String,
 }
 
-/// a name `save` takes. no dot, so a name never ends in the `.tmp` of staging.
-fn check_name(name: &str) -> Result<(), Error> {
-    let valid = !name.is_empty()
+/// the prefix of a template on GitHub, `github:owner/repo[@ref]`.
+pub const GITHUB_PREFIX: &str = "github:";
+
+/// whether `name` is a name that `save` takes, for a template or a preset.
+pub(crate) fn is_name(name: &str) -> bool {
+    !name.is_empty()
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    match valid {
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// a name `save` takes. no dot, so a name never ends in the `.tmp` of staging.
+fn check_name(name: &str) -> Result<(), Error> {
+    match is_name(name) {
         true => Ok(()),
         false => Err(Error::Template(format!(
             "'{name}' is not a template name; use letters, digits, `-` and `_`"
@@ -262,7 +317,86 @@ fn collect(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<(), Erro
     Ok(())
 }
 
-fn publish(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result<(), Error> {
+/// the most files of a template on Ember.
+const MAX_FILES: usize = 2_000;
+
+/// the longest path of a file of a template on Ember, in characters.
+const MAX_PATH_CHARS: usize = 200;
+
+/** publishes a saved template to Ember: one gzip tarball with ember.toml
+at its root. the description, the license and the repository come from
+`[package]` of that ember.toml, and the readme from README.md. */
+fn publish(args: &listing::PublishArgs) -> Result<(), Error> {
+    let root = saved_dir(&args.name)?.join("files");
+    let files = files_in(&root)?;
+    let mut paths: Vec<String> = files.iter().map(|file| tar_path(file)).collect();
+    paths.sort();
+    let refused = |why: String| Error::Template(format!("Cannot publish the template: {why}"));
+    if !paths.iter().any(|path| path == MANIFEST_FILE) {
+        return Err(no_manifest());
+    }
+    if paths.len() > MAX_FILES {
+        return Err(refused(format!(
+            "it has {} files, and Ember takes at most {MAX_FILES}",
+            paths.len()
+        )));
+    }
+    if let Some(long) = paths
+        .iter()
+        .find(|path| path.chars().count() > MAX_PATH_CHARS)
+    {
+        return Err(refused(format!(
+            "the path {long} is longer than {MAX_PATH_CHARS} characters"
+        )));
+    }
+    let content = pack(&root, &files)?;
+    if content.len() > registry::MAX_ARCHIVE_BYTES {
+        return Err(refused("it is larger than 10 MB".to_string()));
+    }
+
+    let package = fs::read_to_string(root.join(MANIFEST_FILE))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|mut manifest| manifest.remove("package"));
+    let text = |key: &str| {
+        let value = package.as_ref()?.get(key)?.as_str()?;
+        Some(value.to_string())
+    };
+    let readme = fs::read_to_string(root.join("README.md")).ok();
+    if readme
+        .as_ref()
+        .is_some_and(|readme| readme.chars().count() > listing::MAX_README_CHARS)
+    {
+        println!(
+            "note: README.md is longer than {} characters, so Ember gets no readme",
+            listing::MAX_README_CHARS
+        );
+    }
+    let meta = listing::Meta {
+        description: text("description"),
+        tags: Vec::new(),
+        license: text("license"),
+        repository: text("repository")
+            .and_then(|repository| listing::github_repository(&repository)),
+        readme: readme.filter(|readme| readme.chars().count() <= listing::MAX_README_CHARS),
+        files: Some(paths),
+    };
+    listing::run_publish(Kind::Template, args, meta, &content)
+}
+
+/** a gzip tarball of `files`, relative to `root`, with no folder around
+them. the headers hold no time and no user of this computer. */
+fn pack(root: &Path, files: &[PathBuf]) -> Result<Vec<u8>, Error> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    builder.mode(tar::HeaderMode::Deterministic);
+    for file in files {
+        builder.append_path_with_name(root.join(file), tar_path(file))?;
+    }
+    Ok(builder.into_inner()?.finish()?)
+}
+
+fn to_github(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result<(), Error> {
     let files_dir = saved_dir(name)?.join("files");
     let files = files_in(&files_dir)?;
     let token = github::token().ok_or(Error::GithubTokenMissing)?;
@@ -291,7 +425,7 @@ fn publish(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result<(
     if !yes {
         if !std::io::stdin().is_terminal() {
             return Err(Error::Template(
-                "publish asks before it creates a repository; pass --yes to skip the question"
+                "github asks before it creates a repository; pass --yes to skip the question"
                     .to_string(),
             ));
         }
@@ -339,7 +473,7 @@ fn publish(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result<(
     };
     if let Err(error) = pushed {
         return Err(Error::Template(format!(
-            "Created {}, but the push failed: {error}. Delete the repository on GitHub, then publish again",
+            "Created {}, but the push failed: {error}. Delete the repository on GitHub, then run the command again",
             created.html_url
         )));
     }
@@ -348,7 +482,7 @@ fn publish(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result<(
         created.html_url
     ));
     println!(
-        "Start a project from it with `embr init --template {}`",
+        "Start a project from it with `embr init --template {GITHUB_PREFIX}{}`",
         created.full_name
     );
     Ok(())
@@ -393,18 +527,26 @@ pub struct Fetched {
 enum Files {
     /// these files, relative to this folder.
     Folder(PathBuf, Vec<PathBuf>),
-    /// a GitHub tarball whose entries all passed [`entries`].
-    Tarball(Vec<u8>),
+    /** a tarball whose entries all passed [`entries`]. true for a GitHub
+    tarball, which has one folder around its files. */
+    Tarball(Vec<u8>, bool),
 }
 
 /** Finds the template `spec` for `dest`, which must be empty but for a
-`.git` folder. `spec` is a saved template's name, then a folder, then a
-GitHub `owner/repo[#ref]`. nothing is written yet, so `embr init` can ask
-its questions first.
+`.git` folder. nothing is written yet, so `embr init` can ask its questions
+first. the forms of `spec`, in the order that embr tries them:
 
-A public repository downloads with no token. on a 404 embr tries again
-with the GitHub token, for a private one. */
+- `ember:scope/name[@version]`, a template on Ember.
+- `github:owner/repo[@ref]`, a GitHub repository.
+- the name of a saved template, then a folder.
+- `owner/repo[@version]`, which asks Ember first, and GitHub when Ember
+  has no such template. `owner/repo#ref` is GitHub alone. */
 pub fn fetch(spec: &str, dest: &Path) -> Result<Fetched, Error> {
+    fetch_at(&registry::api_url(), API, spec, dest)
+}
+
+/// [`fetch`] with the API of Ember at `ember` and the API of GitHub at `github`.
+fn fetch_at(ember: &str, github: &str, spec: &str, dest: &Path) -> Result<Fetched, Error> {
     let busy = fs::read_dir(dest)?
         .flatten()
         .any(|entry| entry.file_name() != ".git");
@@ -413,6 +555,20 @@ pub fn fetch(spec: &str, dest: &Path) -> Result<Fetched, Error> {
             "embr init --template needs an empty folder; this one has files (a .git folder is fine)"
                 .to_string(),
         ));
+    }
+
+    if let Some(on_ember) = spec.strip_prefix(EMBER_PREFIX) {
+        let (name, version) = listing::split_version(on_ember);
+        return from_ember(ember, name, version);
+    }
+    if let Some(on_github) = spec.strip_prefix(GITHUB_PREFIX) {
+        let on_github = on_github.replacen('@', "#", 1);
+        let Some((repository, reference)) = github_spec(&on_github) else {
+            return Err(Error::Template(format!(
+                "'{spec}' is not a GitHub repository; write github:owner/repo or github:owner/repo@ref"
+            )));
+        };
+        return from_github(github, repository, reference);
     }
 
     let saved = check_name(spec)
@@ -437,19 +593,44 @@ pub fn fetch(spec: &str, dest: &Path) -> Result<Fetched, Error> {
         });
     }
 
-    let Some((repository, reference)) = github_spec(spec) else {
+    // `@version` is `#ref` on GitHub, where a version is a tag
+    let (_, version) = listing::split_version(spec);
+    let on_github = spec.replacen('@', "#", 1);
+    let Some((repository, reference)) = github_spec(&on_github) else {
         return Err(Error::Template(format!(
-            "No template is named '{spec}', and it is not a folder or a GitHub owner/repo"
+            "No template is named '{spec}', and it is not a folder, ember:scope/name, or a GitHub owner/repo"
         )));
     };
-    let tarball = match github::tarball(API, repository, reference, None) {
+    // JohnnyMorganz/Game finds johnnymorganz/game on Ember
+    let candidate = crate::tools::ember_candidate(repository)
+        .filter(|_| reference.is_none() || version.is_some());
+    if let Some(name) = candidate {
+        match from_ember(ember, &name, version) {
+            Err(Error::EmberListingMissing { .. }) => {}
+            found => return found,
+        }
+    }
+    from_github(github, repository, reference)
+}
+
+/// the template `name` ("scope/name") on Ember, at `version` or at its latest version.
+fn from_ember(api: &str, name: &str, version: Option<&str>) -> Result<Fetched, Error> {
+    let (_, tarball) = listing::download(api, Kind::Template, name, version)?;
+    Fetched::from_tarball(tarball, false)
+}
+
+/** the GitHub repository `repository` at `reference`, or at its default
+branch. a public repository downloads with no token. on a 404 embr tries
+again with the GitHub token, for a private one. */
+fn from_github(api: &str, repository: &str, reference: Option<&str>) -> Result<Fetched, Error> {
+    let tarball = match github::tarball(api, repository, reference, None) {
         Err(Error::Http(crate::net::http::error::HttpError::NotFound)) => {
             let token = github::token().ok_or_else(|| {
                 Error::Template(format!(
                     "GitHub has no public repository {repository}; for a private one, log in with `gh auth login`, or set GH_TOKEN or GITHUB_TOKEN"
                 ))
             })?;
-            github::tarball(API, repository, reference, Some(&token)).map_err(
+            github::tarball(api, repository, reference, Some(&token)).map_err(
                 |error| match error {
                     Error::Http(crate::net::http::error::HttpError::NotFound) => Error::Template(
                         format!("GitHub has no repository {repository} that your token can read"),
@@ -460,17 +641,20 @@ pub fn fetch(spec: &str, dest: &Path) -> Result<Fetched, Error> {
         }
         other => other?,
     };
-    Fetched::from_tarball(tarball)
+    Fetched::from_tarball(tarball, true)
 }
 
 impl Fetched {
-    /** checks every entry of a GitHub tarball. a refused archive is an
-    error here, before anything is written. */
-    fn from_tarball(tarball: Vec<u8>) -> Result<Self, Error> {
-        let manifest = entries(&tarball, None)?.manifest.ok_or_else(no_manifest)?;
+    /** checks every entry of a tarball. a refused archive is an error
+    here, before anything is written. `wrapped` says that one folder holds
+    the files, as in a GitHub tarball. */
+    fn from_tarball(tarball: Vec<u8>, wrapped: bool) -> Result<Self, Error> {
+        let manifest = entries(&tarball, None, wrapped)?
+            .manifest
+            .ok_or_else(no_manifest)?;
         Ok(Fetched {
             manifest,
-            files: Files::Tarball(tarball),
+            files: Files::Tarball(tarball, wrapped),
         })
     }
 
@@ -481,7 +665,7 @@ impl Fetched {
                 copy(root, files, dest)?;
                 Ok(files.len())
             }
-            Files::Tarball(tarball) => Ok(entries(tarball, Some(dest))?.files),
+            Files::Tarball(tarball, wrapped) => Ok(entries(tarball, Some(dest), *wrapped)?.files),
         }
     }
 }
@@ -701,12 +885,12 @@ struct Pass {
     manifest: Option<String>,
 }
 
-/** One pass over a GitHub tarball, without the `owner-repo-sha/` folder
-that wraps it. it checks every entry, and writes it under `dest` when a
-`dest` is given. refused: an absolute path, a `..`, a `.git` folder, a
+/** One pass over a tarball. a `wrapped` one is from GitHub, and the pass
+drops the `owner-repo-sha/` folder that holds its files. it checks every
+entry, and writes it under `dest` when a `dest` is given. refused: an absolute path, a `..`, a `.git` folder, a
 symlink whose target leaves the folder, a path through a symlink, and any
 entry that is not a file, a folder, or a symlink. */
-fn entries(tarball: &[u8], dest: Option<&Path>) -> Result<Pass, Error> {
+fn entries(tarball: &[u8], dest: Option<&Path>, wrapped: bool) -> Result<Pass, Error> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
     let mut links: Vec<PathBuf> = Vec::new();
     let mut pass = Pass {
@@ -721,7 +905,7 @@ fn entries(tarball: &[u8], dest: Option<&Path>) -> Result<Pass, Error> {
             continue;
         }
         let path = entry.path()?.into_owned();
-        let Some(relative) = inner_path(&path)? else {
+        let Some(relative) = inner_path(&path, wrapped)? else {
             continue;
         };
         if links.iter().any(|link| relative.starts_with(link)) {
@@ -764,10 +948,12 @@ fn refused(path: &Path, reason: &str) -> Error {
     ))
 }
 
-/** the path of an entry inside the wrapping folder. None for the folder
+/** the path of an entry inside the template: inside the wrapping folder of
+a `wrapped` tarball, else the path as it is. None for the top folder
 itself. an absolute path, a `..`, a drive letter, and a `.git` folder are
 refused. */
-fn inner_path(path: &Path) -> Result<Option<PathBuf>, Error> {
+fn inner_path(path: &Path, wrapped: bool) -> Result<Option<PathBuf>, Error> {
+    let top = usize::from(wrapped);
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
@@ -779,10 +965,10 @@ fn inner_path(path: &Path) -> Result<Option<PathBuf>, Error> {
             _ => return Err(refused(path, "leaves the folder")),
         }
     }
-    if parts.get(1).is_some_and(|part| *part == ".git") {
+    if parts.get(top).is_some_and(|part| *part == ".git") {
         return Err(refused(path, "is in a .git folder"));
     }
-    Ok((parts.len() > 1).then(|| parts[1..].iter().collect()))
+    Ok((parts.len() > top).then(|| parts[top..].iter().collect()))
 }
 
 /** whether a symlink at `at` with `target` stays inside the folder that
@@ -803,6 +989,25 @@ fn check_link(at: &Path, target: &Path) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_with_a_github_flag_names_the_new_command() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: TemplateCommand,
+        }
+
+        for flags in [&["--private"][..], &["--repo", "a/b"], &["-y"]] {
+            let argv = ["embr", "publish", "starter"].iter().chain(flags);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let error = run(cli.command).unwrap_err().to_string();
+            assert!(error.contains("embr template github"), "{error}");
+        }
+    }
+    use crate::net::http::mock;
 
     /// an empty temp folder, cleaned first so reruns are honest.
     fn folder(name: &str) -> PathBuf {
@@ -937,6 +1142,135 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// the detail that Ember gives for a template whose one version holds `content`.
+    fn detail(content: &[u8]) -> String {
+        format!(
+            r#"{{"scope":"ada","name":"starter","description":"d","tags":[],"latest":"1.0.0",
+            "versions":[{{"version":"1.0.0","sha256":"{}","files":["ember.toml"]}}]}}"#,
+            crate::sys::hash::sha256_hex(content)
+        )
+    }
+
+    #[test]
+    fn a_packed_template_comes_back_from_ember() {
+        let source = folder("ember-source");
+        write(&source, "ember.toml", "[target]\nenvironment = \"lune\"\n");
+        write(&source, "src/init.luau", "return {}\n");
+        let content = pack(&source, &files_in(&source).unwrap()).unwrap();
+        let listed = detail(&content);
+        let (api, log) = mock::serve_bytes(move |request| match request.contains("/download") {
+            true => mock::reply_bytes(&content),
+            false => mock::reply("200 OK", &listed).into_bytes(),
+        });
+
+        // GitHub is at the same address, and gets no request
+        for spec in [
+            "ember:ada/starter",
+            "ember:ada/starter@1.0.0",
+            "Ada/Starter",
+        ] {
+            let dest = folder("ember-dest");
+            let fetched = fetch_at(&api, &api, spec, &dest).unwrap();
+            assert!(fetched.manifest.contains("lune"), "{spec}");
+            assert_eq!(fetched.write(&dest).unwrap(), 2, "{spec}");
+            assert_eq!(
+                fs::read_to_string(dest.join("src/init.luau")).unwrap(),
+                "return {}\n"
+            );
+            assert!(dest.join("ember.toml").is_file());
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 6, "{log:?}");
+        assert!(log[0].starts_with("get /v1/templates/ada/starter "));
+        assert!(log[1].starts_with("get /v1/templates/ada/starter/versions/1.0.0/download "));
+        assert!(log.iter().all(|sent| !sent.contains("/repos/")));
+        let _ = fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn a_bare_owner_and_repo_reads_github_when_ember_has_no_such_template() {
+        let archive = tarball(&[
+            ("octo-game-abc/", Directory, None, ""),
+            ("octo-game-abc/ember.toml", Regular, None, "[target]\n"),
+        ]);
+        let (api, log) =
+            mock::serve_bytes(move |request| match request.starts_with("get /repos/") {
+                true => mock::reply_bytes(&archive),
+                false => mock::reply("404 Not Found", r#"{"error":"not found"}"#).into_bytes(),
+            });
+        let fetch = |spec: &str| {
+            let dest = folder("fallback-dest");
+            let fetched = fetch_at(&api, &api, spec, &dest).unwrap();
+            assert_eq!(fetched.write(&dest).unwrap(), 1, "{spec}");
+            std::mem::take(&mut *log.lock().unwrap())
+        };
+
+        // Ember first, in lowercase, then GitHub with the name as it was written
+        let sent = fetch("Octo/Game");
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].starts_with("get /v1/templates/octo/game "));
+        assert!(sent[1].starts_with("get /repos/octo/game/tarball "));
+        // a version is a tag on GitHub
+        let sent = fetch("octo/game@v1.2");
+        assert!(sent[1].starts_with("get /repos/octo/game/tarball/v1.2 "));
+        // `github:` and `#ref` never ask Ember
+        for (spec, path) in [
+            ("github:octo/game", "get /repos/octo/game/tarball "),
+            (
+                "github:octo/game@main",
+                "get /repos/octo/game/tarball/main ",
+            ),
+            ("octo/game#main", "get /repos/octo/game/tarball/main "),
+            // Ember cannot hold a name with a dot
+            ("octo/game.luau", "get /repos/octo/game.luau/tarball "),
+        ] {
+            let sent = fetch(spec);
+            assert_eq!(sent.len(), 1, "{spec}: {sent:?}");
+            assert!(sent[0].starts_with(path), "{spec}: {}", sent[0]);
+        }
+
+        // `ember:` has no fallback
+        let dest = folder("fallback-dest");
+        assert!(matches!(
+            fetch_at(&api, &api, "ember:octo/game", &dest),
+            Err(Error::EmberListingMissing {
+                kind: "template",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fetch_at(&api, &api, "github:octo", &dest),
+            Err(Error::Template(message)) if message.contains("github:owner/repo")
+        ));
+    }
+
+    #[test]
+    fn a_template_from_ember_gets_the_same_checks_as_one_from_github() {
+        // no folder holds the files, so the first part of a path is in the template
+        let dest = folder("ember-unsafe");
+        for bad in [
+            ("../evil.txt", Regular, None, "x"),
+            (".git/hooks/post-checkout", Regular, None, "x"),
+            ("out", Symlink, Some("../outside"), ""),
+        ] {
+            let archive = tarball(&[("ember.toml", Regular, None, "[target]\n"), bad]);
+            assert!(
+                matches!(
+                    Fetched::from_tarball(archive, false),
+                    Err(Error::Template(message)) if message.contains("unsafe")
+                ),
+                "{}",
+                bad.0
+            );
+        }
+        let archive = tarball(&[("src/ember.toml", Regular, None, "")]);
+        assert!(matches!(
+            Fetched::from_tarball(archive, false),
+            Err(Error::Template(message)) if message.contains("no ember.toml")
+        ));
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+    }
+
     #[test]
     fn github_specs_take_an_owner_a_repo_and_a_ref() {
         assert_eq!(github_spec("octocat/game"), Some(("octocat/game", None)));
@@ -1006,7 +1340,7 @@ mod tests {
 
     /// checks a tarball, then writes it, as `embr init` does.
     fn extract(tarball: Vec<u8>, dest: &Path) -> Result<usize, Error> {
-        Fetched::from_tarball(tarball)?.write(dest)
+        Fetched::from_tarball(tarball, true)?.write(dest)
     }
 
     #[test]

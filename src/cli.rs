@@ -20,9 +20,13 @@ pub enum Commands {
     /// Create an ember.toml manifest in the current directory
     Init(commands::init::InitArgs),
 
-    /// Save, list, and publish the project templates of `embr init --template`
+    /// Save, list, find, and publish the project templates of `embr init --template`
     #[command(subcommand)]
     Template(commands::template::TemplateCommand),
+
+    /// Save, apply, find, and publish manifest presets: parts of an ember.toml
+    #[command(subcommand)]
+    Preset(commands::preset::PresetCommand),
 
     /// Runs a script from ember.toml or the global manifest, or lists them all
     Run(commands::run::RunArgs),
@@ -184,13 +188,8 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
     };
     match command {
         Commands::Init(args) => done(commands::init::run(args)),
-        Commands::Template(command) => {
-            let json = matches!(
-                command,
-                commands::template::TemplateCommand::List { json: true }
-            );
-            shown(json, commands::template::run(command))
-        }
+        Commands::Template(command) => shown(command.is_json(), commands::template::run(command)),
+        Commands::Preset(command) => shown(command.is_json(), commands::preset::run(command)),
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),

@@ -13,6 +13,7 @@ pub mod migrate;
 pub mod notices;
 pub mod outdated;
 pub mod patch;
+pub mod preset;
 pub mod publish;
 pub mod remove;
 pub mod run;
