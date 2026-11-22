@@ -2215,6 +2215,8 @@ fn install_tools(
     let github = GithubAPI::new();
     let none = tools::Pins::none();
     let mut installed = Vec::new();
+    // the commands that binaries after the main binary have taken so far
+    let mut claimed: Vec<String> = Vec::new();
     for (alias, tool, global) in jobs {
         let task = progress.task(format!("{}@{}", tool.repository, tool.version));
         // the project's lock says nothing about a tool that is this computer's own
@@ -2234,19 +2236,41 @@ fn install_tools(
         } else {
             format!(" ({})", notes.join(", "))
         };
+        // the alias, then each other binary that the tool installs
+        let mut commands = vec![alias.clone()];
+        commands.extend(tools::extra_bins(&tool.repository, &tool.version));
         task.done(&ui::success_line(&format!(
-            "{}@{} → {alias}{notes}",
-            tool.repository, tool.version
+            "{}@{} → {}{notes}",
+            tool.repository,
+            tool.version,
+            commands.join(", ")
         )));
 
-        /* another toolchain manager's shim earlier in PATH, aftman or
-        rokit, would run instead of ours and report its own errors. surface
-        that or the tool looks broken for no visible reason */
-        if let Some(shadow) = tools::shim::shadowing_executable(alias) {
-            progress.warn(&format!(
-                "warning: `{alias}` resolves to {} on PATH before embr's shims; that copy will run instead",
-                shadow.display()
-            ));
+        for (index, command) in commands.iter().enumerate() {
+            /* another toolchain manager's shim earlier in PATH, aftman or
+            rokit, would run instead of ours and report its own errors. surface
+            that or the tool looks broken for no visible reason */
+            if let Some(shadow) = tools::shim::shadowing_executable(command) {
+                progress.warn(&format!(
+                    "warning: `{command}` resolves to {} on PATH before embr's shims; that copy will run instead",
+                    shadow.display()
+                ));
+            }
+            /* two tools cannot both have one command. an alias of [tools]
+            wins over a binary of another tool, and then the first tool */
+            let taken = index > 0
+                && (jobs
+                    .iter()
+                    .any(|(other, _, _)| other.eq_ignore_ascii_case(command))
+                    || claimed.contains(&command.to_ascii_lowercase()));
+            if taken {
+                progress.warn(&format!(
+                    "warning: `{command}` of {} does not run: another tool has that command",
+                    tool.repository
+                ));
+            } else if index > 0 {
+                claimed.push(command.to_ascii_lowercase());
+            }
         }
         installed.push(InstalledTool {
             alias: alias.clone(),

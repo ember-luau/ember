@@ -153,6 +153,10 @@ struct Meta {
     repository: Option<String>,
     homepage: Option<String>,
     license: Option<String>,
+    /** each binary that the tool installs, the main binary first. an
+    install reads it from the tool.toml among the assets of the version. */
+    #[serde(default)]
+    bins: Vec<String>,
 }
 
 /// one file to upload, by the asset name that Ember stores it under.
@@ -211,6 +215,14 @@ pub fn plan(
         });
     }
     let mut meta = file.tool;
+    // an install reads `bins` from this asset, so the version must hold it
+    if !meta.bins.is_empty() && uploads.iter().all(|upload| upload.name != super::TOOL_FILE) {
+        uploads.push(Upload {
+            name: super::TOOL_FILE.to_string(),
+            path: manifest.to_path_buf(),
+            size: text.len() as u64,
+        });
+    }
     if version.is_some() {
         meta.version = version;
     }
@@ -306,6 +318,7 @@ fn check(meta: &Meta, notes: Option<&str>, uploads: &[Upload]) -> Result<(), Str
     {
         return Err("license must be 1 to 64 characters".to_string());
     }
+    super::check_bins(&meta.bins)?;
     if notes.is_some_and(|notes| notes.chars().count() > MAX_NOTES_CHARS) {
         return Err(format!(
             "the notes are longer than {MAX_NOTES_CHARS} characters"
@@ -646,6 +659,39 @@ mod tests {
         assert_eq!(plan.body["version"], "1.1.0");
         assert_eq!(plan.body["notes"], "# 1.1.0");
         assert_eq!(plan.body["prerelease"], true);
+
+        // `bins` adds tool.toml to the files, because an install reads it there
+        fs::write(
+            &manifest,
+            "[tool]\nname = \"acme/lint\"\nversion = \"1.0.0\"\ndescription = \"Lints\"\ntags = [\"cli\"]\nbins = [\"lint\", \"lint-lsp\"]\n",
+        )
+        .unwrap();
+        let with_bins = plan_of(&manifest, &asset).unwrap();
+        let names: Vec<&str> = with_bins
+            .uploads
+            .iter()
+            .map(|upload| upload.name.as_str())
+            .collect();
+        assert_eq!(names, ["lint-linux.zip", "tool.toml"]);
+        assert_eq!(with_bins.uploads[1].path, manifest);
+        // given by hand, it is not there twice
+        let by_hand = super::plan(
+            &manifest,
+            &[asset.clone(), manifest.clone()],
+            None,
+            None,
+            false,
+        );
+        assert_eq!(by_hand.unwrap().uploads.len(), 2);
+        fs::write(
+            &manifest,
+            "[tool]\nname = \"acme/lint\"\nversion = \"1.0.0\"\ndescription = \"Lints\"\ntags = [\"cli\"]\nbins = [\"lint\", \"a/b\"]\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            plan_of(&manifest, &asset),
+            Err(Error::ToolPublishInvalid(reason)) if reason.contains("binary name")
+        ));
 
         // an unknown key is a typo, not something to drop
         fs::write(

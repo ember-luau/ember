@@ -328,6 +328,10 @@ pub enum Error {
     #[error("{0}")]
     ToolPublishInvalid(String),
 
+    /// the tool.toml in a release names its binaries in a way embr cannot install.
+    #[error("The tool.toml in the release of {tool} is not valid: {reason}")]
+    ToolFileInvalid { tool: String, reason: String },
+
     #[error("No release asset of {tool}@{version} matches this platform")]
     NoMatchingAsset { tool: String, version: String },
 

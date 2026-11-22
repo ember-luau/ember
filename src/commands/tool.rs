@@ -669,6 +669,13 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     if !target.exists() {
         return Err(Error::ToolMissing(name.to_string()));
     }
+    // each other binary of the tool has a shim too, read before the records go
+    let bins: Vec<String> = fs::read_dir(&tool_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|version| tools::bins_in(&version.path()))
+        .collect();
     fs::remove_dir_all(&target)?;
 
     /* when the whole tool or its last version is gone, drop the shim too.
@@ -683,7 +690,9 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     if tool_gone {
         let _ = fs::remove_dir_all(&tool_dir);
         if let (Some(shim), Ok(bin_dir)) = (shim, paths::bin_dir()) {
-            let _ = fs::remove_file(bin_dir.join(format!("{shim}{EXE_SUFFIX}")));
+            for shim in bins.iter().chain([&shim]) {
+                let _ = fs::remove_file(bin_dir.join(format!("{shim}{EXE_SUFFIX}")));
+            }
         }
     }
 

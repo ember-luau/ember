@@ -2,7 +2,12 @@
 and installs them. `archive` picks and unpacks the right release asset,
 `shim` maps an alias to one of the stored binaries. `npm` does the same
 for tools that npm publishes. `ember` turns a tool on the Ember registry
-into the release shape of the GitHub path. */
+into the release shape of the GitHub path.
+
+A tool can install more than one binary. The tool owner attaches a
+`tool.toml` to the release, and its `[tool] bins` names each binary. The
+first binary is the main binary, and the alias of [tools] runs it. Each
+other binary gets a shim under its own name. */
 
 pub mod archive;
 pub mod ember;
@@ -13,7 +18,7 @@ pub(crate) mod shorthands;
 use crate::error::Error;
 use crate::net::github::GithubAPI;
 use crate::net::http;
-use crate::net::http::responses::Release;
+use crate::net::http::responses::{Asset, Release};
 use crate::project::lockfile::LockedTool;
 use crate::project::manifest::{EMBER_PREFIX, Tool, split_package_name};
 use crate::sys::{hash, paths};
@@ -141,7 +146,11 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
         Some(package) => npm::is_stored(package, &tool.version)?,
         None => stored_is_usable(&stored_executable(&tool.repository, &tool.version)?),
     };
-    Ok(stored && shim::path(alias)?.exists())
+    Ok(stored
+        && shim::path(alias)?.exists()
+        && extra_bins(&tool.repository, &tool.version)
+            .iter()
+            .all(|bin| shim::path(bin).is_ok_and(|shim| shim.exists())))
 }
 
 /** the SHA-256 that ember.lock records for the release assets of the
@@ -201,26 +210,104 @@ impl Pins {
     }
 }
 
-/** the file in a stored version's folder that names the release asset it
+/** the file in a stored version's folder that names each release asset it
 was unpacked from and that asset's SHA-256, in the form `sha256sum` prints.
 a version stored by an embr from before the file has none. */
 const ASSET_RECORD: &str = ".embr-asset";
 
-/** the asset name and SHA-256 that the stored `version` of `repository`
-came from. None for a version that an older embr stored, and for a tool
-that npm installs. */
-pub fn stored_asset(repository: &str, version: &str) -> Option<(String, String)> {
-    let text =
-        fs::read_to_string(storage_dir(repository, version).ok()?.join(ASSET_RECORD)).ok()?;
-    let (sha256, asset) = text.trim_end().split_once("  ")?;
-    (hash::is_sha256_hex(sha256) && !asset.is_empty())
-        .then(|| (asset.to_string(), sha256.to_string()))
+/** the release asset in which a tool owner names the binaries of the tool,
+as `bins` under `[tool]`. it is the file that `embr tool publish` reads. */
+pub const TOOL_FILE: &str = "tool.toml";
+
+/** the file in a stored version's folder that names each binary after the
+main binary, one on each line. a tool with one binary has no such file. */
+const BINS_RECORD: &str = ".embr-bins";
+
+/** the name and SHA-256 of each asset that the stored `version` of
+`repository` came from. empty for a version that an older embr stored, and
+for a tool that npm installs. */
+pub fn stored_assets(repository: &str, version: &str) -> Vec<(String, String)> {
+    let Ok(storage) = storage_dir(repository, version) else {
+        return Vec::new();
+    };
+    fs::read_to_string(storage.join(ASSET_RECORD))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once("  "))
+        .filter(|(sha256, asset)| hash::is_sha256_hex(sha256) && !asset.is_empty())
+        .map(|(sha256, asset)| (asset.to_string(), sha256.to_string()))
+        .collect()
+}
+
+/** the binaries that the stored `version` of `repository` holds after its
+main binary. each one has a shim under its own name. empty for a tool with
+one binary, and for a version that is not stored. */
+pub fn extra_bins(repository: &str, version: &str) -> Vec<String> {
+    storage_dir(repository, version).map_or_else(|_| Vec::new(), |storage| bins_in(&storage))
+}
+
+/// the binaries that the record in the version folder `storage` names.
+pub(crate) fn bins_in(storage: &Path) -> Vec<String> {
+    fs::read_to_string(storage.join(BINS_RECORD))
+        .unwrap_or_default()
+        .lines()
+        .filter(|bin| paths::is_plain_file_name(bin))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `[tool] bins` of tool.toml. the install reads no other field.
+#[derive(serde::Deserialize)]
+struct BinsFile {
+    tool: Option<BinsTable>,
+}
+
+#[derive(serde::Deserialize)]
+struct BinsTable {
+    bins: Option<Vec<String>>,
+}
+
+/** the binaries that the tool.toml in `bytes` names, the main binary first.
+empty when the file has no `bins`. the error is the reason. */
+fn declared_bins(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "the file is not UTF-8".to_string())?;
+    let file: BinsFile = toml::from_str(text).map_err(|error| error.message().to_string())?;
+    let bins = file.tool.and_then(|tool| tool.bins).unwrap_or_default();
+    check_bins(&bins)?;
+    Ok(bins)
+}
+
+/** the rules for `bins`. a binary name becomes a file name and a command
+name, so it must be safe as each. the error is the reason. */
+pub(crate) fn check_bins(bins: &[String]) -> Result<(), String> {
+    for (index, bin) in bins.iter().enumerate() {
+        let valid = (1..=64).contains(&bin.len())
+            && !bin.starts_with('.')
+            && bin
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c));
+        if !valid {
+            return Err(format!(
+                "binary name '{bin}' must be 1 to 64 of A-Z a-z 0-9 . _ + -, not starting with ."
+            ));
+        }
+        if is_reserved_alias(bin) {
+            return Err(format!("binary name '{bin}' is a command of embr"));
+        }
+        if bins[..index]
+            .iter()
+            .any(|other| other.eq_ignore_ascii_case(bin))
+        {
+            return Err(format!("binary '{bin}' is there twice"));
+        }
+    }
+    Ok(())
 }
 
 /** the entries of ember.lock's `[[tool]]` after an install of `tools`, the
 project's own GitHub and Ember tools. each tool keeps the assets that
 `previous` holds for its version, which other platforms wrote, and gains
-the asset that this computer has stored. a tool that left [tools], or
+the assets that this computer has stored. a tool that left [tools], or
 moved to another version, loses its entries. */
 pub fn locked_assets<'a>(
     tools: impl Iterator<Item = &'a Tool>,
@@ -229,7 +316,7 @@ pub fn locked_assets<'a>(
 ) -> Vec<LockedTool> {
     let mut locked = Vec::new();
     for tool in tools.filter(|tool| tool.npm_package().is_none()) {
-        let stored = stored_asset(&tool.repository, &tool.version);
+        let stored = stored_assets(&tool.repository, &tool.version);
         locked.extend(
             previous
                 .iter()
@@ -237,28 +324,23 @@ pub fn locked_assets<'a>(
                     entry.name.eq_ignore_ascii_case(&tool.repository)
                         && entry.version == tool.version
                 })
-                // the asset stored here is written below, with the hash it has now
-                .filter(|entry| {
-                    !replace
-                        || stored
-                            .as_ref()
-                            .is_none_or(|(asset, _)| *asset != entry.asset)
-                })
+                // an asset stored here is written below, with the hash it has now
+                .filter(|entry| !replace || stored.iter().all(|(asset, _)| *asset != entry.asset))
                 .cloned(),
         );
-        if let Some((asset, sha256)) = stored
-            && !locked.iter().any(|entry: &LockedTool| {
+        for (asset, sha256) in stored {
+            if !locked.iter().any(|entry: &LockedTool| {
                 entry.name.eq_ignore_ascii_case(&tool.repository)
                     && entry.version == tool.version
                     && entry.asset == asset
-            })
-        {
-            locked.push(LockedTool {
-                name: tool.repository.clone(),
-                version: tool.version.clone(),
-                asset,
-                sha256,
-            });
+            }) {
+                locked.push(LockedTool {
+                    name: tool.repository.clone(),
+                    version: tool.version.clone(),
+                    asset,
+                    sha256,
+                });
+            }
         }
     }
     locked.sort();
@@ -286,26 +368,27 @@ pub fn install_tool(
         return Ok(installed);
     }
     let stored = stored_executable(&tool.repository, &tool.version)?;
-    if stored_is_usable(&stored) {
+    let downloaded = if stored_is_usable(&stored) {
         check_stored(&tool.repository, &tool.version, pins)?;
-        shim::write(&shim::path(alias)?)?;
-        return Ok(false);
-    }
-
-    let release = get_release(&tool.repository, &tool.version, github)?;
-    let (_, downloaded) = store_release(&tool.repository, &release, alias, pins, on_bytes)?;
+        false
+    } else {
+        let release = get_release(&tool.repository, &tool.version, github)?;
+        store_release(&tool.repository, &release, alias, pins, on_bytes)?.1
+    };
     shim::write(&shim::path(alias)?)?;
+    for bin in extra_bins(&tool.repository, &tool.version) {
+        shim::write(&shim::path(&bin)?)?;
+    }
     Ok(downloaded)
 }
 
 /** refuses a stored version that came from another asset than the one
-ember.lock pins. a version stored with no record of its asset passes: it
+ember.lock pins. a version stored with no record of its assets passes: it
 is from before embr kept one, and there is nothing to compare. */
 fn check_stored(repository: &str, version: &str, pins: &Pins) -> Result<(), Error> {
-    match stored_asset(repository, version) {
-        Some((asset, sha256)) => pins.check(repository, version, &asset, &sha256),
-        None => Ok(()),
-    }
+    stored_assets(repository, version)
+        .iter()
+        .try_for_each(|(asset, sha256)| pins.check(repository, version, asset, sha256))
 }
 
 /** Downloads the platform asset of a fetched release, extracts it, stores
@@ -327,7 +410,12 @@ pub fn install_release(
 a fetched release, extracts it, and stores the executable, no bin shim,
 no manifest, which is what `embr execute` runs on. returns the stored
 executable and whether a download happened. `name_hint` is an extra
-candidate name when picking the executable out of a multi-file asset. */
+candidate name when picking the executable out of a multi-file asset.
+
+a release that holds a tool.toml with `bins` stores each binary. a binary
+that owns release assets, see [`archive::asset_owner`], comes from its
+platform asset. a binary that owns none comes from the archive of the main
+binary. */
 pub fn store_release(
     repository: &str,
     release: &Release,
@@ -345,29 +433,69 @@ pub fn store_release(
         return Ok((stored, false));
     }
 
-    let asset = archive::select_asset(&release.assets, env::consts::OS, env::consts::ARCH)
+    // what ember.lock pins, and what a later install compares its pins with
+    let mut record = String::new();
+    let mut fetch = |asset: &Asset| -> Result<Vec<u8>, Error> {
+        let bytes = http::get_bytes_with(&asset.browser_download_url, &[], &mut *on_bytes)?;
+        /* before anything reaches disk, so a bad download leaves nothing
+        behind. Ember lists a hash for an upload, and GitHub for each asset
+        uploaded since June 2025. that hash comes from the same place as the
+        release, so it catches a bad transfer or a changed mirror. the pin in
+        ember.lock is what catches a release that was replaced */
+        let received = hash::sha256_hex(&bytes);
+        if let Some(expected) = &asset.sha256
+            && !received.eq_ignore_ascii_case(expected)
+        {
+            return Err(Error::ToolAssetMismatch {
+                tool: format!("{repository}@{version}"),
+                asset: asset.name.clone(),
+                expected: expected.clone(),
+                received,
+            });
+        }
+        pins.check(repository, version, &asset.name, &received)?;
+        record.push_str(&format!("{received}  {}\n", asset.name));
+        Ok(bytes)
+    };
+
+    let invalid = |reason: String| Error::ToolFileInvalid {
+        tool: format!("{repository}@{version}"),
+        reason,
+    };
+    let bins = match release.assets.iter().find(|asset| asset.name == TOOL_FILE) {
+        Some(asset) => declared_bins(&fetch(asset)?).map_err(invalid)?,
+        None => Vec::new(),
+    };
+    let (main, extras) = match bins.split_first() {
+        Some((main, extras)) => (main.as_str(), extras),
+        None => (repo, &[][..]),
+    };
+    // the main binary is stored under the repo name, so no other binary can take it
+    if extras.iter().any(|bin| bin.eq_ignore_ascii_case(repo)) {
+        return Err(invalid(format!(
+            "`{repo}` is the main binary, so `bins` must list it first"
+        )));
+    }
+
+    /* the platform asset of one binary, or with None of the main binary:
+    an asset that no other binary owns. a tool with one binary has no
+    owners, so this is every asset, as before */
+    let select = |owner: Option<&str>| {
+        archive::select_from(
+            release
+                .assets
+                .iter()
+                .filter(|asset| archive::asset_owner(&asset.name, extras) == owner),
+            env::consts::OS,
+            env::consts::ARCH,
+        )
         .ok_or_else(|| Error::NoMatchingAsset {
             tool: repository.to_string(),
             version: version.to_string(),
-        })?;
-    let bytes = http::get_bytes_with(&asset.browser_download_url, &[], on_bytes)?;
-    /* before anything reaches disk, so a bad download leaves nothing
-    behind. Ember lists a hash for an upload, and GitHub for each asset
-    uploaded since June 2025. that hash comes from the same place as the
-    release, so it catches a bad transfer or a changed mirror. the pin in
-    ember.lock is what catches a release that was replaced */
-    let received = hash::sha256_hex(&bytes);
-    if let Some(expected) = &asset.sha256
-        && !received.eq_ignore_ascii_case(expected)
-    {
-        return Err(Error::ToolAssetMismatch {
-            tool: format!("{repository}@{version}"),
-            asset: asset.name.clone(),
-            expected: expected.clone(),
-            received,
-        });
-    }
-    pins.check(repository, version, &asset.name, &received)?;
+        })
+    };
+    let asset = select(None)?;
+    let bytes = fetch(asset)?;
 
     /* extract into a staging sibling first so a failed install never
     leaves a half-written storage dir behind, same dance as install.rs.
@@ -387,14 +515,51 @@ pub fn store_release(
 
     let mut files = Vec::new();
     archive::collect_files(&staging.0, &mut files)?;
-    let found = archive::pick_executable(&files, repo, name_hint, env::consts::EXE_SUFFIX)
+    let found = archive::pick_executable(&files, main, name_hint, env::consts::EXE_SUFFIX)
         .ok_or_else(|| Error::NoExecutableInAsset(name_hint.to_string()))?;
     place_executable(&found, &target)?;
-    // what ember.lock pins, and what a later install compares its pin with
-    fs::write(
-        staging.0.join(ASSET_RECORD),
-        format!("{received}  {}\n", asset.name),
-    )?;
+
+    for bin in extras {
+        let file_name = executable_name(bin);
+        let missing = || Error::NoExecutableInAsset(format!("{repository} ({bin})"));
+        let target = staging.0.join(&file_name);
+        let owns_assets = release
+            .assets
+            .iter()
+            .any(|asset| archive::asset_owner(&asset.name, extras) == Some(bin));
+        if owns_assets {
+            /* ponytail: only the executable of the asset is kept. keep the
+            folder if a binary ever needs the files beside it */
+            let asset = select(Some(bin))?;
+            let bytes = fetch(asset)?;
+            let unpacked = staging.0.join(format!(".{bin}.tmp"));
+            fs::create_dir_all(&unpacked)?;
+            archive::extract(&asset.name, &bytes, &unpacked, &unpacked.join(&file_name))?;
+            let mut files = Vec::new();
+            archive::collect_files(&unpacked, &mut files)?;
+            let found = archive::pick_executable(&files, bin, bin, env::consts::EXE_SUFFIX)
+                .ok_or_else(missing)?;
+            place_executable(&found, &target)?;
+            fs::remove_dir_all(&unpacked)?;
+        } else {
+            // no asset of its own: the archive of the main binary holds it, by name
+            let found = files
+                .iter()
+                .map(|(path, _)| path)
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&file_name))
+                })
+                .ok_or_else(missing)?;
+            place_executable(found, &target)?;
+        }
+        make_executable(&target)?;
+    }
+    fs::write(staging.0.join(ASSET_RECORD), &record)?;
+    if !extras.is_empty() {
+        fs::write(staging.0.join(BINS_RECORD), extras.join("\n") + "\n")?;
+    }
 
     /* a concurrent run may have stored this version while we downloaded.
     its copy of the same release is just as good, and possibly already
@@ -959,9 +1124,14 @@ mod tests {
             store_release(repository, &release, "pin-kept", &pins, &mut |_, _| {}).unwrap();
         assert!(downloaded && stored.is_file());
         assert_eq!(
-            stored_asset(repository, version),
-            Some((asset.clone(), hash::sha256_hex(b"the tool")))
+            stored_assets(repository, version),
+            [(asset.clone(), hash::sha256_hex(b"the tool"))]
         );
+        // a release with no tool.toml has one binary, and no record of others
+        assert!(extra_bins(repository, version).is_empty());
+        let storage = storage_dir(repository, version).unwrap();
+        assert!(!storage.join(BINS_RECORD).exists());
+        assert_eq!(fs::read_dir(&storage).unwrap().count(), 2);
 
         // the lock gains this asset, keeps the other platform's, and drops an old version
         let tool = Tool {
@@ -1012,6 +1182,192 @@ mod tests {
         assert_eq!(repinned, [pin(repository, version, &asset, b"the tool")]);
 
         let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+    }
+
+    /** a release of `files`, each a name and a body, served by a mock. `{p}`
+    in a name becomes the platform of this computer. */
+    fn release_of(files: &[(&str, String)]) -> Release {
+        let platform = format!("{}-{}", env::consts::OS, env::consts::ARCH);
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(name, body)| (name.replace("{p}", &platform), body.clone()))
+            .collect();
+        let names: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
+        let (cdn, _) = mock::serve(move |request| {
+            let body = files.iter().find_map(|(name, body)| {
+                let line = format!("get /{} ", name.to_lowercase());
+                request.starts_with(&line).then_some(body)
+            });
+            match body {
+                Some(body) => mock::reply("200 OK", body),
+                None => mock::reply("404 Not Found", ""),
+            }
+        });
+        Release {
+            tag_name: "0.0.0-embr-test".to_string(),
+            assets: names
+                .into_iter()
+                .map(|name| http::responses::Asset {
+                    browser_download_url: format!("{cdn}/{name}"),
+                    name,
+                    sha256: None,
+                })
+                .collect(),
+            draft: false,
+        }
+    }
+
+    fn bins_file(bins: &str) -> (&'static str, String) {
+        (TOOL_FILE, format!("[tool]\nbins = [{bins}]\n"))
+    }
+
+    /** the Alloy shape: the release has one asset for each binary, and its
+    tool.toml names the two binaries. */
+    #[test]
+    fn a_release_with_bins_stores_each_binary_from_its_asset() {
+        let repository = "ember:acme/multi";
+        let version = "0.0.0-embr-test";
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+        let release = release_of(&[
+            ("multi-lsp-1.0.0-{p}", "the server".to_string()),
+            bins_file("\"multi\", \"multi-lsp\""),
+            ("multi-1.0.0-{p}", "the tool".to_string()),
+            ("multi-lsp-1.0.0-plan9-mips", "another build".to_string()),
+        ]);
+
+        let (stored, downloaded) =
+            store_release(repository, &release, "multi", &Pins::none(), &mut |_, _| {}).unwrap();
+        assert!(downloaded);
+        let storage = storage_dir(repository, version).unwrap();
+        assert_eq!(stored, storage.join(executable_name("multi")));
+        assert_eq!(fs::read(&stored).unwrap(), b"the tool");
+        assert_eq!(
+            fs::read(storage.join(executable_name("multi-lsp"))).unwrap(),
+            b"the server"
+        );
+        assert_eq!(extra_bins(repository, version), ["multi-lsp"]);
+        // the two executables and the two records, with no folder left from the unpack
+        assert_eq!(fs::read_dir(&storage).unwrap().count(), 4);
+
+        // ember.lock pins the tool.toml and the asset of each binary
+        let tool = Tool {
+            repository: repository.to_string(),
+            version: version.to_string(),
+        };
+        let locked = locked_assets([&tool].into_iter(), &[], false);
+        let assets: Vec<&str> = locked.iter().map(|entry| entry.asset.as_str()).collect();
+        let platform = format!("{}-{}", env::consts::OS, env::consts::ARCH);
+        assert_eq!(
+            assets,
+            [
+                format!("multi-1.0.0-{platform}"),
+                format!("multi-lsp-1.0.0-{platform}"),
+                TOOL_FILE.to_string()
+            ]
+        );
+        assert_eq!(locked[1].sha256, hash::sha256_hex(b"the server"));
+
+        // a stored copy answers to the pin of each asset
+        let again = |pins: Vec<LockedTool>| {
+            store_release(
+                repository,
+                &release,
+                "multi",
+                &Pins::new(pins, false),
+                &mut |_, _| {},
+            )
+        };
+        assert!(!again(locked.clone()).unwrap().1);
+        let mut wrong = locked;
+        wrong[1].sha256 = hash::sha256_hex(b"what the lock expected");
+        assert!(matches!(
+            again(wrong.clone()),
+            Err(Error::ToolLockMismatch { .. })
+        ));
+
+        // and a download of the second binary answers to its pin too
+        fs::remove_dir_all(tool_root(repository).unwrap()).unwrap();
+        assert!(matches!(again(wrong), Err(Error::ToolLockMismatch { .. })));
+        assert!(!storage.exists());
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+    }
+
+    /// one archive holds each binary, so no binary after the first owns an asset.
+    #[test]
+    fn a_release_with_bins_takes_each_binary_from_one_archive() {
+        let repository = "ember:acme/kit";
+        let version = "0.0.0-embr-test";
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, body) in [
+            ("README.md", "a long text about the two binaries of the kit"),
+            (&executable_name("kit")[..], "the tool"),
+            (
+                &format!("bin/{}", executable_name("kit-fmt"))[..],
+                "the formatter",
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, body.as_bytes())
+                .unwrap();
+        }
+        let archive = String::from_utf8(builder.into_inner().unwrap()).unwrap();
+
+        let release = release_of(&[
+            ("kit-{p}.tar", archive.clone()),
+            bins_file("\"kit\", \"kit-fmt\""),
+        ]);
+        let (stored, _) =
+            store_release(repository, &release, "kit", &Pins::none(), &mut |_, _| {}).unwrap();
+        assert_eq!(fs::read(&stored).unwrap(), b"the tool");
+        let storage = storage_dir(repository, version).unwrap();
+        assert_eq!(
+            fs::read(storage.join(executable_name("kit-fmt"))).unwrap(),
+            b"the formatter"
+        );
+        assert_eq!(extra_bins(repository, version), ["kit-fmt"]);
+        fs::remove_dir_all(tool_root(repository).unwrap()).unwrap();
+
+        // a binary that the release does not hold fails the install, and nothing is stored
+        let release = release_of(&[("kit-{p}.tar", archive), bins_file("\"kit\", \"kit-lint\"")]);
+        let refused = store_release(repository, &release, "kit", &Pins::none(), &mut |_, _| {});
+        assert!(matches!(refused, Err(Error::NoExecutableInAsset(_))));
+        assert!(!storage.exists());
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+    }
+
+    #[test]
+    fn a_tool_file_that_breaks_a_rule_fails_the_install() {
+        let repository = "ember:acme/rules";
+        let _ = fs::remove_dir_all(tool_root(repository).unwrap());
+        for (bins, why) in [
+            ("\"rules\", \"../rules-lsp\"", "binary name"),
+            ("\"rules\", \"embx\"", "command of embr"),
+            ("\"rules\", \"Rules\"", "twice"),
+            ("\"rules-lsp\", \"rules\"", "list it first"),
+            ("1", "invalid type"),
+        ] {
+            let release = release_of(&[("rules-{p}", "the tool".to_string()), bins_file(bins)]);
+            let refused =
+                store_release(repository, &release, "rules", &Pins::none(), &mut |_, _| {});
+            let Err(Error::ToolFileInvalid { reason, .. }) = refused else {
+                panic!("{bins} fails: {:?}", refused.err());
+            };
+            assert!(reason.contains(why), "{bins}: {reason}");
+            assert!(!tool_root(repository).unwrap().exists());
+        }
+
+        // a tool.toml with no `bins` changes nothing, whatever else it holds
+        assert_eq!(
+            declared_bins(b"[tool]\nname = \"acme/rules\"\ntags = [\"cli\"]\n"),
+            Ok(Vec::new())
+        );
+        assert_eq!(declared_bins(b""), Ok(Vec::new()));
     }
 
     #[test]
