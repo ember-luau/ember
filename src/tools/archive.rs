@@ -42,11 +42,19 @@ fn arch_aliases(arch: &str) -> &'static [&'static str] {
 prefers a full OS+arch match, falling back to OS-only since many tools
 ship one arch per OS. None means nothing fits. */
 pub fn select_asset<'a>(assets: &'a [Asset], os: &str, arch: &str) -> Option<&'a Asset> {
+    select_from(assets.iter(), os, arch)
+}
+
+/// [`select_asset`] over a part of the assets of a release.
+pub fn select_from<'a>(
+    assets: impl Iterator<Item = &'a Asset>,
+    os: &str,
+    arch: &str,
+) -> Option<&'a Asset> {
     let os_names = os_aliases(os);
     let arch_names = arch_aliases(arch);
 
     let candidates: Vec<(&Asset, String)> = assets
-        .iter()
         .map(|asset| (asset, asset.name.to_ascii_lowercase()))
         .filter(|(_, name)| {
             !METADATA_SUFFIXES
@@ -64,6 +72,21 @@ pub fn select_asset<'a>(assets: &'a [Asset], os: &str, arch: &str) -> Option<&'a
                 .find(|(_, name)| matches_any(name, os_names))
         })
         .map(|(asset, _)| *asset)
+}
+
+/** the binary of `bins` that owns the asset `name`. a binary owns an asset
+whose name starts with the binary name, when the next character is not a
+letter or a digit. the longest binary name wins, so `alloy-lsp` owns
+"alloy-lsp-1.0.0-linux-x64.zip" and `alloy` does not. */
+pub fn asset_owner<'a>(name: &str, bins: &'a [String]) -> Option<&'a str> {
+    let name = name.to_ascii_lowercase();
+    bins.iter()
+        .filter(|bin| {
+            name.strip_prefix(&bin.to_ascii_lowercase())
+                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
+        })
+        .max_by_key(|bin| bin.len())
+        .map(String::as_str)
 }
 
 fn matches_any(name: &str, aliases: &[&str]) -> bool {
@@ -361,6 +384,42 @@ mod tests {
             select_asset(&list, "macos", "x86_64").unwrap().name,
             "rojo-7.4.4-macos-aarch64.zip"
         );
+    }
+
+    #[test]
+    fn the_longest_binary_name_owns_an_asset() {
+        let bins = ["alloy".to_string(), "alloy-lsp".to_string()];
+        let owner = |name: &str| asset_owner(name, &bins);
+        assert_eq!(owner("alloy-0.2.0-linux-x64.zip"), Some("alloy"));
+        assert_eq!(owner("Alloy-LSP-0.2.0-linux-x64.zip"), Some("alloy-lsp"));
+        assert_eq!(owner("alloy-lsp"), Some("alloy-lsp"));
+        // the name continues with a letter, so this is another binary
+        assert_eq!(owner("alloyd-linux-x64.zip"), None);
+        assert_eq!(owner("tool.toml"), None);
+
+        // each binary picks its platform asset from the assets that it owns
+        let list = assets(&[
+            "alloy-0.2.0-linux-x64.zip",
+            "alloy-lsp-0.2.0-linux-x64.zip",
+            "alloy-lsp-0.2.0-windows-x64.zip",
+        ]);
+        let of = |bin: Option<&str>, os: &str| {
+            select_from(
+                list.iter().filter(|asset| owner(&asset.name) == bin),
+                os,
+                "x86_64",
+            )
+            .map(|asset| asset.name.as_str())
+        };
+        assert_eq!(
+            of(Some("alloy-lsp"), "linux"),
+            Some("alloy-lsp-0.2.0-linux-x64.zip")
+        );
+        assert_eq!(
+            of(Some("alloy"), "linux"),
+            Some("alloy-0.2.0-linux-x64.zip")
+        );
+        assert_eq!(of(Some("alloy"), "windows"), None);
     }
 
     #[test]

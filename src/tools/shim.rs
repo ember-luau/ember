@@ -4,7 +4,7 @@ up which repo@version the surrounding project pins the alias to and
 hands off to the stored binary. that lookup is what scopes tools to
 their projects. */
 
-use super::stored_executable;
+use super::{executable_name, extra_bins, storage_dir, stored_executable};
 use crate::error::Error;
 use crate::project::manifest::{Tool, manifest_in};
 use crate::sys::binary;
@@ -49,11 +49,10 @@ pub fn invoked_as_embx() -> bool {
 /** Runs `alias` as a tool shim. on unix the tool replaces this process. the
 exit code only comes back on platforms without exec, meaning windows. */
 pub fn run(alias: &str) -> Result<i32, Error> {
-    let tool = resolve_alias(alias, &env::current_dir()?, &paths::global_tools_file()?)?;
+    let (tool, stored) = resolve_alias(alias, &env::current_dir()?, &paths::global_tools_file()?)?;
     let mut command = match tool.npm_package() {
         Some(package) => super::npm::command(alias, package, &tool.version)?,
         None => {
-            let stored = stored_executable(&tool.repository, &tool.version)?;
             if !stored.exists() {
                 return Err(Error::ToolNotInstalled(alias.to_string()));
             }
@@ -160,9 +159,27 @@ pub fn find_alias(alias: &str, start: &Path, global: &Path) -> Result<Option<Too
     Ok(None)
 }
 
-/// `find_alias`, with absence as the error a shim exits with.
-fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<Tool, Error> {
-    find_alias(alias, start, global)?.ok_or_else(|| Error::ToolNotManaged(alias.to_string()))
+/** the tool that the shim `alias` runs, and its stored executable. an alias
+of [tools] wins. the next choice is a binary that a pinned tool installs
+after its main binary, see [`extra_bins`]. absence is the error a shim
+exits with. */
+fn resolve_alias(alias: &str, start: &Path, global: &Path) -> Result<(Tool, PathBuf), Error> {
+    if let Some(tool) = find_alias(alias, start, global)? {
+        let stored = stored_executable(&tool.repository, &tool.version)?;
+        return Ok((tool, stored));
+    }
+    let manifests = start.ancestors().map(manifest_in);
+    for manifest in manifests.chain([global.to_path_buf()]) {
+        for tool in tools_in(&manifest)?.unwrap_or_default().into_values() {
+            let bins = extra_bins(&tool.repository, &tool.version);
+            if let Some(bin) = bins.iter().find(|bin| bin.eq_ignore_ascii_case(alias)) {
+                let stored =
+                    storage_dir(&tool.repository, &tool.version)?.join(executable_name(bin));
+                return Ok((tool, stored));
+            }
+        }
+    }
+    Err(Error::ToolNotManaged(alias.to_string()))
 }
 
 /** Tools visible from `start` through project manifests, the union over
@@ -262,12 +279,13 @@ mod tests {
         .unwrap();
 
         // project manifests win, found from any directory below them.
-        let tool = resolve_alias("rojo", &nested, &global).unwrap();
+        let (tool, stored) = resolve_alias("rojo", &nested, &global).unwrap();
+        assert_eq!(stored, stored_executable("rojo-rbx/rojo", "7.4.4").unwrap());
         assert_eq!(tool.repository, "rojo-rbx/rojo");
         assert_eq!(tool.version, "7.4.4");
 
         // aliases the project doesn't list fall back to the global file.
-        let tool = resolve_alias("stylua", &nested, &global).unwrap();
+        let (tool, _) = resolve_alias("stylua", &nested, &global).unwrap();
         assert_eq!(tool.repository, "johnnymorganz/stylua");
 
         // windows command lookup is case-insensitive, resolution must be too.

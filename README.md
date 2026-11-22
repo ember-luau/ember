@@ -226,6 +226,50 @@ pinned under `[tools]` run their pinned version; other bare names come from
 embr's built-in shorthands, then from the ones the registry adds (such as
 `azul`); anything else is `owner/repo`. A built-in shorthand always wins.
 
+## Tools with more than one binary
+
+One `[tools]` entry can install more than one binary. The tool owner names
+the binaries. The user writes the usual entry:
+
+```toml
+[tools]
+alloy = "alloy-luau/alloy@0.2.0"    # embr tool add alloy-luau/alloy
+```
+
+`embr install` then puts `alloy` and `alloy-lsp` in `~/.ember/bin`. The two
+commands run the version of that one entry.
+
+The tool owner adds `bins` to `tool.toml`, and attaches `tool.toml` to each
+release:
+
+```toml
+[tool]
+bins = ["alloy", "alloy-lsp"]
+```
+
+- The first binary is the main binary. The alias of the `[tools]` entry runs
+  it. Each other binary gets a command with its own name.
+- On a GitHub release, upload the file with
+  `gh release upload <tag> tool.toml`. For a GitHub release, `bins` is the
+  only key that embr reads.
+- `embr tool publish` uploads `tool.toml` with the other files when it has
+  `bins`.
+- A binary owns each release asset whose name starts with the binary name.
+  The longest name wins: `alloy-lsp` owns `alloy-lsp-0.2.0-linux-x64.zip`,
+  and `alloy` owns `alloy-0.2.0-linux-x64.zip`. embr downloads the asset of
+  each binary for the platform.
+- A binary that owns no asset must be in the archive of the main binary,
+  as a file with the binary name. One archive can then hold each binary.
+- A binary name has 1 to 64 characters of `A-Z a-z 0-9 . _ + -`. It does not
+  start with `.`, and it is not `embr` or `embx`.
+- An alias in `[tools]` wins over a binary of another tool with the same
+  name. If two tools install the same binary name, the tool with the first
+  alias in alphabetical order gets the command. `embr install` gives a
+  warning.
+- `embx` runs the main binary only.
+- A release without `tool.toml`, or without `bins`, installs one binary, as
+  before.
+
 ## `embr studio push`: packages in Studio with Azul
 
 ```toml
@@ -964,6 +1008,8 @@ downloads, under `[[tool]]`.
   download and for a copy that is already stored.
 - A tool has one asset for each platform. Each platform adds its own entry
   the first time it downloads the tool.
+- A tool with more than one binary has an entry for each asset that an
+  install downloads, and one for its `tool.toml`.
 - When GitHub or Ember lists a SHA-256 for an asset, embr checks the
   download against that too. GitHub lists one for each asset uploaded
   since June 2025.
