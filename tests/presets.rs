@@ -235,7 +235,8 @@ fn the_local_template_flow_is_as_it_was() {
     assert!(new.contains("version = \"0.1.0\""), "{new}");
     assert!(new.contains("# checks the code"), "{new}");
 
-    // the GitHub command has the flags that `publish` had, and `publish` has them no more
+    // the GitHub command has the flags that `publish` had. `publish` refuses
+    // them and names the new command
     let help = ok(&base, "game", &["template", "github", "--help"]);
     for flag in ["--private", "--repo", "--yes"] {
         assert!(help.contains(flag), "{flag}: {help}");
@@ -246,7 +247,7 @@ fn the_local_template_flow_is_as_it_was() {
         &["template", "publish", "starter", "--private"],
     );
     assert!(!old.status.success());
-    assert!(stderr(&old).contains("--private"), "{old:?}");
+    assert!(stderr(&old).contains("embr template github"), "{old:?}");
 
     ok(&base, "game", &["template", "remove", "starter"]);
     assert!(!base.join("home/.ember/templates/starter").exists());
