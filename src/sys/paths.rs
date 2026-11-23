@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 
 /// ~/.ember, the root of everything embr installs or caches.
 pub fn ember_dir() -> Result<PathBuf, Error> {
+    /* a unit test never reads or writes the ~/.ember of the person who
+    runs it: no login, no cache, no index clone. each test thread shares
+    this one folder, and no test changes HOME to get it */
+    #[cfg(test)]
+    let home = std::env::temp_dir().join("embr-unit-test-home");
+    #[cfg(not(test))]
     let home = dirs::home_dir().ok_or(Error::NoHomeDir)?;
     Ok(home.join(".ember"))
 }

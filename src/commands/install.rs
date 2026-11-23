@@ -1376,8 +1376,16 @@ may spell the old folder in requires and `$path`s that embr cannot rewrite,
 so the one build this breaks has to arrive with its reason attached.
 returns whether it removed anything. */
 fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
+    remove_legacy_outs_in(Path::new(""), manifest, lock)
+}
+
+/** [`remove_legacy_outs`] for the project in `project`. the test names the
+folder, so it does not move the working directory of the process, where
+the git of another test runs. */
+fn remove_legacy_outs_in(project: &Path, manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
     let mut removed = false;
     for (legacy, environment) in manifest.legacy_packages_outs() {
+        let legacy = project.join(legacy);
         if !legacy.join(STORE_DIR).is_dir() {
             continue;
         }
@@ -1386,7 +1394,8 @@ fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
             continue;
         };
         let claimed = Environment::ALL.into_iter().any(|environment| {
-            std::path::absolute(manifest.packages_out(environment)).is_ok_and(|out| out == absolute)
+            std::path::absolute(project.join(manifest.packages_out(environment)))
+                .is_ok_and(|out| out == absolute)
         });
         if claimed {
             continue;
@@ -3541,13 +3550,7 @@ mod tests {
             fs::write(old.join("Thing.luau"), "return nil\n").unwrap();
             fs::write(old.join("acme/Scoped.luau"), "return nil\n").unwrap();
         };
-        // the function reads relative paths, so it has to run from the project
-        let in_base = |manifest: &Manifest| {
-            crate::project::workspace::in_dir(&base, || {
-                Ok(remove_legacy_outs(manifest, Some(&lock)))
-            })
-            .unwrap()
-        };
+        let in_base = |manifest: &Manifest| remove_legacy_outs_in(&base, manifest, Some(&lock));
 
         /* a Luwu project's packages/luau goes. a file that the lock does
         not name is the user's, so it and its folder stay */
