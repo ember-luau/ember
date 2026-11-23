@@ -686,6 +686,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: DownloadSource::Zip {
                 url: format!("https://example.com/{name}"),
             },

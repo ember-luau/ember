@@ -32,6 +32,9 @@ const MOVED: [(&str, &str); 2] = [
 /// points embr at another API, such as a local backend. unset means [`API_URL`].
 pub const API_VAR: &str = "EMBER_API_URL";
 
+/// the header of a publish that names the channel to set.
+const CHANNEL_HEADER: &str = "X-Ember-Channel";
+
 /// the header that carries an unlisted package's link key.
 const LINK_KEY_HEADER: &str = "Ember-Link-Key";
 
@@ -183,6 +186,31 @@ fn refused(error: ureq::Error, name: &str, access: &Access) -> Error {
     }
 }
 
+/** the package answer of `name` as JSON, with the token and the link key
+that embr holds for it. beside `versions` it has the keys that no index
+file has, such as `trust` and `notes`. */
+pub fn package_answer(name: &str) -> Result<serde_json::Value, Error> {
+    let body = package(&api_url(), name, &Access::of(name)?)?;
+    Ok(serde_json::from_str(&body).map_err(HttpError::from)?)
+}
+
+/** each version of `name` that the registry holds, yanked ones included.
+none for a package that the registry does not have, or does not show to
+this caller: the publish that follows then gets the refusal. */
+pub fn published_versions(name: &str) -> Result<Vec<semver::Version>, Error> {
+    let answer = match package_answer(name) {
+        Err(Error::HiddenNotFound { .. }) => return Ok(Vec::new()),
+        answer => answer?,
+    };
+    // a key is "<version> <target>", as in the package file
+    Ok(answer["versions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|versions| versions.keys())
+        .filter_map(|key| semver::Version::parse(key.split(' ').next()?).ok())
+        .collect())
+}
+
 /// the error for any failed API call. a 403 is a refusal, not a rate limit.
 pub fn api_error(error: ureq::Error) -> Error {
     match error {
@@ -218,9 +246,15 @@ version already exists, 413 over the size cap. `oidc_token` is the
 Actions OIDC token when there is one. It rides along in its own header.
 next to an Ember `token` it is provenance only. with no token it is the
 credential, and the API takes it when the package names this workflow as
-a trusted publisher. */
-pub fn publish(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
-    publish_at(&api_url(), token, oidc_token, archive)
+a trusted publisher. `channel` goes in `X-Ember-Channel`: the API then
+sets that channel to the version of the archive, in the same index commit. */
+pub fn publish(
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    archive: &[u8],
+    channel: Option<&str>,
+) -> Result<(), Error> {
+    publish_at(&api_url(), token, oidc_token, archive, channel)
 }
 
 fn publish_at(
@@ -228,6 +262,7 @@ fn publish_at(
     token: Option<&str>,
     oidc_token: Option<&str>,
     archive: &[u8],
+    channel: Option<&str>,
 ) -> Result<(), Error> {
     let url = format!("{api}/v1/publish");
     // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
@@ -240,6 +275,9 @@ fn publish_at(
     }
     if let Some(oidc_token) = oidc_token {
         request = request.set(crate::net::provenance::HEADER, oidc_token);
+    }
+    if let Some(channel) = channel {
+        request = request.set(CHANNEL_HEADER, channel);
     }
     let response = request.send_bytes(archive);
 
@@ -298,6 +336,60 @@ pub fn deprecate(
         None => call("DELETE", None),
     }
     .map(drop)
+}
+
+/** moves `channel` of `name` to `version`, a published version that is not
+yanked, through `PUT /v1/packages/{scope}/{name}/channels/{channel}`.
+`version` None removes the channel through `DELETE`. owners only, as for
+a deprecation. */
+pub fn channel(
+    token: &str,
+    name: &str,
+    channel: &str,
+    version: Option<&semver::Version>,
+) -> Result<(), Error> {
+    let path = format!("/v1/packages/{name}/channels/{channel}");
+    let api = api_url();
+    let call = |method, body| owner_call(&api, token, "channel change", method, &path, None, body);
+    match version {
+        Some(version) => call(
+            "PUT",
+            Some(serde_json::json!({ "version": version.to_string() })),
+        ),
+        None => call("DELETE", None),
+    }
+    .map(drop)
+}
+
+/** sets the release notes of a version through `PUT
+/v1/packages/{scope}/{name}/{version}/notes`, with the Markdown as the
+body. `body` None removes them through `DELETE`. `oidc_token` is the
+credential of a trusted publisher that has no Ember token, in the header
+of a publish. */
+pub fn notes(
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    name: &str,
+    version: &semver::Version,
+    body: Option<&str>,
+) -> Result<(), Error> {
+    let url = format!("{}/v1/packages/{name}/{version}/notes", api_url());
+    let method = if body.is_some() { "PUT" } else { "DELETE" };
+    let mut request = http::agent()
+        .request(method, &url)
+        .set("User-Agent", http::USER_AGENT);
+    if let Some(token) = token {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    } else if let Some(oidc_token) = oidc_token {
+        request = request.set(crate::net::provenance::HEADER, oidc_token);
+    }
+    let response = match body {
+        Some(body) => request
+            .set("Content-Type", "text/markdown")
+            .send_string(body),
+        None => request.call(),
+    };
+    owner_answer("release notes", response).map(drop)
 }
 
 /** posts a notice on `name`, or on the versions that the semver range
@@ -542,7 +634,13 @@ mod tests {
             }
         });
 
-        let refused = publish_at(&api, None, Some("header.claims.signature"), b"archive");
+        let refused = publish_at(
+            &api,
+            None,
+            Some("header.claims.signature"),
+            b"archive",
+            None,
+        );
         let Err(Error::PublishFailed { status, message }) = refused else {
             panic!("a refusal is a publish failure: {refused:?}");
         };
@@ -560,7 +658,14 @@ mod tests {
         assert!(!sent.contains("authorization"), "{sent}");
 
         // next to a token, the token is the credential, as before
-        publish_at(&api, Some("ember_abc"), Some("oidc"), b"archive").unwrap();
+        publish_at(
+            &api,
+            Some("ember_abc"),
+            Some("oidc"),
+            b"archive",
+            Some("beta"),
+        )
+        .unwrap();
         let sent = log.lock().unwrap()[1].clone();
         assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
         assert!(sent.contains("x-github-oidc-token: oidc"), "{sent}");

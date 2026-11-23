@@ -98,6 +98,8 @@ pub struct Meta {
     pub deprecated: Option<String>,
     pub replacement: Option<String>,
     pub notices: Vec<Notice>,
+    /// `[meta.channels]`: each channel and the one version that it names.
+    pub channels: std::collections::BTreeMap<String, String>,
 }
 
 impl Meta {
@@ -118,10 +120,18 @@ impl Meta {
             .flatten()
             .filter_map(Notice::of)
             .collect();
+        let channels = meta
+            .and_then(|meta| meta.get("channels"))
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+            .filter_map(|(channel, version)| Some((channel.clone(), version.as_str()?.to_string())))
+            .collect();
         Meta {
             deprecated: text("deprecated"),
             replacement: text("replacement"),
             notices,
+            channels,
         }
     }
 }

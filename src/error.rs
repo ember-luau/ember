@@ -425,6 +425,52 @@ pub enum Error {
     #[error("No version of {name} matches requirement '{req}'")]
     NoMatchingVersion { name: String, req: String },
 
+    #[error("'{channel}' is not a channel name: {reason}")]
+    ChannelInvalid {
+        channel: String,
+        reason: &'static str,
+    },
+
+    #[error("{name} has no channel '{channel}'; {known}")]
+    ChannelMissing {
+        name: String,
+        channel: String,
+        /// the channels that the package has, as a clause.
+        known: String,
+    },
+
+    #[error(
+        "The channel '{channel}' of {name} names {version}, which the requirement '{req}' does not take; change `version` or leave it out"
+    )]
+    ChannelMismatch {
+        name: String,
+        channel: String,
+        version: String,
+        req: String,
+    },
+
+    #[error(
+        "Dependency {name} has a `channel`, and the index {index} has no channels: only the ember index and the local registry have them. Give a version requirement"
+    )]
+    ChannelIndex { name: String, index: String },
+
+    #[error(
+        "Dependency '{alias}' uses the channel '{channel}': a published package cannot depend on a channel; give a version requirement"
+    )]
+    PublishChannelDependency { alias: String, channel: String },
+
+    #[error("{0}")]
+    NotesInvalid(String),
+
+    #[error(
+        "{package} is published, but its release notes did not upload: {reason}. Send them again with `embr notes {package} {file}`"
+    )]
+    NotesNotSent {
+        package: String,
+        file: String,
+        reason: String,
+    },
+
     #[error("Index '{0}' is not defined under [indices] in ember.toml")]
     UnknownIndex(String),
 

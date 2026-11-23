@@ -100,6 +100,12 @@ pub struct LockedPackage {
     says which files those are, so the lock needs no key for them. */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /** the channel that picked `version`, when a `channel` dependency
+    resolved it. an install keeps `version` while ember.toml names this
+    channel, and `embr update` reads the channel again. `--locked` does not
+    read it. additive within v2. */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     #[serde(flatten)]
     pub source: DownloadSource,
     /** lowercase hex SHA-256 of the archive: the index entry's, else the
@@ -284,6 +290,7 @@ mod tests {
         "package.patch.hash",
         "package.optional",
         "package.features",
+        "package.channel",
         "package.type",
         "package.url",
         "package.path",
@@ -357,6 +364,7 @@ mod tests {
                 patch: Some(PatchRecord::new("patches/x.patch".to_string(), b"x")),
                 optional: true,
                 features: vec!["fast".to_string()],
+                channel: Some("beta".to_string()),
                 source,
                 sha256: Some(crate::sys::hash::sha256_hex(b"thing")),
             })
@@ -401,6 +409,7 @@ mod tests {
                 )),
                 optional: false,
                 features: Vec::new(),
+                channel: None,
                 source: DownloadSource::Zip {
                     url: "https://api.wally.run/v1/package-contents/evaera/promise/4.0.0"
                         .to_string(),
@@ -420,6 +429,7 @@ mod tests {
                 // only an optional dependency brings it in
                 optional: true,
                 features: vec!["icons".to_string()],
+                channel: None,
                 source: DownloadSource::TarGz {
                     url: "https://registry.pesde.daimond113.com/v1/packages/pesde%2Fhello/1.0.2/luau/archive".to_string(),
                 },

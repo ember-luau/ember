@@ -146,6 +146,13 @@ pub enum Commands {
     /// Mark a package, or one version, as deprecated, with a reason
     Deprecate(commands::deprecate::DeprecateArgs),
 
+    /// Move, remove, or list the channels of a package: names such as `beta` for one version
+    #[command(subcommand)]
+    Channel(commands::channel::ChannelCommand),
+
+    /// Set or remove the release notes of a published version
+    Notes(commands::notes::NotesArgs),
+
     /// List the notices, warnings and deprecations of the installed packages, or post a notice
     Notices(commands::notices::NoticesArgs),
 
@@ -198,6 +205,11 @@ fn needs_network(command: &Commands) -> Option<&'static str> {
         Commands::Publish(args) if !args.local && !args.dry_run => {
             Some("`embr publish` uploads to the registry; --local and --dry-run work offline")
         }
+        Commands::Publish(args) if !args.local && args.channel.is_some() => Some(
+            "`embr publish --channel` reads the versions of the package from the registry; --local works offline",
+        ),
+        Commands::Channel(_) => Some("`embr channel` reads and writes the registry"),
+        Commands::Notes(_) => Some("`embr notes` writes to the registry"),
         Commands::Yank(_) => Some("`embr yank` writes to the registry"),
         Commands::Deprecate(_) => Some("`embr deprecate` writes to the registry"),
         Commands::Notices(args) if args.command.is_some() => {
@@ -250,6 +262,8 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
+        Commands::Channel(command) => shown(command.is_json(), commands::channel::run(command)),
+        Commands::Notes(args) => shown(args.json, commands::notes::run(args)),
         Commands::Notices(args) => shown(args.json, commands::notices::run(args)),
         Commands::Audit(args) => shown(args.json, commands::audit::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */

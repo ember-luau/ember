@@ -809,8 +809,16 @@ pub enum Dependency {
     Registry {
         /// "scope/name" identifier.
         name: String,
-        /// semver requirement. "^" alone means "latest".
+        /** semver requirement. "^" alone means "latest". empty only beside
+        `channel`, which then picks the version alone. */
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         version: String,
+        /** a channel of the package, such as `beta`. the resolver takes the
+        exact version that the channel names in the ember index, and
+        `version`, when it is there, must take that version. ember.lock pins
+        the version, so only `embr update` reads the channel again. */
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// key into [indices]. None means the default embr index.
         #[serde(skip_serializing_if = "Option::is_none")]
         index: Option<String>,
@@ -967,6 +975,14 @@ impl Dependency {
             | Dependency::Git {
                 default_features, ..
             } => *default_features,
+        }
+    }
+
+    /// the `channel` of a registry entry, see [`Dependency::Registry`].
+    pub fn channel(&self) -> Option<&str> {
+        match self {
+            Dependency::Registry { channel, .. } => channel.as_deref(),
+            _ => None,
         }
     }
 
@@ -1437,6 +1453,22 @@ impl Manifest {
                 }
                 crate::registry::index::git::check_url(git).map_err(invalid)?;
             }
+            if let Dependency::Registry {
+                version, channel, ..
+            } = dependency
+            {
+                match channel {
+                    Some(channel) => check_channel(channel)?,
+                    /* serde takes an entry with no `version` for the sake
+                    of `channel`, so the entry with neither stops here */
+                    None if version.is_empty() => {
+                        return Err(Error::ManifestInvalid(format!(
+                            "dependency '{alias}' has no `version`; give a version requirement, such as \"^\" for the latest, or a `channel`"
+                        )));
+                    }
+                    None => {}
+                }
+            }
             // the registry part of a path or git entry is what publish writes
             if let Dependency::Path {
                 version: Some(version),
@@ -1750,6 +1782,41 @@ pub fn takes(req: &semver::VersionReq, version: &semver::Version, no_stable: boo
     req.matches(version) || (no_stable && *req == semver::VersionReq::STAR)
 }
 
+/** refuses a channel name that the registry does not take: a lowercase
+letter, then up to 31 lowercase letters, digits or dashes. `stable` and
+`latest` are no channels: a version requirement gives the stable versions. */
+pub fn check_channel(channel: &str) -> Result<(), Error> {
+    let mut letters = channel.bytes();
+    let shaped = letters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && letters.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && channel.len() <= 32;
+    if !shaped {
+        return Err(Error::ChannelInvalid {
+            channel: channel.to_string(),
+            reason: "a channel name starts with a lowercase letter and has at most 32 lowercase letters, digits and dashes",
+        });
+    }
+    if matches!(channel, "stable" | "latest") {
+        return Err(Error::ChannelInvalid {
+            channel: channel.to_string(),
+            reason: "a version requirement gives the stable versions, so this name is no channel",
+        });
+    }
+    Ok(())
+}
+
+/** whether the requirement beside a `channel` takes the version that the
+channel names. each channel version is a prerelease, and semver's `^1.3`
+takes no prerelease, so the requirement also counts when it takes the
+release that the prerelease leads to: `^1.3` takes `1.3.0-beta.2` here and
+refuses `2.0.0-beta.1`. */
+pub fn takes_channel(req: &semver::VersionReq, version: &semver::Version) -> bool {
+    let release = semver::Version::new(version.major, version.minor, version.patch);
+    req.matches(version) || req.matches(&release)
+}
+
 /// parses a manifest version requirement. bare "^" (or "*") means "latest".
 pub fn parse_version_req(req: &str) -> Result<semver::VersionReq, Error> {
     let trimmed = req.trim();
@@ -1775,6 +1842,55 @@ mod tests {
         assert!(!takes(&caret, &rc, true));
         let exact = parse_version_req("=0.1.0-rc.2").unwrap();
         assert!(takes(&exact, &rc, false));
+    }
+
+    #[test]
+    fn a_channel_name_is_short_and_lowercase_and_a_requirement_guards_it() {
+        for name in ["beta", "rc", "next-2", "a"] {
+            assert!(check_channel(name).is_ok(), "{name}");
+        }
+        let long = "a".repeat(33);
+        for name in [
+            "", "Beta", "2x", "-x", "be ta", "b.1", "stable", "latest", &long,
+        ] {
+            assert!(check_channel(name).is_err(), "{name}");
+        }
+        assert!(check_channel(&"a".repeat(32)).is_ok());
+
+        let beta = semver::Version::parse("1.3.0-beta.2").unwrap();
+        for (req, takes) in [
+            ("", true),
+            ("^1.3", true),
+            ("^1", true),
+            ("^2", false),
+            ("=1.3.0-beta.2", true),
+            ("~1.2", false),
+        ] {
+            let req = parse_version_req(req).unwrap();
+            assert_eq!(takes_channel(&req, &beta), takes, "{req}");
+        }
+    }
+
+    #[test]
+    fn a_registry_entry_has_a_version_or_a_channel() {
+        let parse = |entry: &str| Manifest::parse(&format!("[dependencies]\nx = {entry}\n"));
+        let channel = parse(r#"{ name = "a/x", channel = "beta" }"#).unwrap();
+        assert_eq!(channel.dependencies["x"].channel(), Some("beta"));
+        assert!(parse(r#"{ name = "a/x", version = "^1", channel = "beta" }"#).is_ok());
+        let error = parse(r#"{ name = "a/x" }"#).unwrap_err().to_string();
+        assert!(error.contains("has no `version`"), "{error}");
+        let error = parse(r#"{ name = "a/x", channel = "Stable" }"#).unwrap_err();
+        assert!(matches!(error, Error::ChannelInvalid { .. }), "{error}");
+        // a path entry takes no channel
+        assert!(parse(r#"{ path = "../x", channel = "beta" }"#).is_err());
+
+        /* the hash that `--locked` compares has the channel, and a manifest
+        with no channel hashes as it did before the key */
+        let plain = parse(r#"{ name = "a/x", version = "^1" }"#).unwrap();
+        let with = parse(r#"{ name = "a/x", version = "^1", channel = "beta" }"#).unwrap();
+        assert_ne!(plain.dependency_hash(), with.dependency_hash());
+        let text = serde_json::to_string(&plain.dependencies).unwrap();
+        assert_eq!(text, r#"{"x":{"name":"a/x","version":"^1"}}"#);
     }
 
     /// an empty dir holding the given manifest names.
