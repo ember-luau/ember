@@ -7,7 +7,9 @@ network, and past it a failed release lookup falls back to what's stored. */
 
 use crate::error::Error;
 use crate::net::github::GithubAPI;
-use crate::project::manifest::{EMBER_PREFIX, NPM_PREFIX, Tool, split_package_name};
+use crate::project::manifest::{
+    EMBER_PREFIX, NPM_PREFIX, Tool, split_npm_spec, split_package_name,
+};
 use crate::sys::{paths, process};
 use crate::tools;
 use clap::Args;
@@ -87,6 +89,9 @@ pub fn run(args: ExecuteArgs) -> Result<i32, Error> {
 
     // a tool that npm publishes runs through node, see `tools::npm`
     if let Some(package) = repository.strip_prefix(NPM_PREFIX) {
+        if !npm_spec_is_safe(package, version.as_deref()) {
+            return Err(Error::InvalidToolSpec(repository.clone()));
+        }
         let version = match version {
             Some(version) => version,
             None => tools::npm::latest(package)?,
@@ -158,6 +163,17 @@ fn ember_first(
         },
         found => found,
     }
+}
+
+/** whether embr may hand the npm package `package` at `version` to npm. a
+shorthand of the registry can name the package, and a person types the
+version. each is a folder name in the tool store and part of an argument
+of npm, where a leading `-` is an option. a [tools] entry gets the same
+check when it is read. */
+fn npm_spec_is_safe(package: &str, version: Option<&str>) -> bool {
+    matches!(split_npm_spec(package), Some((_, None)))
+        && !package.starts_with('-')
+        && version.is_none_or(paths::is_safe_version)
 }
 
 /// a parsed <SPEC>, what to run and, when given, which exact version.
@@ -238,6 +254,29 @@ mod tests {
 
     fn spec(raw: &str) -> Spec {
         parse_spec(raw).unwrap()
+    }
+
+    /** the registry can give `npm:<package>` for a shorthand. the name goes
+    to npm as an argument and into a folder name. */
+    #[test]
+    fn an_npm_name_from_a_shorthand_is_checked() {
+        assert!(npm_spec_is_safe("azul-sync", None));
+        assert!(npm_spec_is_safe("@scope/tool", Some("1.2.3")));
+        for bad in [
+            "../../x",
+            "a/b/c",
+            "--prefix=x",
+            "-g",
+            "pkg@1.0.0",
+            "a b",
+            "",
+            "@scope/../x",
+        ] {
+            assert!(!npm_spec_is_safe(bad, None), "{bad}");
+        }
+        for version in ["../../x", "-rf", "1.0.0\\x", ""] {
+            assert!(!npm_spec_is_safe("azul-sync", Some(version)), "{version}");
+        }
     }
 
     #[test]

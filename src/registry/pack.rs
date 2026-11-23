@@ -58,6 +58,10 @@ fn is_secret(file: &Path) -> bool {
         ".npmrc",
         ".netrc",
         ".pypirc",
+        ".git-credentials",
+        ".pgpass",
+        ".dockercfg",
+        "secrets.json",
         "id_rsa",
         "id_dsa",
         "id_ecdsa",
@@ -65,7 +69,17 @@ fn is_secret(file: &Path) -> bool {
         "credentials.toml",
     ]
     .contains(&name.as_str());
-    env || key || named
+    // these two names are common, so the folder decides
+    let folder = file
+        .parent()
+        .and_then(|folder| folder.file_name())
+        .and_then(|folder| folder.to_str())
+        .map(str::to_ascii_lowercase);
+    let in_folder = matches!(
+        (folder.as_deref(), name.as_str()),
+        (Some(".aws"), "credentials") | (Some(".docker"), "config.json")
+    );
+    env || key || named || in_folder
 }
 
 /// the files to publish, and the ones held back as secrets, both sorted.
@@ -730,6 +744,21 @@ mod tests {
         write(&base, "deploy/server.pem", "");
         write(&base, "deploy/id_ed25519", "");
         write(&base, ".npmrc", "//registry.npmjs.org/:_authToken=x");
+        for secret in [
+            ".aws/credentials",
+            ".docker/config.json",
+            ".dockercfg",
+            ".git-credentials",
+            ".netrc",
+            ".pgpass",
+            "deploy/secrets.json",
+            "deploy/tls.key",
+        ] {
+            write(&base, secret, "x");
+        }
+        // the name alone does not say that these hold a secret
+        write(&base, "src/config.json", "{}");
+        write(&base, "src/credentials", "x");
         write(&base, "src/environment.luau", "return {}");
         write(&base, "src/keys.luau", "return {}");
 
@@ -742,6 +771,8 @@ mod tests {
             [
                 ".env.example",
                 "ember.toml",
+                "src/config.json",
+                "src/credentials",
                 "src/environment.luau",
                 "src/init.luau",
                 "src/keys.luau"
@@ -750,11 +781,19 @@ mod tests {
         assert_eq!(
             paths(held_back(&base, &plain).unwrap()),
             [
+                ".aws/credentials",
+                ".docker/config.json",
+                ".dockercfg",
                 ".env",
                 ".env.production",
+                ".git-credentials",
+                ".netrc",
                 ".npmrc",
+                ".pgpass",
                 "deploy/id_ed25519",
+                "deploy/secrets.json",
                 "deploy/server.pem",
+                "deploy/tls.key",
                 "src/.ENV"
             ]
         );
@@ -772,6 +811,8 @@ mod tests {
             [
                 "deploy/server.pem",
                 "ember.toml",
+                "src/config.json",
+                "src/credentials",
                 "src/environment.luau",
                 "src/init.luau",
                 "src/keys.luau"

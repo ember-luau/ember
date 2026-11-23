@@ -159,7 +159,12 @@ own hash, so the two prove nothing together. an install with no hash to
 compare, of a pesde or wally package in a project with no lock, takes what
 the cache holds for a URL. so an archive goes in only when ember.lock of
 the current folder names its URL with its SHA-256. the copy of the lock in
-the bundle is not read. */
+the bundle is not read.
+
+a `local:` URL is the one exception to the hash. the lock records none for
+a package of the local registry, because a republish replaces its archive.
+so the lock must name the URL, and a hash that the lock does record must
+match. */
 pub fn import(args: ImportArgs) -> Result<(), Error> {
     let path = args.dir.join(BUNDLE_FILE);
     let text = fs::read_to_string(&path).map_err(|error| {
@@ -186,22 +191,27 @@ pub fn import(args: ImportArgs) -> Result<(), Error> {
         }
         lock => lock?,
     };
-    let locked: BTreeSet<(&str, &str)> = lock
+    let locked: BTreeSet<(&str, Option<&str>)> = lock
         .packages
         .iter()
         .filter_map(|package| match &package.source {
             DownloadSource::Zip { url } | DownloadSource::TarGz { url } => {
-                Some((url.as_str(), package.sha256.as_deref()?))
+                Some((url.as_str(), package.sha256.as_deref()))
             }
             _ => None,
         })
         .collect();
+    let named = |archive: &Archive| {
+        let url = archive.url.as_str();
+        locked.contains(&(url, Some(archive.sha256.as_str())))
+            || (crate::registry::local::is_local_url(url) && locked.contains(&(url, None)))
+    };
 
     let root = args.dir.canonicalize()?;
     let mut files = Vec::new();
     for archive in &bundle.archives {
         files.push(archive_file(&root, archive)?);
-        if !locked.contains(&(archive.url.as_str(), archive.sha256.as_str())) {
+        if !named(archive) {
             return Err(fail(format!(
                 "ember.lock of this folder does not name {} with the SHA-256 {}, so the archive stays out; run `embr import` in the project folder whose ember.lock the bundle was exported from, and run `embr install` there first when that lock records no sha256",
                 ui::printable(&archive.url),

@@ -197,6 +197,11 @@ fn find_in(index: &Path, short: &str) -> Vec<String> {
     found
 }
 
+/// whether `url` names an archive of the local registry.
+pub fn is_local_url(url: &str) -> bool {
+    url.starts_with(SCHEME)
+}
+
 /** the bytes of the archive that a `local:` download names. None for any
 other URL. the local file is read each time and never cached, because a
 republish replaces it. */

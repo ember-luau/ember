@@ -735,7 +735,7 @@ const LOCKFILES: [&str; 5] = [
 ];
 
 /// file names that hold secrets. `.npmrc` counts only when it holds a token.
-const SECRETS: [&str; 11] = [
+const SECRETS: [&str; 15] = [
     ".env*",
     "*.pem",
     "*.key",
@@ -747,6 +747,10 @@ const SECRETS: [&str; 11] = [
     "id_ed25519*",
     ".netrc",
     ".pypirc",
+    ".git-credentials",
+    ".pgpass",
+    ".dockercfg",
+    "secrets.json",
 ];
 
 /// the compiled filters of one [`select`].
@@ -811,7 +815,11 @@ fn walk(
                 true => selection.left_out.push(format!("{}/", tar_path(&relative))),
                 false => walk(&path, root, filters, selection)?,
             }
-        } else if filters.secrets.is_match(&name) || (name == ".npmrc" && holds_token(&path)) {
+        } else if filters.secrets.is_match(&name)
+            || (name == ".npmrc" && holds_token(&path))
+            || relative.ends_with(".aws/credentials")
+            || relative.ends_with(".docker/config.json")
+        {
             selection.secrets.push(tar_path(&relative));
         } else if !kind.is_file()
             || filters.lockfiles.is_match(&name)
