@@ -263,6 +263,63 @@ fn a_lock_version_that_is_a_path_is_refused() {
     );
 }
 
+/** M1. bundle.json says which URL its archive is for. an import that
+believes it fills the cache slot of any URL, and an install with no hash to
+compare then takes the archive. */
+#[test]
+fn an_import_takes_only_what_the_lock_of_the_folder_names() {
+    let base = scratch("import");
+    let archive = tar_gz(&[
+        ("ember.toml", MANIFEST, 0o644),
+        ("src/init.luau", "return \"ATTACKER CODE\"\n", 0o644),
+    ]);
+    let bundle = bundle(&base, URL, &archive);
+    let cache = base.join("home/.ember/archive-cache");
+    let victim = base.join("victim");
+    fs::create_dir_all(&victim).unwrap();
+
+    // no lock in the folder
+    let imported = run(&victim, &base, &["import", bundle.to_str().unwrap()]);
+    assert!(!imported.status.success(), "{}", text(&imported));
+    assert!(
+        text(&imported).contains("run it in the project folder that has the lockfile"),
+        "{}",
+        text(&imported)
+    );
+    assert!(!cache.exists(), "the archive went into the cache");
+
+    // a lock that names the URL with another hash, and the copy of the lock in the bundle
+    let lock = |sha256: &str| {
+        format!(
+            "version = 2\n\n[[package]]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+             environment = \"luau\"\nlink = \"lib\"\nindex = \"https://example.invalid/idx\"\n\
+             type = \"tar-gz\"\nurl = \"{URL}\"\nsha256 = \"{sha256}\"\n"
+        )
+    };
+    write(&bundle.join("ember.lock"), &lock(&sha256_hex(&archive)));
+    write(
+        &victim.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n",
+    );
+    write(
+        &victim.join("ember.lock"),
+        &lock(&sha256_hex(b"the real one")),
+    );
+    let imported = run(&victim, &base, &["import", bundle.to_str().unwrap()]);
+    assert!(!imported.status.success(), "{}", text(&imported));
+    assert!(
+        text(&imported).contains("does not name"),
+        "{}",
+        text(&imported)
+    );
+    assert!(!cache.exists(), "the archive went into the cache");
+
+    // the lock of the folder names the pair
+    write(&victim.join("ember.lock"), &lock(&sha256_hex(&archive)));
+    let imported = run(&victim, &base, &["import", bundle.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", text(&imported));
+}
+
 /** M2. a package states its own entry. install reads the module there and
 writes it back when it rewrites instance requires, so an entry with `..`
 changed a file of the project. */
@@ -324,4 +381,100 @@ fn the_lock_is_not_written_through_a_link() {
     assert_eq!(fs::read_to_string(&target).unwrap(), "ORIGINAL\n");
     let lock = fs::symlink_metadata(project.join("ember.lock")).unwrap();
     assert!(lock.file_type().is_file(), "ember.lock is a link");
+}
+
+/// L2. `embr cache clean` deleted the files of a folder that the cache folder links to.
+#[test]
+fn cache_clean_does_not_follow_a_linked_cache_folder() {
+    let base = scratch("cacheclean");
+    let docs = base.join("docs");
+    write(&docs.join("thesis.txt"), "a\n");
+    write(&docs.join("old/notes.txt"), "a\n");
+    let ember = base.join("home/.ember");
+    fs::create_dir_all(ember.join("archive-cache")).unwrap();
+    std::os::unix::fs::symlink(&docs, ember.join("archive-cache/v1")).unwrap();
+    std::os::unix::fs::symlink(&docs, ember.join("index-cache")).unwrap();
+
+    for args in [
+        &["cache", "clean", "--bad"][..],
+        &["cache", "clean", "--older-than", "0"],
+        &["cache", "clean", "--indexes"],
+        &["cache", "clean", "--indexes", "--older-than", "0"],
+        &["cache", "clean"],
+    ] {
+        let cleaned = run(&base, &base, args);
+        assert!(cleaned.status.success(), "{args:?}: {}", text(&cleaned));
+        assert!(docs.join("thesis.txt").is_file(), "{args:?} deleted a file");
+        assert!(
+            docs.join("old/notes.txt").is_file(),
+            "{args:?} deleted a folder"
+        );
+    }
+}
+
+/** L3. a GNU sparse entry stores 512 bytes and declares a file of 7 GiB.
+the cap counted the stored bytes, so 230 bytes of gzip unpacked to 7 GiB. */
+#[test]
+fn a_sparse_archive_is_refused() {
+    let base = scratch("sparse");
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, contents) in [("ember.toml", MANIFEST), ("src/init.luau", "return 1\n")] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, contents.as_bytes())
+            .unwrap();
+    }
+    let real: u64 = 7 << 30;
+    let mut header = tar::Header::new_gnu();
+    header.set_path("src/b.luau").unwrap();
+    header.set_mode(0o644);
+    header.set_size(512);
+    header.set_entry_type(tar::EntryType::GNUSparse);
+    let gnu = header.as_gnu_mut().unwrap();
+    gnu.sparse[0]
+        .offset
+        .copy_from_slice(format!("{:011o}\0", real - 512).as_bytes());
+    gnu.sparse[0]
+        .numbytes
+        .copy_from_slice(format!("{:011o}\0", 512).as_bytes());
+    gnu.realsize
+        .copy_from_slice(format!("{real:011o}\0").as_bytes());
+    header.set_cksum();
+    builder.append(&header, &[b'A'; 512][..]).unwrap();
+    let archive = gzip(&builder.into_inner().unwrap());
+
+    let installed = install_archive(&base, "environment = \"luau\"\n", &archive);
+    /* the archive does not unpack, so install drops it from the cache and
+    asks the registry, which this test does not have */
+    assert!(!installed.status.success(), "{}", text(&installed));
+    assert!(
+        !base
+            .join("proj/packages/luau/.ember/acme_lib/src/b.luau")
+            .exists()
+    );
+}
+
+/// L8. an archive sets the mode of each file, and install kept setuid and the write bit of everyone.
+#[test]
+fn installed_files_keep_no_mode_bit_outside_0755() {
+    let base = scratch("modes");
+    let archive = tar_gz(&[
+        ("ember.toml", MANIFEST, 0o644),
+        ("src/init.luau", "return 1\n", 0o666),
+        ("src/open.luau", "return 1\n", 0o777),
+        ("src/suid", "#!/bin/sh\n", 0o6777),
+    ]);
+    let installed = install_archive(&base, "environment = \"luau\"\n", &archive);
+    assert!(installed.status.success(), "{}", text(&installed));
+    let stored = base.join("proj/packages/luau/.ember/acme_lib/src");
+    for file in ["init.luau", "open.luau", "suid"] {
+        let mode = fs::metadata(stored.join(file))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777 & !0o755, 0, "{file} has mode {mode:o}");
+    }
 }

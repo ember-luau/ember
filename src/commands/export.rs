@@ -152,7 +152,14 @@ pub fn export(args: ExportArgs) -> Result<(), Error> {
 /** puts each archive of the bundle where an install looks for it. the
 bundle is a folder from another computer, so bundle.json is checked before
 a byte moves: no path may leave the folder, and an archive whose SHA-256
-differs from bundle.json stops the import before that archive is stored. */
+differs from bundle.json stops the import before that archive is stored.
+
+bundle.json says which URL each archive is for, and the bundle wrote its
+own hash, so the two prove nothing together. an install with no hash to
+compare, of a pesde or wally package in a project with no lock, takes what
+the cache holds for a URL. so an archive goes in only when ember.lock of
+the current folder names its URL with its SHA-256. the copy of the lock in
+the bundle is not read. */
 pub fn import(args: ImportArgs) -> Result<(), Error> {
     let path = args.dir.join(BUNDLE_FILE);
     let text = fs::read_to_string(&path).map_err(|error| {
@@ -171,10 +178,36 @@ pub fn import(args: ImportArgs) -> Result<(), Error> {
         )));
     }
 
+    let lock = match Lockfile::load() {
+        Err(Error::LockfileMissing) => {
+            return Err(fail(
+                "this folder has no ember.lock, and `embr import` takes only the archives that ember.lock names; run it in the project folder that has the lockfile".to_string(),
+            ));
+        }
+        lock => lock?,
+    };
+    let locked: BTreeSet<(&str, &str)> = lock
+        .packages
+        .iter()
+        .filter_map(|package| match &package.source {
+            DownloadSource::Zip { url } | DownloadSource::TarGz { url } => {
+                Some((url.as_str(), package.sha256.as_deref()?))
+            }
+            _ => None,
+        })
+        .collect();
+
     let root = args.dir.canonicalize()?;
     let mut files = Vec::new();
     for archive in &bundle.archives {
         files.push(archive_file(&root, archive)?);
+        if !locked.contains(&(archive.url.as_str(), archive.sha256.as_str())) {
+            return Err(fail(format!(
+                "ember.lock of this folder does not name {} with the SHA-256 {}, so the archive stays out; run `embr import` in the project folder whose ember.lock the bundle was exported from, and run `embr install` there first when that lock records no sha256",
+                ui::printable(&archive.url),
+                archive.sha256
+            )));
+        }
     }
     let mut total = 0;
     for (archive, file) in bundle.archives.iter().zip(&files) {

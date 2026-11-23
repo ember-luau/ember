@@ -523,12 +523,16 @@ fn extract(source: &DownloadSource, bytes: &[u8], dest: &Path) -> Result<(), Err
         }
         DownloadSource::TarGz { .. } => {
             /* ureq already gunzips Content-Encoding: gzip bodies, leaving a
-            raw tar, so sniff the magic bytes instead of assuming. */
+            raw tar, so sniff the magic bytes instead of assuming. the
+            entries are read once for the check and once for the unpack */
             if bytes.starts_with(&[0x1f, 0x8b]) {
-                let decoder =
-                    limit::Capped::new(flate2::read::GzDecoder::new(bytes), limit::PACKAGE_BYTES);
-                tar::Archive::new(decoder).unpack(dest)?;
+                let decoded = || {
+                    limit::Capped::new(flate2::read::GzDecoder::new(bytes), limit::PACKAGE_BYTES)
+                };
+                limit::check_tar(decoded(), limit::PACKAGE_BYTES)?;
+                tar::Archive::new(decoded()).unpack(dest)?;
             } else {
+                limit::check_tar(bytes, limit::PACKAGE_BYTES)?;
                 tar::Archive::new(bytes).unpack(dest)?;
             }
         }
@@ -568,8 +572,11 @@ fn remove_unsafe(dir: &Path) -> Result<(), Error> {
             } else {
                 fs::remove_file(&path)?;
             }
-        } else if kind.is_dir() {
-            remove_unsafe(&path)?;
+        } else {
+            limit::mask_mode(&path)?;
+            if kind.is_dir() {
+                remove_unsafe(&path)?;
+            }
         }
     }
     Ok(())
@@ -578,7 +585,7 @@ fn remove_unsafe(dir: &Path) -> Result<(), Error> {
 /** whether git would read a file or folder of this name as its `.git`.
 case does not matter on Windows and macOS, and Windows drops the dots and
 spaces that end a name, so `.GIT` and `.git.` name the same folder there. */
-fn is_git_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_git_name(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| {
         name.trim_end_matches(['.', ' '])
             .eq_ignore_ascii_case(".git")
@@ -783,6 +790,11 @@ pub(crate) fn cached_archives() -> Vec<CachedArchive> {
     let Ok(dir) = paths::archive_cache_dir() else {
         return Vec::new();
     };
+    /* a cache folder that is a link leads to files that are not cache
+    entries, and `embr cache clean` deletes what this lists */
+    if paths::is_symlink(&dir) || dir.parent().is_some_and(paths::is_symlink) {
+        return Vec::new();
+    }
     let mut entries = std::collections::BTreeMap::<PathBuf, CachedArchive>::new();
     for file in fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(meta) = file.metadata() else {

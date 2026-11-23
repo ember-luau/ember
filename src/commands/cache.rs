@@ -277,8 +277,15 @@ fn clean(args: &CleanArgs) -> Result<(), Error> {
     if !named && old(modified(&shorthands)) {
         items.push(whole("shorthands", shorthands));
     }
-    // a cache that is not there is nothing to delete
-    items.retain(|item| item.archive || item.path.exists());
+    /* a cache that is not there is nothing to delete. a cache folder that
+    is a link, or that sits in one, leads to files that are not cache
+    entries, so it stays */
+    items.retain(|item| {
+        item.archive
+            || (item.path.exists()
+                && !paths::is_symlink(&item.path)
+                && !item.path.parent().is_some_and(paths::is_symlink))
+    });
 
     let freed: u64 = items.iter().map(|item| item.bytes).sum();
     if !args.dry_run {
