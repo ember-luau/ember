@@ -419,6 +419,11 @@ pub enum Error {
     #[error("Invalid package name '{0}': expected 'scope/name' (lowercase)")]
     InvalidPackageName(String),
 
+    #[error(
+        "Package name '{0}' can't name a folder: it holds a path separator, a control character or a name that Windows reserves"
+    )]
+    PackageFolderInvalid(String),
+
     #[error("Package {name} was not found in index {index}")]
     PackageNotFound { name: String, index: String },
 

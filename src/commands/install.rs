@@ -375,7 +375,10 @@ workspace member installs its own peers. `project` holds the project. */
 fn peer_warnings(manifest: &Manifest, packages: &[LockedPackage], project: &Path) -> Vec<String> {
     let mut lines = BTreeSet::new();
     for package in packages {
-        let (storage, in_place) = stored_at(manifest, package);
+        // a name that is no folder name has no folder to read
+        let Ok((storage, in_place)) = stored_at(manifest, package) else {
+            continue;
+        };
         if in_place {
             continue;
         }
@@ -652,8 +655,8 @@ fn install_steps(
             /* members link in place, so they're link targets like anything
             else but never get written into, that would dirty a source tree
             the user edits */
-            let (storage, in_place) = stored_at(manifest, package);
-            StoredPackage {
+            let (storage, in_place) = stored_at(manifest, package)?;
+            Ok(StoredPackage {
                 /* resolved once here rather than per nested link, and
                 silently: whoever installed this package already said out
                 loud if its entry had to be guessed */
@@ -667,9 +670,9 @@ fn install_steps(
                 requires: manifest.require_style(package.context()),
                 lazy_collections: lazy_collections(manifest, package.context()),
                 features: package.features.clone(),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let nested_started = Instant::now();
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
@@ -1579,12 +1582,12 @@ fn install_packages(
     }
     /* context suffixed, the same package installing under two roots is two
     concurrent jobs, and they must not tear down each other's staging */
-    let staging_of = |job: &Job| {
-        staging_root.join(format!(
+    let staging_of = |job: &Job| -> Result<PathBuf, Error> {
+        Ok(staging_root.join(format!(
             "{}_{}",
-            job.name.replace('/', "_"),
+            paths::store_folder(&job.name)?,
             job.context.dir_name()
-        ))
+        )))
     };
 
     /* errors are kept by lowest job index, not arrival order. when an
@@ -1604,7 +1607,7 @@ fn install_packages(
         queue,
         |(_, job)| {
             let task = progress.task(package_id(&job.name, &job.version));
-            let result = fetch_one(job, &staging_of(job), cache, &task);
+            let result = staging_of(job).and_then(|staging| fetch_one(job, &staging, cache, &task));
             task.step();
             result
         },
@@ -1645,7 +1648,8 @@ fn install_packages(
             /* the row lives until this thread's result is handled, the
             link file written on the main thread included */
             let task = progress.task(package_id(&job.name, &job.version));
-            let placed = place_one(manifest, job, &staging_of(job), progress);
+            let placed =
+                staging_of(job).and_then(|staging| place_one(manifest, job, &staging, progress));
             (placed, task)
         },
         |(slot, job, fetched), (placed, task)| {
@@ -1814,7 +1818,7 @@ fn place_one(
     workers race to create the same .ember parent, create_dir_all treats
     existing as success, and Windows occasionally answers concurrent
     creation or a fresh rename with a transient denial worth one retry */
-    let folder = job.name.replace('/', "_");
+    let folder = paths::store_folder(&job.name)?;
     let out = manifest.packages_out(job.context);
     let storage = out.join(STORE_DIR).join(&folder);
     with_retry(|| fs::create_dir_all(storage.parent().expect("storage dir has a parent")))?;
@@ -1880,7 +1884,7 @@ fn write_registry_link(
     match (&job.link, &extracted.entry) {
         (Some(link), Some(entry)) => {
             let out = manifest.packages_out(job.context);
-            let folder = job.name.replace('/', "_");
+            let folder = paths::store_folder(&job.name)?;
             let (link_path, up) = link_file(&out, link)?;
             let root = format!("{up}/{STORE_DIR}/{folder}");
             fs::write(
@@ -1998,17 +2002,20 @@ fn link_in_place(
 /** where install puts `package`, relative to the project, and whether that
 is a workspace member or a path folder linked in place. `embr tree` reads
 the same folders. */
-pub(crate) fn stored_at(manifest: &Manifest, package: &LockedPackage) -> (PathBuf, bool) {
-    match package.source.in_place() {
+pub(crate) fn stored_at(
+    manifest: &Manifest,
+    package: &LockedPackage,
+) -> Result<(PathBuf, bool), Error> {
+    Ok(match package.source.in_place() {
         Some(path) => (PathBuf::from(path), true),
         None => (
             manifest
                 .packages_out(package.context())
                 .join(STORE_DIR)
-                .join(package.name.replace('/', "_")),
+                .join(paths::store_folder(&package.name)?),
             false,
         ),
-    }
+    })
 }
 
 /** one installed package, as the nested-link pass sees it. */
@@ -2303,8 +2310,27 @@ what the package declares itself, then a guess from what it ships. the guess
 is announced, since a link file built on one is otherwise a mystery to
 whoever hits it, and the message names the way to correct it. last, the
 folder of a collection. the guess comes first because it keeps the link files
-of packages that install today. */
+of packages that install today. an entry outside the package is no entry,
+see [`package::entry_stays_inside`]. */
 fn entry_for(
+    manifest: &Manifest,
+    name: &str,
+    dir: &Path,
+    warn: &mut impl FnMut(String),
+) -> Option<String> {
+    let entry = found_entry(manifest, name, dir, warn)?;
+    if package::entry_stays_inside(&entry) {
+        return Some(entry);
+    }
+    warn(format!(
+        "warning: {name} names the entry '{}', which is outside the package; ignoring it",
+        ui::printable(&entry)
+    ));
+    None
+}
+
+/// [`entry_for`], before the check that the entry is inside the package.
+fn found_entry(
     manifest: &Manifest,
     name: &str,
     dir: &Path,

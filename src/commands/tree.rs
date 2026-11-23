@@ -241,7 +241,7 @@ impl<'lock> Graph<'lock> {
 
         let mut children = Vec::new();
         for package in packages {
-            let (storage, in_place) = stored_at(manifest, package);
+            let (storage, in_place) = stored_at(manifest, package)?;
             let storage = project.join(storage);
             if !storage.is_dir() {
                 return Err(Error::NotInstalledYet(format!(

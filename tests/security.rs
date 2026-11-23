@@ -48,6 +48,9 @@ fn text(output: &Output) -> String {
     )
 }
 
+const MANIFEST: &str = "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+                        [target]\nenvironment = \"luau\"\nmain = \"src/init.luau\"\n";
+
 /// a gzipped tar of `files`, each a path, its bytes and its mode.
 fn tar_gz(files: &[(&str, &str, u32)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -86,6 +89,31 @@ fn bundle(base: &Path, url: &str, archive: &[u8]) -> PathBuf {
         ),
     );
     dir
+}
+
+/** installs `archive` as acme/lib in the project `base/proj` with the
+target `target`: the lock names the archive, an import puts it in the
+cache, and a locked install unpacks it. nothing reads the network. */
+fn install_archive(base: &Path, target: &str, archive: &[u8]) -> Output {
+    let project = base.join("proj");
+    let environment = target
+        .split('"')
+        .nth(1)
+        .expect("the target names its environment");
+    write(&project.join("ember.toml"), &format!("[target]\n{target}"));
+    write(
+        &project.join("ember.lock"),
+        &format!(
+            "version = 2\n\n[[package]]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+             environment = \"{environment}\"\nlink = \"lib\"\nindex = \"https://example.invalid/idx\"\n\
+             type = \"tar-gz\"\nurl = \"{URL}\"\nsha256 = \"{}\"\n",
+            sha256_hex(archive)
+        ),
+    );
+    let bundle = bundle(base, URL, archive);
+    let imported = run(&project, base, &["import", bundle.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", text(&imported));
+    run(&project, base, &["install", "--locked"])
 }
 
 /** C1. an Alloy project installs an Alloy package whose alloy.toml names an
@@ -160,4 +188,140 @@ fn install_runs_no_build_in_an_alloy_package() {
         !calls.lines().any(|call| call.starts_with("build")),
         "install ran `alloy {calls}`"
     );
+}
+
+/** H1. a path package names itself, and the name is its folder in the
+store. on Windows `\` is a separator, so this name is a path that leaves
+the project. */
+#[test]
+fn a_package_name_that_is_a_path_is_refused() {
+    let base = scratch("name");
+    write(
+        &base.join("evil/ember.toml"),
+        "[package]\nname = 'a\\..\\..\\..\\..\\x'\nversion = \"1.0.0\"\n\
+         [target]\nenvironment = \"luau\"\nmain = \"src/init.luau\"\n",
+    );
+    write(&base.join("evil/src/init.luau"), "return 1\n");
+    let project = base.join("proj");
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n[dependencies]\ndep = { path = \"../evil\" }\n",
+    );
+    let installed = run(&project, &base, &["install"]);
+    assert!(!installed.status.success(), "{}", text(&installed));
+    assert!(
+        text(&installed).contains("can't name a folder"),
+        "{}",
+        text(&installed)
+    );
+    assert!(!project.join("ember.lock").exists());
+
+    // the same name in a lock that a pull request changed
+    write(
+        &project.join("ember.lock"),
+        "version = 2\n\n[[package]]\nname = 'a\\..\\..\\..\\..\\x'\nversion = \"1.0.0\"\n\
+         environment = \"luau\"\nlink = \"dep\"\nindex = \"git\"\ntype = \"git\"\n\
+         url = \"https://git.invalid/evil\"\nrev = \"0123456789abcdef0123456789abcdef01234567\"\n",
+    );
+    let locked = run(&project, &base, &["install", "--locked"]);
+    assert!(!locked.status.success(), "{}", text(&locked));
+    assert!(text(&locked).contains("package name"), "{}", text(&locked));
+    assert!(!project.join("packages").exists());
+}
+
+/** H2. `embr patch` makes a folder from the name and the version in
+ember.lock, and `--force` deletes the folder that is there. */
+#[test]
+fn a_lock_version_that_is_a_path_is_refused() {
+    let base = scratch("version");
+    let victim = base.join("X");
+    write(&victim.join("keep.txt"), "keep\n");
+    let project = base.join("a/b/proj");
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n",
+    );
+    write(
+        &project.join("ember.lock"),
+        &format!(
+            "version = 2\n\n[[package]]\nname = \"acme/lib\"\nversion = \"1.0.0/../../../../X\"\n\
+             environment = \"luau\"\nlink = \"lib\"\nindex = \"https://example.invalid/idx\"\n\
+             type = \"tar-gz\"\nurl = \"{URL}\"\nsha256 = \"{}\"\n",
+            sha256_hex(b"x")
+        ),
+    );
+    let patched = run(&project, &base, &["patch", "acme/lib", "--force"]);
+    assert!(!patched.status.success(), "{}", text(&patched));
+    assert!(
+        text(&patched).contains("which is not a version"),
+        "{}",
+        text(&patched)
+    );
+    assert_eq!(
+        fs::read_to_string(victim.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+}
+
+/** M2. a package states its own entry. install reads the module there and
+writes it back when it rewrites instance requires, so an entry with `..`
+changed a file of the project. */
+#[test]
+fn an_entry_outside_the_package_is_not_read_or_written() {
+    let base = scratch("entry");
+    let outside = "local Foo = require(script.Parent.Foo)\nreturn 1\n";
+    write(&base.join("proj/packages/x.luau"), outside);
+    write(&base.join("proj/packages/Foo.luau"), "return 1\n");
+    let archive = tar_gz(&[
+        (
+            "ember.toml",
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n[target]\n\
+             environment = \"roblox\"\nmain = \"../../../x\"\n",
+            0o644,
+        ),
+        ("src/init.luau", "return 1\n", 0o644),
+    ]);
+    let installed = install_archive(&base, "environment = \"roblox\"\n", &archive);
+    assert!(installed.status.success(), "{}", text(&installed));
+    assert!(
+        text(&installed).contains("which is outside the package"),
+        "{}",
+        text(&installed)
+    );
+    assert_eq!(
+        fs::read_to_string(base.join("proj/packages/x.luau")).unwrap(),
+        outside
+    );
+    // no entry, so no link file that requires a path outside the package
+    assert!(!base.join("proj/packages/roblox/lib.luau").exists());
+}
+
+/** L1. the temp file of ember.lock had the pid in its name. a link of that
+name sent the write to the file it points at, and ember.lock became the
+link. */
+#[test]
+fn the_lock_is_not_written_through_a_link() {
+    let base = scratch("locktmp");
+    let target = base.join("target.txt");
+    write(&target, "ORIGINAL\n");
+    let project = base.join("proj");
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n",
+    );
+    // the shell makes the link under its own pid, then becomes embr
+    let installed = Command::new("sh")
+        .arg("-c")
+        .arg("ln -s \"$TARGET\" ember.lock.tmp-$$; exec \"$EMBR\" install")
+        .env("TARGET", &target)
+        .env("EMBR", env!("CARGO_BIN_EXE_embr"))
+        .env("HOME", base.join("home"))
+        .env("NO_COLOR", "1")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{}", text(&installed));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "ORIGINAL\n");
+    let lock = fs::symlink_metadata(project.join("ember.lock")).unwrap();
+    assert!(lock.file_type().is_file(), "ember.lock is a link");
 }

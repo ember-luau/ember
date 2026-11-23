@@ -386,7 +386,9 @@ fn installed(group: &mut Group, manifest: &Manifest, lock: &Lockfile) {
     let missing = lock
         .packages
         .iter()
-        .filter(|package| !install::stored_at(manifest, package).0.is_dir())
+        .filter(|package| {
+            !install::stored_at(manifest, package).is_ok_and(|(storage, _)| storage.is_dir())
+        })
         .count();
     if missing > 0 {
         group.warning(

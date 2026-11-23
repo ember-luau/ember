@@ -8,6 +8,7 @@ use crate::project::manifest::{
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::git::{self, Reference};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
+use crate::sys::paths;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -571,6 +572,10 @@ fn resolve_once(
             }
             None => name,
         };
+        /* a git or path package says its own name, and the name is the
+        folder of the package in the store. a registry name is checked by
+        its index */
+        paths::store_folder(&name)?;
 
         /* transitives inherit their context, so their dedup gate runs
         before any network. a seed's context is decided by its own resolve,
