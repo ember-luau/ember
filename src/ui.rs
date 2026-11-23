@@ -360,6 +360,22 @@ pub fn print_tagged(tag: usize, line: &str, is_stderr: bool, separate: bool) {
     }
 }
 
+/** one line of output from a workspace member, behind the name of the
+member, on the stream it came from. see [`print_tagged`] for the reset. */
+pub fn print_member_line(member: &str, line: &str, is_stderr: bool) {
+    let reset = if line.contains('\u{1b}') {
+        "\u{1b}[0m"
+    } else {
+        ""
+    };
+    let tag = format!("[{member}]").with(accent());
+    if is_stderr {
+        eprintln!("{tag} {line}{reset}");
+    } else {
+        println!("{tag} {line}{reset}");
+    }
+}
+
 /// a concurrent script's command failing, reported under its own `[n]` tag.
 pub fn print_tagged_exit(tag: usize, code: i32, separate: bool) {
     let tag = format!("[{tag}]").with(accent());

@@ -317,8 +317,7 @@ mod tests {
         else {
             panic!("`embr build:prod` should run the build:prod script");
         };
-        assert_eq!(run.name.as_deref(), Some("build:prod"));
-        assert_eq!(run.args, ["--watch"]);
+        assert_eq!(run.words, ["build:prod", "--watch"]);
         assert!(parse(&["embr", "format:check"]).is_ok());
 
         // a script that is no shortcut, an empty tail, or no colon still needs `run`

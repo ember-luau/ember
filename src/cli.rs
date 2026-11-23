@@ -111,7 +111,7 @@ pub enum Commands {
 
     /// Install dependencies and tools from ember.toml
     #[command(visible_alias = "i")]
-    Install(commands::install::InstallArgs),
+    Install(commands::install::InstallCommand),
 
     /// Move packages to the newest versions that ember.toml takes, or show that change with --dry-run
     Update(commands::update::UpdateArgs),
@@ -158,6 +158,18 @@ pub enum Commands {
     /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
+
+    /// Check this embr, the project here, the registry and the caches; repairs nothing, and exits 1 on a failure
+    Doctor(commands::doctor::DoctorArgs),
+
+    /// Write the archive that `embr publish` would upload to a file
+    Pack(commands::pack::PackArgs),
+
+    /// Copy the archive of each package in ember.lock to a folder, for a computer with no network
+    Export(commands::export::ExportArgs),
+
+    /// Put the archives of an `embr export` folder where `embr install --offline --locked` finds them
+    Import(commands::export::ImportArgs),
 
     /// Manage this embr installation
     #[command(subcommand, name = "self")]
@@ -226,6 +238,12 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
     let shown = |json: bool, result: Result<(), Error>| {
         result.map(|()| if json { Outcome::Quiet } else { Outcome::Done })
     };
+    /* a check that ran and found a problem has printed it. it exits 1
+    with no error line */
+    let checked = |json: bool, result: Result<bool, Error>| match result {
+        Ok(false) => Ok(Outcome::Exit(1)),
+        result => shown(json, result.map(|_| ())),
+    };
     match command {
         Commands::Init(args) => done(commands::init::run(args)),
         Commands::Template(command) => shown(command.is_json(), commands::template::run(command)),
@@ -237,7 +255,9 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Remove(args) => shown(args.json, commands::remove::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
         Commands::Migrate(args) => done(commands::migrate::run(args)),
-        Commands::Install(args) => shown(args.json, commands::install::run(args)),
+        Commands::Install(command) => {
+            shown(command.args.json, commands::install::run_command(command))
+        }
         Commands::Update(args) => shown(args.json, commands::update::run(args)),
         Commands::Check(args) => commands::check::run(args),
         Commands::Patch(args) => done(commands::patch::run(args)),
@@ -254,7 +274,11 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Audit(args) => shown(args.json, commands::audit::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
-        Commands::Cache(command) => done(commands::cache::run(command)),
+        Commands::Cache(command) => checked(command.is_json(), commands::cache::run(command)),
+        Commands::Doctor(args) => checked(args.json, commands::doctor::run(args)),
+        Commands::Pack(args) => shown(args.json, commands::pack::run(args)),
+        Commands::Export(args) => shown(args.json, commands::export::export(args)),
+        Commands::Import(args) => shown(args.json, commands::export::import(args)),
         Commands::SelfManage(command) => done(commands::self_cmd::run(command)),
         Commands::Tool(command) => {
             let json = matches!(command, commands::tool::ToolCommand::List { json: true });

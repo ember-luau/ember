@@ -270,7 +270,7 @@ pub fn items(
 /** an index to read notices from. `fetch` false reads only a copy that is
 on disk already, with no request: an install that resolved nothing must
 not reach the network for this. Forest keeps no package files. */
-fn open(url: &str, fetch: bool) -> Option<Index> {
+pub(crate) fn open(url: &str, fetch: bool) -> Option<Index> {
     if forest::is_forest(url) || crate::registry::index::luarocks::is_luarocks(url) {
         return None;
     }

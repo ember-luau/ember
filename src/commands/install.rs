@@ -64,6 +64,33 @@ pub struct InstallArgs {
     pub update_all: bool,
 }
 
+/** `embr install` as the command line has it: the install flags, and `-p`,
+which narrows the install to one workspace member. a struct of its own, so
+the commands that build an [`InstallArgs`] themselves need no new field. */
+#[derive(Args, Debug)]
+pub struct InstallCommand {
+    #[command(flatten)]
+    pub args: InstallArgs,
+
+    /// Install only this workspace member, by package name, folder name or path
+    #[arg(short, long = "package", value_name = "MEMBER")]
+    pub package: Option<String>,
+}
+
+/// [`run`], in the folder of the member that `-p` names when it is given.
+pub fn run_command(command: InstallCommand) -> Result<(), Error> {
+    let Some(name) = command.package else {
+        return run(command.args);
+    };
+    let workspace = Workspace::here()?.ok_or_else(|| {
+        std::io::Error::other("This folder is in no workspace, so --package names no member")
+    })?;
+    let member = workspace
+        .find(&name)
+        .ok_or(Error::NoWorkspaceMember(name))?;
+    workspace::in_dir(&workspace.members[member].dir, || run(command.args))
+}
+
 struct Job {
     name: String,
     version: String,
@@ -102,7 +129,7 @@ struct JobPatch {
 const WORKERS: usize = 8;
 
 /// stamp file the fast path reads, under each `<out>/.ember/`.
-const STATE_FILE: &str = ".state";
+pub(crate) const STATE_FILE: &str = ".state";
 
 /// the per-environment package store inside `packages/`.
 pub(crate) const STORE_DIR: &str = ".ember";
@@ -860,7 +887,7 @@ fn patches_state_text(manifest_text: &str) -> String {
 }
 
 /// the full state hash as things stand right now, None if any input is unreadable.
-fn current_state_hash(include_global: bool) -> Option<String> {
+pub(crate) fn current_state_hash(include_global: bool) -> Option<String> {
     let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
     let lock_text = fs::read_to_string(crate::project::lockfile::lockfile_path()).ok()?;
     Some(state_hash(
