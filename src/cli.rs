@@ -107,7 +107,7 @@ pub enum Commands {
 
     /// Install dependencies and tools from ember.toml
     #[command(visible_alias = "i")]
-    Install(commands::install::InstallArgs),
+    Install(commands::install::InstallCommand),
 
     /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
@@ -212,7 +212,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Remove(args) => done(commands::remove::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
         Commands::Migrate(args) => done(commands::migrate::run(args)),
-        Commands::Install(args) => done(commands::install::run(args)),
+        Commands::Install(command) => done(commands::install::run_command(command)),
         Commands::Patch(args) => done(commands::patch::run(args)),
         Commands::Publish(args) => done(commands::publish::run(args)),
         Commands::Outdated(args) => shown(args.json, commands::outdated::run(args)),

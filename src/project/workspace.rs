@@ -4,7 +4,8 @@ and publish/install at the root run for every member. no nested workspaces,
 a member's own globs are never iterated from the outer root, same as pesde. */
 
 use crate::error::Error;
-use crate::project::manifest::{Manifest, manifest_in};
+use crate::project::manifest::{Dependency, Manifest, manifest_in};
+use crate::sys::git;
 use globset::{GlobBuilder, GlobSetBuilder};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,158 @@ impl Workspace {
         self.members
             .iter()
             .find(|member| member.manifest.name() == Some(name))
+    }
+
+    /** the workspace of the current folder: the folder itself when its
+    manifest lists members, else the root that claims it. */
+    pub fn here() -> Result<Option<Self>, Error> {
+        let here = Path::new(".");
+        let listed = fs::read_to_string(manifest_in(here))
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|raw| !member_globs(&raw).is_empty());
+        if listed {
+            return Self::open(here).map(Some);
+        }
+        containing(here)
+    }
+
+    /// the folder of member `index` from the root, with `/` between its parts. `.` is the root.
+    pub fn path_of(&self, index: usize) -> String {
+        relative_path(&self.root, &self.members[index].dir)
+    }
+
+    /** the member that a `-p` flag names: by its [package] name, else by
+    the name of its folder, else by its path from the root. */
+    pub fn find(&self, name: &str) -> Option<usize> {
+        let by = |matches: &dyn Fn(usize, &Member) -> bool| {
+            self.members
+                .iter()
+                .enumerate()
+                .position(|(index, member)| matches(index, member))
+        };
+        by(&|_, member| member.manifest.name() == Some(name))
+            .or_else(|| by(&|_, member| member.dir.file_name().is_some_and(|dir| dir == name)))
+            .or_else(|| by(&|index, _| self.path_of(index) == name.trim_end_matches('/')))
+    }
+
+    /** for each member, the members that it depends on with `workspace =`,
+    in any of its dependency tables. an entry that names no member is no
+    edge: the resolver reports it at install. */
+    pub fn edges(&self) -> Vec<Vec<usize>> {
+        self.members
+            .iter()
+            .map(|member| {
+                let manifest = &member.manifest;
+                let mut edges: Vec<usize> = manifest
+                    .all_dependencies()
+                    .chain(&manifest.peer_dependencies)
+                    .filter_map(|(_, dependency)| match dependency {
+                        Dependency::Workspace { workspace, .. } => self
+                            .members
+                            .iter()
+                            .position(|member| member.manifest.name() == Some(workspace)),
+                        _ => None,
+                    })
+                    .collect();
+                edges.sort_unstable();
+                edges.dedup();
+                edges
+            })
+            .collect()
+    }
+
+    /** the members in dependency order: each one after the members that it
+    depends on, and in path order where no edge decides. a cycle has no
+    such order, and the error names the members of one cycle. */
+    pub fn order(&self) -> Result<Vec<usize>, Error> {
+        let edges = self.edges();
+        let mut placed = vec![false; self.members.len()];
+        let mut order = Vec::new();
+        while order.len() < self.members.len() {
+            let next = (0..self.members.len())
+                .find(|&member| !placed[member] && edges[member].iter().all(|&on| placed[on]));
+            let Some(next) = next else {
+                /* each member that is left depends on one that is left, so
+                a walk along those edges comes back to a member it saw */
+                let start = placed.iter().position(|placed| !placed).unwrap_or(0);
+                let mut walk = vec![start];
+                let cycle = loop {
+                    let last = walk[walk.len() - 1];
+                    let on = edges[last]
+                        .iter()
+                        .copied()
+                        .find(|&on| !placed[on])
+                        .unwrap_or(last);
+                    if let Some(at) = walk.iter().position(|&seen| seen == on) {
+                        walk.push(on);
+                        break walk.split_off(at);
+                    }
+                    walk.push(on);
+                };
+                let names: Vec<String> = cycle
+                    .iter()
+                    .map(|&member| self.members[member].label())
+                    .collect();
+                return Err(std::io::Error::other(format!(
+                    "The workspace members depend on each other in a cycle: {}; remove one `workspace =` dependency of the cycle",
+                    names.join(" -> ")
+                ))
+                .into());
+            };
+            placed[next] = true;
+            order.push(next);
+        }
+        Ok(order)
+    }
+
+    /// `members` and each member that depends on one of them, directly or through another member.
+    pub fn with_dependents(&self, members: &[usize]) -> Vec<usize> {
+        let edges = self.edges();
+        let mut found = vec![false; self.members.len()];
+        let mut stack = members.to_vec();
+        while let Some(member) = stack.pop() {
+            if std::mem::replace(&mut found[member], true) {
+                continue;
+            }
+            stack.extend((0..edges.len()).filter(|&dependent| edges[dependent].contains(&member)));
+        }
+        (0..found.len()).filter(|&member| found[member]).collect()
+    }
+
+    /** the members with a file that differs from the git ref `since`, the
+    files that git does not track yet included, and the members that depend
+    on them. a file outside each member changes none. */
+    pub fn changed(&self, since: &str) -> Result<Vec<usize>, Error> {
+        // a ref is an argument of git, so it must not read as an option
+        if since.starts_with('-') {
+            return Err(std::io::Error::other(format!("'{since}' is not a git ref")).into());
+        }
+        let root = self.root.to_string_lossy();
+        let git = |args: &[&str]| {
+            let args = [&["-C", &*root][..], args].concat();
+            git::capture_diff(&args).map_err(|error| {
+                let reason = match error {
+                    git::GitError::Missing => "git is not installed".to_string(),
+                    git::GitError::Failed(reason) => reason,
+                };
+                Error::from(std::io::Error::other(format!(
+                    "--changed reads the changes from git, and git failed: {reason}"
+                )))
+            })
+        };
+        // both lists are relative to the root, and hold only files under it
+        let mut files = git(&["diff", "--name-only", "--relative", since, "--"])?;
+        files.push_str(&git(&["ls-files", "--others", "--exclude-standard"])?);
+        let changed: Vec<usize> = (0..self.members.len())
+            .filter(|&member| {
+                let path = self.path_of(member);
+                files
+                    .lines()
+                    .any(|file| path == "." || Path::new(file).starts_with(&path))
+            })
+            .collect();
+        Ok(self.with_dependents(&changed))
     }
 }
 
@@ -356,6 +509,69 @@ mod tests {
 
         let _ = fs::remove_dir_all(&base);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// a root with the members a, b and c, where each entry of `edges` is (member, the member it depends on).
+    fn write_graph(base: &Path, edges: &[(&str, &str)]) {
+        let _ = fs::remove_dir_all(base);
+        write(
+            base,
+            "ember.toml",
+            "[target]\nenvironment = \"luau\"\nworkspace = [\"packages/*\"]\n",
+        );
+        for name in ["a", "b", "c"] {
+            let mut text = manifest(&format!("acme/{name}"), "1.0.0");
+            text.push_str("[target]\nenvironment = \"luau\"\n[dependencies]\n");
+            for (_, on) in edges.iter().filter(|(member, _)| *member == name) {
+                text.push_str(&format!("{on} = {{ workspace = \"acme/{on}\" }}\n"));
+            }
+            write(&base.join("packages").join(name), "ember.toml", &text);
+        }
+    }
+
+    #[test]
+    fn members_order_after_the_members_they_depend_on() {
+        let base = std::env::temp_dir().join("embr-test-workspace-order");
+        // path order is a, b, c. a depends on c, and c on b
+        write_graph(&base, &[("a", "c"), ("c", "b")]);
+        let workspace = Workspace::open(&base).unwrap();
+        let labels = |members: Vec<usize>| -> Vec<String> {
+            members
+                .into_iter()
+                .map(|member| workspace.members[member].label())
+                .collect()
+        };
+        assert_eq!(
+            labels(workspace.order().unwrap()),
+            ["acme/b", "acme/c", "acme/a"]
+        );
+        // b changed, so c and a, which depend on it, count too
+        let b = workspace.find("acme/b").unwrap();
+        assert_eq!(
+            labels(workspace.with_dependents(&[b])),
+            ["acme/a", "acme/b", "acme/c"]
+        );
+        let a = workspace.find("packages/a").unwrap();
+        assert_eq!(labels(workspace.with_dependents(&[a])), ["acme/a"]);
+        assert!(workspace.find("acme/none").is_none());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_cycle_names_its_members() {
+        let base = std::env::temp_dir().join("embr-test-workspace-cycle");
+        // c is outside the cycle and only depends on it
+        write_graph(&base, &[("a", "b"), ("b", "a"), ("c", "a")]);
+        let error = Workspace::open(&base)
+            .unwrap()
+            .order()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("acme/a -> acme/b -> acme/a"), "{error}");
+        assert!(!error.contains("acme/c"), "{error}");
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

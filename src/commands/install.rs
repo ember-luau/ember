@@ -59,6 +59,33 @@ pub struct InstallArgs {
     pub update: Vec<String>,
 }
 
+/** `embr install` as the command line has it: the install flags, and `-p`,
+which narrows the install to one workspace member. a struct of its own, so
+the commands that build an [`InstallArgs`] themselves need no new field. */
+#[derive(Args, Debug)]
+pub struct InstallCommand {
+    #[command(flatten)]
+    pub args: InstallArgs,
+
+    /// Install only this workspace member, by package name, folder name or path
+    #[arg(short, long = "package", value_name = "MEMBER")]
+    pub package: Option<String>,
+}
+
+/// [`run`], in the folder of the member that `-p` names when it is given.
+pub fn run_command(command: InstallCommand) -> Result<(), Error> {
+    let Some(name) = command.package else {
+        return run(command.args);
+    };
+    let workspace = Workspace::here()?.ok_or_else(|| {
+        std::io::Error::other("This folder is in no workspace, so --package names no member")
+    })?;
+    let member = workspace
+        .find(&name)
+        .ok_or(Error::NoWorkspaceMember(name))?;
+    workspace::in_dir(&workspace.members[member].dir, || run(command.args))
+}
+
 struct Job {
     name: String,
     version: String,
