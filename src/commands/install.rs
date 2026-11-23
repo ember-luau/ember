@@ -137,41 +137,6 @@ pub(crate) const STORE_DIR: &str = ".ember";
 /// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
 
-/** an Alloy project builds each installed Alloy package again from its
-.aly, .alx, and .d.aly sources with the `alloy` on PATH, so it runs code
-from the Alloy it reads and not from the publisher's compiler. a package
-that does not build keeps the Luau it was published with, so this warns
-and goes on. the output is captured: the live display owns the terminal. */
-fn build_alloy_packages(
-    manifest: &Manifest,
-    stored: &[StoredPackage],
-    warn: &mut impl FnMut(String),
-) {
-    if manifest.target().map(|target| target.language) != Some(Language::Alloy) {
-        return;
-    }
-    for package in stored
-        .iter()
-        .filter(|package| !package.in_place && is_alloy_package(&package.storage))
-    {
-        let built = std::process::Command::new("alloy")
-            .arg("build")
-            .current_dir(&package.storage)
-            .output();
-        match built {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                warn("warning: alloy is not on PATH, so the Alloy packages keep the Luau they were published with".to_string());
-                return;
-            }
-            Ok(output) if output.status.success() => {}
-            _ => warn(format!(
-                "warning: {} does not build from its Alloy sources, so it keeps its published Luau",
-                package.name
-            )),
-        }
-    }
-}
-
 /** warns when an installed package's `requires` asks for a version that
 the program on PATH does not have. it never fails the install: the program
 on PATH is not always what runs the project. a missing program, or one
@@ -708,7 +673,12 @@ fn install_steps(
     let nested_started = Instant::now();
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
-    build_alloy_packages(manifest, &stored, &mut |message| progress.warn(&message));
+    /* install never runs `alloy build` in a package. the build reads the
+    package's own alloy.toml, where `[ingots]` names a program to start and
+    `[build] out` with `clean` deletes Luau in a folder outside the package.
+    an import into another project builds that project by its own
+    alloy.toml too, so a check of one file does not hold. an Alloy package
+    is used through the Luau it was published with. */
     check_versions(manifest, &stored, version_on_path, &mut |message| {
         progress.warn(&message)
     });
