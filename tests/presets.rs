@@ -524,19 +524,28 @@ fn a_template_and_a_preset_go_to_a_registry_and_come_back() {
         assert_eq!(state.lock().unwrap().log.len(), before, "{name}");
     }
 
-    // the two of them make a new project, each from the registry
-    let created = embr(
-        "new",
-        &[
-            "init",
-            "--template",
-            "ember:ada/starter",
-            "--preset",
-            "ember:ada/strict",
-            "--name",
-            "acme/new",
-        ],
+    /* the preset on Ember sets a script, and a script runs a command. with
+    nobody to ask, init shows the script and writes nothing */
+    let init = [
+        "init",
+        "--template",
+        "ember:ada/starter",
+        "--preset",
+        "ember:ada/strict",
+        "--name",
+        "acme/new",
+    ];
+    let refused = run_at(&api, &base, "new", &init);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("lint = \"selene src\""),
+        "{refused:?}"
     );
+    assert!(stderr(&refused).contains("pass --yes"), "{refused:?}");
+    assert_eq!(fs::read_dir(base.join("new")).unwrap().count(), 0);
+
+    // the two of them make a new project, each from the registry
+    let created = embr("new", &[&init[..], &["--yes"]].concat());
     assert!(created.contains("Created 2 files"), "{created}");
     assert!(base.join("new/src/init.luau").is_file());
     assert!(manifest(&base, "new").contains("name = \"acme/new\""));

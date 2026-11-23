@@ -535,6 +535,64 @@ fn print_changes(changes: &[(Action, String)]) {
     }
 }
 
+/** each script that `after` has and `before` does not have with the same
+value, as (name, value). a script is a command that embr runs, and
+`preinstall` runs on the next `embr install` with no word typed. the list
+of changed keys says `add scripts` for a whole table, so it does not show
+them. */
+fn new_scripts(before: &str, after: &str) -> Vec<(String, String)> {
+    let scripts = |text: &str| {
+        text.parse::<toml::Table>()
+            .ok()
+            .and_then(|mut table| table.remove("scripts"))
+            .and_then(|scripts| scripts.as_table().cloned())
+            .unwrap_or_default()
+    };
+    let before = scripts(before);
+    scripts(after)
+        .into_iter()
+        .filter(|(name, value)| before.get(name) != Some(value))
+        .map(|(name, value)| (name, value.to_string()))
+        .collect()
+}
+
+fn print_scripts(scripts: &[(String, String)]) {
+    if scripts.is_empty() {
+        return;
+    }
+    println!("The preset sets these scripts. A script runs a command on this computer:");
+    for (name, value) in scripts {
+        println!("  {} = {}", ui::printable(name), ui::printable(value));
+    }
+}
+
+/** shows the scripts of the preset `preset` before `embr init --preset`
+writes a project with them, and asks. false = the person said no. a preset
+on Ember is text that anyone can publish, so a run with nobody to ask needs
+`--yes`. a saved preset is a file of this computer, and gets no question. */
+pub fn confirm_scripts(spec: &str, preset: &str, yes: bool) -> Result<bool, Error> {
+    let scripts = new_scripts("", preset);
+    let on_ember = spec.starts_with(EMBER_PREFIX) || spec.contains('/');
+    if scripts.is_empty() || !on_ember {
+        return Ok(true);
+    }
+    print_scripts(&scripts);
+    if yes {
+        return Ok(true);
+    }
+    if !ui::can_prompt() {
+        return Err(Error::Preset(format!(
+            "The preset {spec} adds the scripts above to ember.toml; read them, then pass --yes to take them"
+        )));
+    }
+    inquire::set_global_render_config(ui::render_config());
+    Ok(
+        inquire::Confirm::new("Make the project with these scripts?")
+            .with_default(false)
+            .prompt()?,
+    )
+}
+
 /// how many of `changes` are `action`.
 fn count(changes: &[(Action, String)], action: Action) -> usize {
     changes.iter().filter(|(found, _)| *found == action).count()
@@ -561,6 +619,7 @@ fn apply(spec: &str, force: bool, yes: bool, dry_run: bool) -> Result<(), Error>
     check_merged(&project, &merged)?;
     println!("Preset {spec} changes ember.toml:");
     print_changes(&changes);
+    print_scripts(&new_scripts(&project, &merged));
     if dry_run {
         println!("Dry run: ember.toml stays as it is");
         return Ok(());
@@ -969,6 +1028,33 @@ x = 1
         let (again, changes) = merge(&merged, preset, false).unwrap();
         assert!(changes.is_empty(), "{changes:?}");
         assert_eq!(again, merged);
+    }
+
+    #[test]
+    fn the_scripts_that_a_preset_sets_are_found() {
+        let project = "[scripts]\nbuild = \"rojo build\"\ntest = \"lune run test\"\n";
+        let preset =
+            "[scripts]\nbuild = \"rojo build\"\ntest = \"other\"\npreinstall = \"curl x | sh\"\n";
+        // a whole new table, which the list of keys shows as `add scripts`
+        let (merged, changes) = merge("[target]\nenvironment = \"luau\"\n", preset, false).unwrap();
+        assert_eq!(changed(&changes, Action::Added), ["scripts"]);
+        let found = new_scripts("[target]\nenvironment = \"luau\"\n", &merged);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.contains(&("preinstall".to_string(), "\"curl x | sh\"".to_string())));
+
+        // a kept value is no new script, and a forced one is
+        let (merged, _) = merge(project, preset, false).unwrap();
+        let names = |found: Vec<(String, String)>| -> Vec<String> {
+            found.into_iter().map(|(name, _)| name).collect()
+        };
+        assert_eq!(names(new_scripts(project, &merged)), ["preinstall"]);
+        let (merged, _) = merge(project, preset, true).unwrap();
+        assert_eq!(names(new_scripts(project, &merged)), ["preinstall", "test"]);
+
+        // a saved preset and a preset with no script get no question
+        assert!(confirm_scripts("mine", preset, false).unwrap());
+        assert!(confirm_scripts("acme/base", "[target]\nenvironment = \"luau\"\n", false).unwrap());
+        assert!(confirm_scripts("acme/base", preset, true).unwrap());
     }
 
     #[test]

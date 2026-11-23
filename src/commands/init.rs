@@ -232,6 +232,10 @@ pub fn run(mut args: InitArgs) -> Result<(), Error> {
         return create(args, manifest_path);
     };
     let text = preset::resolve(&spec)?;
+    if !preset::confirm_scripts(&spec, &text, args.yes)? {
+        println!("Nothing was written");
+        return Ok(());
+    }
     create(args, manifest_path)?;
     preset::apply_to_new(manifest_path, &spec, &text)
 }
