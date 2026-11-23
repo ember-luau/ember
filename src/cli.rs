@@ -149,6 +149,9 @@ pub enum Commands {
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
 
+    /// Check this embr, the project here, the registry and the caches; repairs nothing, and exits 1 on a failure
+    Doctor(commands::doctor::DoctorArgs),
+
     /// Write the archive that `embr publish` would upload to a file
     Pack(commands::pack::PackArgs),
 
@@ -228,6 +231,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
         Commands::Cache(command) => checked(command.is_json(), commands::cache::run(command)),
+        Commands::Doctor(args) => checked(args.json, commands::doctor::run(args)),
         Commands::Pack(args) => shown(args.json, commands::pack::run(args)),
         Commands::Export(args) => shown(args.json, commands::export::export(args)),
         Commands::Import(args) => shown(args.json, commands::export::import(args)),

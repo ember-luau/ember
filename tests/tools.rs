@@ -353,6 +353,99 @@ fn cache_verify_reports_and_a_dry_run_deletes_nothing() {
 }
 
 #[test]
+fn doctor_reports_and_prints_no_token() {
+    let base = fixture("doctor");
+    let game = base.join("game");
+
+    // before an install: a warning with a fix, and exit code 0
+    let report = json(&game, &base, &["doctor", "--offline", "--json"]);
+    assert_eq!(report["version"], 1);
+    let checks = report["checks"].as_array().unwrap();
+    let check = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("no check named {name}"))
+    };
+    assert_eq!(check("manifest")["status"], "ok");
+    assert_eq!(check("lockfile")["status"], "warning");
+    assert_eq!(check("lockfile")["fix"], "Run `embr install`");
+    assert_eq!(check("api")["status"], "skipped");
+    assert_eq!(check("login")["status"], "skipped");
+    for group in ["Ember", "Environment", "Project", "Registry", "Cache"] {
+        assert!(
+            checks.iter().any(|check| check["group"] == group),
+            "{group}"
+        );
+    }
+    for check in checks {
+        let needs_fix = check["status"] == "warning" || check["status"] == "failure";
+        assert_eq!(check["fix"].is_string(), needs_fix, "{check}");
+        assert_ne!(check["status"], "failure", "{check}");
+    }
+
+    embr(&game, &base, &["install"]);
+    let report = json(&game, &base, &["doctor", "--offline", "--json"]);
+    let status = |name: &str| {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap()["status"]
+            .clone()
+    };
+    assert_eq!(status("lockfile"), "ok");
+    assert_eq!(status("install"), "ok");
+
+    // no project is no failure
+    let report = json(&base, &base, &["doctor", "--offline", "--json"]);
+    let manifest = &report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "manifest")
+        .unwrap()["status"];
+    assert_eq!(manifest, "skipped");
+
+    /* an API that does not answer is a failure with exit code 1, and the
+    token shows in no stream. the API is a closed port of this computer */
+    let online = Command::new(env!("CARGO_BIN_EXE_embr"))
+        .args(["doctor"])
+        .current_dir(&game)
+        .env("HOME", base.join("home"))
+        .env("NO_COLOR", "1")
+        .env("EMBER_TOKEN", "ember_secret-token-value")
+        .env("EMBER_API_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&online.stdout),
+        String::from_utf8_lossy(&online.stderr)
+    );
+    assert_eq!(online.status.code(), Some(1), "{text}");
+    assert!(text.contains("fix: "), "{text}");
+    assert!(!text.contains("secret-token-value"), "{text}");
+
+    // a manifest that does not parse is a failure with a fix
+    fs::write(game.join("ember.toml"), "[target\n").unwrap();
+    let broken = run(&game, &base, &["doctor", "--offline", "--json"]);
+    assert_eq!(broken.status.code(), Some(1), "{broken:?}");
+    let report: Value = serde_json::from_slice(&broken.stdout).unwrap();
+    let manifest = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "manifest")
+        .unwrap();
+    assert_eq!(manifest["status"], "failure");
+    assert!(manifest["fix"].is_string());
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
 fn tree_and_outdated_mark_what_the_index_marks() {
     let base = fixture("marks");
     let game = base.join("game");

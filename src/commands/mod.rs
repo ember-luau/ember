@@ -3,6 +3,7 @@ pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod deprecate;
+pub mod doctor;
 pub mod execute;
 pub mod export;
 pub mod index;

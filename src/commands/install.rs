@@ -124,7 +124,7 @@ struct JobPatch {
 const WORKERS: usize = 8;
 
 /// stamp file the fast path reads, under each `<out>/.ember/`.
-const STATE_FILE: &str = ".state";
+pub(crate) const STATE_FILE: &str = ".state";
 
 /// the per-environment package store inside `packages/`.
 pub(crate) const STORE_DIR: &str = ".ember";
@@ -858,7 +858,7 @@ fn patches_state_text(manifest_text: &str) -> String {
 }
 
 /// the full state hash as things stand right now, None if any input is unreadable.
-fn current_state_hash(include_global: bool) -> Option<String> {
+pub(crate) fn current_state_hash(include_global: bool) -> Option<String> {
     let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
     let lock_text = fs::read_to_string(crate::project::lockfile::lockfile_path()).ok()?;
     Some(state_hash(
