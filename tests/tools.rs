@@ -351,3 +351,52 @@ fn cache_verify_reports_and_a_dry_run_deletes_nothing() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn tree_and_outdated_mark_what_the_index_marks() {
+    let base = fixture("marks");
+    let game = base.join("game");
+    embr(&game, &base, &["install"]);
+
+    let tree = json(&game, &base, &["tree", "--json"]);
+    let node = &tree["dependencies"][0];
+    assert_eq!(node["latest"], "1.0.0");
+    assert_eq!(node["deprecated"], false);
+    assert_eq!(node["yanked"], false);
+    let text = embr(&game, &base, &["tree"]);
+    assert!(
+        !text.contains("deprecated") && !text.contains("yanked"),
+        "{text}"
+    );
+
+    // the index marks the package as deprecated and the version as yanked
+    let index = base.join("home/.ember/local/index/acme/lib");
+    let mut entries: toml::Table = fs::read_to_string(&index).unwrap().parse().unwrap();
+    let entry = entries["1.0.0 luau"].as_table_mut().unwrap();
+    entry.insert("yanked".into(), true.into());
+    let mut meta = toml::Table::new();
+    meta.insert("deprecated".into(), "use acme/other".into());
+    entries.insert("meta".into(), meta.into());
+    fs::write(&index, toml::to_string_pretty(&entries).unwrap()).unwrap();
+
+    let tree = json(&game, &base, &["tree", "--json"]);
+    let node = &tree["dependencies"][0];
+    assert_eq!(node["deprecated"], true);
+    assert_eq!(node["yanked"], true);
+    // the one version is yanked, so the index has no version to move to
+    assert_eq!(node["latest"], Value::Null);
+    let text = embr(&game, &base, &["tree"]);
+    assert!(
+        text.contains("acme/lib@1.0.0 (deprecated) (yanked)"),
+        "{text}"
+    );
+
+    let outdated = json(&game, &base, &["outdated", "--json"]);
+    let row = &outdated["dependencies"][0];
+    assert_eq!(row["deprecated"], true);
+    assert_eq!(row["yanked"], true);
+    let text = embr(&game, &base, &["outdated"]);
+    assert!(text.contains("deprecated  yanked"), "{text}");
+
+    let _ = fs::remove_dir_all(&base);
+}

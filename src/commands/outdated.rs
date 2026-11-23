@@ -26,6 +26,10 @@ struct Row {
     current: Option<semver::Version>,
     wanted: Option<semver::Version>,
     latest: Option<semver::Version>,
+    /// the locked version, or the whole package, is deprecated. None when the index does not say.
+    deprecated: Option<bool>,
+    /// the locked version is yanked. None when the index does not say.
+    yanked: Option<bool>,
 }
 
 impl Row {
@@ -96,25 +100,49 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
             current: lock.as_ref().and_then(|lock| locked(lock, &name)),
             wanted: newest(&parse_version_req(version)?),
             latest: newest(&semver::VersionReq::STAR),
+            deprecated: None,
+            yanked: None,
             name,
         });
+    }
+    /* the marks of the locked versions, after the loop: each index is on
+    disk by now, and the marks read only that copy */
+    if let Some(lock) = &lock {
+        let marks = super::tree::marks(&lock.packages);
+        for row in &mut rows {
+            let current = row.current.as_ref().map(ToString::to_string);
+            let found = lock.packages.iter().zip(&marks).find(|(package, _)| {
+                package.name.eq_ignore_ascii_case(&row.name)
+                    && Some(&package.version) == current.as_ref()
+            });
+            if let Some((_, Some(marks))) = found {
+                row.deprecated = Some(marks.deprecated);
+                row.yanked = Some(marks.yanked);
+            }
+        }
     }
 
     if args.json {
         return ui::print_json(&document(&rows));
     }
-    let behind: Vec<&Row> = rows.iter().filter(|row| row.behind()).collect();
+    /* a deprecated or yanked dependency shows too: the newest version of
+    a deprecated package is still one to move away from */
+    let marked = |row: &Row| row.deprecated == Some(true) || row.yanked == Some(true);
+    let behind: Vec<&Row> = rows
+        .iter()
+        .filter(|row| row.behind() || marked(row))
+        .collect();
     if behind.is_empty() {
         ui::print_success("Every dependency is up to date");
         return Ok(());
     }
     print_table(&behind);
     println!();
+    let count = rows.iter().filter(|row| row.behind()).count();
     println!(
-        "{} of {} dependencies {} a newer release. `embr install --update <name>` moves to Wanted; past it, raise the requirement with `embr add <name> --version <req>`.",
-        behind.len(),
+        "{count} of {} dependencies {} a newer release. `embr install --update <name>` moves to Wanted; past it, raise the requirement with `embr add <name> --version <req>`.",
         rows.len(),
-        if behind.len() == 1 { "has" } else { "have" },
+        if count == 1 { "has" } else { "have" },
     );
     Ok(())
 }
@@ -133,6 +161,8 @@ fn document(rows: &[Row]) -> serde_json::Value {
                 "wanted": text(&row.wanted),
                 "latest": text(&row.latest),
                 "behind": row.behind(),
+                "deprecated": row.deprecated,
+                "yanked": row.yanked,
             })
         })
         .collect();
@@ -202,8 +232,15 @@ fn print_table(rows: &[&Row]) {
         } else {
             cell[3].clone()
         };
+        let mut marks = String::new();
+        if row.deprecated == Some(true) {
+            marks.push_str(&"  deprecated".yellow().to_string());
+        }
+        if row.yanked == Some(true) {
+            marks.push_str(&"  yanked".yellow().to_string());
+        }
         println!(
-            "{}  {}  {wanted}  {latest}",
+            "{}  {}  {wanted}  {latest}{marks}",
             pad(&cell[0], 0),
             pad(&cell[1], 1).dark_grey()
         );
@@ -222,17 +259,21 @@ mod tests {
             current: parse(current),
             wanted: parse(wanted),
             latest: parse(latest),
+            deprecated: None,
+            yanked: None,
         }
     }
 
     /// the `--json` shape of `embr outdated`: every row, behind or not.
     #[test]
     fn the_json_table_holds_every_registry_dependency() {
-        let rows = [
+        let mut rows = [
             row(Some("1.2.0"), Some("1.3.0"), Some("2.0.0")),
             row(Some("1.2.0"), Some("1.2.0"), Some("1.2.0")),
             row(None, None, None),
         ];
+        rows[0].deprecated = Some(true);
+        rows[0].yanked = Some(false);
         let entry = |current, wanted, latest, behind| {
             serde_json::json!({
                 "alias": "Thing",
@@ -241,14 +282,19 @@ mod tests {
                 "wanted": wanted,
                 "latest": latest,
                 "behind": behind,
+                "deprecated": null,
+                "yanked": null,
             })
         };
+        let mut first = entry(Some("1.2.0"), Some("1.3.0"), Some("2.0.0"), true);
+        first["deprecated"] = true.into();
+        first["yanked"] = false.into();
         assert_eq!(
             document(&rows),
             serde_json::json!({
                 "version": 1,
                 "dependencies": [
-                    entry(Some("1.2.0"), Some("1.3.0"), Some("2.0.0"), true),
+                    first,
                     entry(Some("1.2.0"), Some("1.2.0"), Some("1.2.0"), false),
                     entry(None, None, None, false),
                 ],
