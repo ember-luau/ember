@@ -105,6 +105,38 @@ fn lock_to_url(base: &Path) -> String {
 }
 
 #[test]
+fn pack_writes_the_bytes_that_publish_stores() {
+    let base = fixture("pack");
+    let lib = base.join("lib");
+    let published =
+        fs::read(base.join("home/.ember/local/archives/acme/lib/1.0.0/luau.tar.gz")).unwrap();
+
+    embr(&lib, &base, &["pack"]);
+    let packed = lib.join("lib-1.0.0-luau.tar.gz");
+    assert_eq!(fs::read(&packed).unwrap(), published);
+
+    // the file of the first pack is no part of the second
+    let out = base.join("out.tar.gz");
+    let document = json(
+        &lib,
+        &base,
+        &["pack", "--json", "-o", out.to_str().unwrap()],
+    );
+    assert_eq!(fs::read(&out).unwrap(), published);
+    let archive = &document["archives"][0];
+    assert_eq!(document["version"], 1);
+    assert_eq!(archive["name"], "acme/lib");
+    assert_eq!(archive["target"], "luau");
+    assert_eq!(archive["bytes"], published.len());
+    assert_eq!(
+        archive["sha256"],
+        embr::sys::hash::sha256_hex(&published).as_str()
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
 fn an_export_installs_offline_after_an_import() {
     let base = fixture("bundle");
     let game = base.join("game");

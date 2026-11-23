@@ -107,9 +107,20 @@ fn select(root: &Path, manifest: &Manifest) -> Result<(Vec<PathBuf>, Vec<PathBuf
         .and_then(|package| package.logo.as_deref())
         .map(|logo| PathBuf::from(logo.replace('\\', "/").trim_start_matches("./")));
     let mut held = Vec::new();
+    // what `embr pack` left in the package folder is no part of the package
+    let packed = manifest.package.as_ref().map(|package| {
+        let name = archive_name(&package.name, &package.version, "");
+        name.trim_end_matches(".tar.gz").to_string()
+    });
     files.retain(|file| {
         if is_manifest(file) || logo.as_deref() == Some(file.as_path()) {
             return true;
+        }
+        if let (Some(packed), Some(name)) = (&packed, file.to_str())
+            && name.starts_with(packed.as_str())
+            && name.ends_with(".tar.gz")
+        {
+            return false;
         }
         if !includes.is_empty() && !includes.matches(file) {
             return false;
@@ -128,6 +139,15 @@ fn select(root: &Path, manifest: &Manifest) -> Result<(Vec<PathBuf>, Vec<PathBuf
     files.sort();
     held.sort();
     Ok((files, held))
+}
+
+/** the file that `embr pack` writes for the target `id` of a package:
+`<name>-<version>-<id>.tar.gz`, the name without its scope. a file of this
+shape in the package folder is never packed, so a pack does not change
+what the next pack or publish holds. */
+pub fn archive_name(name: &str, version: &str, id: &str) -> String {
+    let short = name.rsplit('/').next().unwrap_or(name);
+    format!("{short}-{version}-{id}.tar.gz")
 }
 
 /** One includes/excludes list, compiled. Entries with glob metacharacters

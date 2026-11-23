@@ -149,6 +149,9 @@ pub enum Commands {
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
 
+    /// Write the archive that `embr publish` would upload to a file
+    Pack(commands::pack::PackArgs),
+
     /// Copy the archive of each package in ember.lock to a folder, for a computer with no network
     Export(commands::export::ExportArgs),
 
@@ -225,6 +228,7 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
         Commands::Cache(command) => checked(command.is_json(), commands::cache::run(command)),
+        Commands::Pack(args) => shown(args.json, commands::pack::run(args)),
         Commands::Export(args) => shown(args.json, commands::export::export(args)),
         Commands::Import(args) => shown(args.json, commands::export::import(args)),
         Commands::SelfManage(command) => done(commands::self_cmd::run(command)),

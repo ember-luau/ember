@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod migrate;
 pub mod notices;
 pub mod outdated;
+pub mod pack;
 pub mod patch;
 pub mod preset;
 pub mod publish;

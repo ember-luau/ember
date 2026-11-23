@@ -338,6 +338,10 @@ fn publish_target(
     } else {
         registry::api_url()
     };
+    // `embr pack` takes the archive here, in place of the upload
+    if let Some(written) = super::pack::intercept(manifest, &id, &archive) {
+        return written;
+    }
     if args.dry_run {
         println!(
             "Would publish {package} ({id}) to {destination}, {} bytes:",
