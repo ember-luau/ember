@@ -257,7 +257,13 @@ mod tests {
         ] {
             let path = dir.join(file);
             std::fs::write(&path, "x").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(before)).unwrap();
+            // A build sandbox, such as the one of Nix, refuses a setuid
+            // bit. The case has nothing to check there.
+            match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(before)) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+
+                set => set.unwrap(),
+            }
             mask_modes(&dir).unwrap();
             assert_eq!(mode(&path), after, "{file}");
         }
