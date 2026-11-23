@@ -556,11 +556,16 @@ fn new_scripts(before: &str, after: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn print_scripts(scripts: &[(String, String)]) {
+/// the scripts of the manifest or preset `text`, as (name, value).
+pub fn scripts_of(text: &str) -> Vec<(String, String)> {
+    new_scripts("", text)
+}
+
+fn print_scripts(source: &str, scripts: &[(String, String)]) {
     if scripts.is_empty() {
         return;
     }
-    println!("The preset sets these scripts. A script runs a command on this computer:");
+    println!("The {source} sets these scripts. A script runs a command on this computer:");
     for (name, value) in scripts {
         println!("  {} = {}", ui::printable(name), ui::printable(value));
     }
@@ -571,18 +576,34 @@ writes a project with them, and asks. false = the person said no. a preset
 on Ember is text that anyone can publish, so a run with nobody to ask needs
 `--yes`. a saved preset is a file of this computer, and gets no question. */
 pub fn confirm_scripts(spec: &str, preset: &str, yes: bool) -> Result<bool, Error> {
-    let scripts = new_scripts("", preset);
     let on_ember = spec.starts_with(EMBER_PREFIX) || spec.contains('/');
-    if scripts.is_empty() || !on_ember {
+    if !on_ember {
         return Ok(true);
     }
-    print_scripts(&scripts);
+    confirm_new_scripts("preset", spec, &scripts_of(preset), yes, Error::Preset)
+}
+
+/** [`confirm_scripts`] for the scripts `scripts` of a new project, which
+the `source`, a preset or a template, named `spec` sets. `embr init
+--template` asks through it for a template that is not from this computer.
+`refuse` makes the error of a run with nobody to ask. */
+pub fn confirm_new_scripts(
+    source: &str,
+    spec: &str,
+    scripts: &[(String, String)],
+    yes: bool,
+    refuse: fn(String) -> Error,
+) -> Result<bool, Error> {
+    if scripts.is_empty() {
+        return Ok(true);
+    }
+    print_scripts(source, scripts);
     if yes {
         return Ok(true);
     }
     if !ui::can_prompt() {
-        return Err(Error::Preset(format!(
-            "The preset {spec} adds the scripts above to ember.toml; read them, then pass --yes to take them"
+        return Err(refuse(format!(
+            "The {source} {spec} adds the scripts above to ember.toml; read them, then pass --yes to take them"
         )));
     }
     inquire::set_global_render_config(ui::render_config());
@@ -619,7 +640,7 @@ fn apply(spec: &str, force: bool, yes: bool, dry_run: bool) -> Result<(), Error>
     check_merged(&project, &merged)?;
     println!("Preset {spec} changes ember.toml:");
     print_changes(&changes);
-    print_scripts(&new_scripts(&project, &merged));
+    print_scripts("preset", &new_scripts(&project, &merged));
     if dry_run {
         println!("Dry run: ember.toml stays as it is");
         return Ok(());

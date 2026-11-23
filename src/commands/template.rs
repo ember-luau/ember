@@ -646,6 +646,12 @@ fn from_github(api: &str, repository: &str, reference: Option<&str>) -> Result<F
 }
 
 impl Fetched {
+    /** whether the template came from Ember or GitHub. a saved template and
+    a folder are files of this computer. */
+    pub fn is_remote(&self) -> bool {
+        matches!(self.files, Files::Tarball(..))
+    }
+
     /** checks every entry of a tarball. a refused archive is an error
     here, before anything is written. `wrapped` says that one folder holds
     the files, as in a GitHub tarball. */

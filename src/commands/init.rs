@@ -228,20 +228,34 @@ pub fn run(mut args: InitArgs) -> Result<(), Error> {
     /* found before anything is written, so a preset that does not exist
     leaves the folder as it is. applied last: with a template, the tree
     first, then the preset */
-    let Some(spec) = args.preset.take() else {
-        return create(args, manifest_path);
+    let preset = match args.preset.take() {
+        Some(spec) => Some(Preset {
+            text: preset::resolve(&spec)?,
+            spec,
+        }),
+        None => None,
     };
-    let text = preset::resolve(&spec)?;
-    if !preset::confirm_scripts(&spec, &text, args.yes)? {
+    if !create(args, manifest_path, preset.as_ref())? {
         println!("Nothing was written");
         return Ok(());
     }
-    create(args, manifest_path)?;
-    preset::apply_to_new(manifest_path, &spec, &text)
+    match preset {
+        Some(preset) => preset::apply_to_new(manifest_path, &preset.spec, &preset.text),
+        None => Ok(()),
+    }
 }
 
-/// writes the new project, without its preset.
-fn create(args: InitArgs, manifest_path: &Path) -> Result<(), Error> {
+/// the preset of `embr init --preset`: how the person named it, and its text.
+struct Preset {
+    spec: String,
+    text: String,
+}
+
+/** writes the new project, without its preset. false = the person said no
+to the scripts of the template or of the preset, and nothing was written.
+a script runs a command, and `preinstall` runs on the next `embr install`
+with no word typed, so the question comes before the first file. */
+fn create(args: InitArgs, manifest_path: &Path, preset: Option<&Preset>) -> Result<bool, Error> {
     /* a flag answers its question. without one, a terminal gets the
     question, and anything else (CI, a script, --yes) gets the default */
     let interactive = !args.yes && crate::ui::can_prompt();
@@ -264,9 +278,18 @@ fn create(args: InitArgs, manifest_path: &Path) -> Result<(), Error> {
         None => None,
     };
     if let Some(template) = template {
-        return init_from_template(&template, args.name, interactive);
+        return init_from_template(&template, args.name, interactive, args.yes, preset);
     }
+    if let Some(preset) = preset
+        && !preset::confirm_scripts(&preset.spec, &preset.text, args.yes)?
+    {
+        return Ok(false);
+    }
+    create_new(args, manifest_path, interactive).map(|()| true)
+}
 
+/// the project of `embr init` with no template, from the flags and the answers.
+fn create_new(args: InitArgs, manifest_path: &Path, interactive: bool) -> Result<(), Error> {
     /* asked first because the answer decides whether the registry metadata
     below is worth asking. a project is the common case */
     let kind = match args.kind {
@@ -483,8 +506,33 @@ fn ask_template() -> Result<Option<String>, Error> {
 the name from the prompt or the guess, and version 0.1.0. the name comes
 first, so a failed guess leaves the folder empty. nothing else in the files
 changes. */
-fn init_from_template(spec: &str, name: Option<String>, interactive: bool) -> Result<(), Error> {
+fn init_from_template(
+    spec: &str,
+    name: Option<String>,
+    interactive: bool,
+    yes: bool,
+    preset: Option<&Preset>,
+) -> Result<bool, Error> {
     let fetched = template::fetch(spec, Path::new("."))?;
+    /* a template from Ember or GitHub is text that anyone can publish, and
+    its ember.toml can hold scripts. the question shows the scripts of the
+    manifest as the preset leaves it. a saved template is a folder of this
+    computer, so only a preset from Ember asks then */
+    let go_on = match (fetched.is_remote(), preset) {
+        (true, _) => {
+            let merged = match preset {
+                Some(preset) => preset::merge(&fetched.manifest, &preset.text, true)?.0,
+                None => fetched.manifest.clone(),
+            };
+            let scripts = preset::scripts_of(&merged);
+            preset::confirm_new_scripts("template", spec, &scripts, yes, Error::Template)?
+        }
+        (false, Some(preset)) => preset::confirm_scripts(&preset.spec, &preset.text, yes)?,
+        (false, None) => true,
+    };
+    if !go_on {
+        return Ok(false);
+    }
     let package = fetched
         .manifest
         .parse::<toml_edit::DocumentMut>()?
@@ -503,7 +551,7 @@ fn init_from_template(spec: &str, name: Option<String>, interactive: bool) -> Re
         std::fs::write(MANIFEST_FILE, named(&fetched.manifest, &name)?)?;
         crate::ui::print_success(&format!("Set the package name to {name}, version 0.1.0"));
     }
-    Ok(())
+    Ok(true)
 }
 
 /** `text` with `[package] name` set to `name` and `version` to 0.1.0. each

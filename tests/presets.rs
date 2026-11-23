@@ -544,6 +544,30 @@ fn a_template_and_a_preset_go_to_a_registry_and_come_back() {
     assert!(stderr(&refused).contains("pass --yes"), "{refused:?}");
     assert_eq!(fs::read_dir(base.join("new")).unwrap().count(), 0);
 
+    // the template alone sets the same script, and gets the same answer
+    let alone = [
+        "init",
+        "--template",
+        "ember:ada/starter",
+        "--name",
+        "acme/alone",
+    ];
+    let refused = run_at(&api, &base, "alone", &alone);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("The template sets these scripts")
+            && String::from_utf8_lossy(&refused.stdout).contains("lint = \"selene src\""),
+        "{refused:?}"
+    );
+    assert!(
+        stderr(&refused).contains("The template ember:ada/starter adds the scripts above"),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read_dir(base.join("alone")).unwrap().count(), 0);
+    let created = embr("alone", &[&alone[..], &["--yes"]].concat());
+    assert!(created.contains("lint = \"selene src\""), "{created}");
+    assert!(manifest(&base, "alone").contains("name = \"acme/alone\""));
+
     // the two of them make a new project, each from the registry
     let created = embr("new", &[&init[..], &["--yes"]].concat());
     assert!(created.contains("Created 2 files"), "{created}");
