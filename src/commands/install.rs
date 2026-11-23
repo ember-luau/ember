@@ -26,7 +26,7 @@ use std::time::Instant;
 
 mod editor;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 #[command(after_long_help = "\
 When ember.toml, ember.lock, and the global tools file are unchanged since the \
 last successful install, `install` trusts the lockfile: within the index \
@@ -42,12 +42,8 @@ pub struct InstallArgs {
     #[arg(long)]
     pub locked: bool,
 
-    /// Download nothing: install from the caches on this computer, and fail when something is not in them
-    #[arg(long, conflicts_with = "refresh")]
-    pub offline: bool,
-
     /// Move every package to the newest version that ember.toml takes, re-fetch indices, and re-download archives even when caches are fresh
-    #[arg(long)]
+    #[arg(long, conflicts_with = "offline")]
     pub refresh: bool,
 
     /// Fail when a package needs a peer dependency that is missing or has a version that does not match
@@ -57,6 +53,15 @@ pub struct InstallArgs {
     /// Move this package to the newest version that ember.toml takes, and lock its archive hash again, also when the hash changed; a git package moves to the newest commit of its branch or tag
     #[arg(long, value_name = "PACKAGE", conflicts_with = "locked")]
     pub update: Vec<String>,
+
+    /// Print the changes to ember.lock as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
+
+    /** `embr update` with no name: every package moves as with `--refresh`,
+    and an archive in the cache stays in use. */
+    #[arg(skip)]
+    pub update_all: bool,
 }
 
 struct Job {
@@ -267,7 +272,7 @@ fn is_alloy_package(dir: &Path) -> bool {
 
 /** what the current ember.lock pins, so a yanked version it holds keeps
 installing. no lockfile, or one that does not parse, pins nothing. */
-fn pinned_versions() -> resolver::Pinned {
+pub(crate) fn pinned_versions() -> resolver::Pinned {
     let mut pinned = resolver::Pinned::new();
     let Ok(lock) = Lockfile::load() else {
         return pinned;
@@ -284,11 +289,19 @@ fn pinned_versions() -> resolver::Pinned {
 }
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
-    if args.offline {
-        crate::net::offline::enable();
+    if !args.json {
+        return install(&args, Manifest::load()?);
     }
-    let manifest = Manifest::load()?;
+    ui::json_or_text(true, || {
+        let manifest = Manifest::load()?;
+        let before = super::update::locked(&manifest)?;
+        install(&args, manifest)?;
+        let after = super::update::locked(&Manifest::load()?)?;
+        Ok(super::update::document(&before, &after, false))
+    })
+}
 
+fn install(args: &InstallArgs, manifest: Manifest) -> Result<(), Error> {
     /* the root's hooks bracket the whole command, members included, so a
     `postinstall` that builds the project sees a fully installed tree.
     each member's own hooks bracket only that member, in its own directory */
@@ -297,7 +310,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
 
     // an Azul project pushes the changed packages folders into Studio
     let auto_push = super::studio::AutoPush::before(&manifest);
-    install_project(&args, &manifest, true)?;
+    install_project(args, &manifest, true)?;
     auto_push.after(&manifest);
 
     /* a workspace root installs every member too, pesde's order, root
@@ -315,7 +328,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
                 let manifest = Manifest::load()?;
                 let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);
                 lifecycle.before()?;
-                install_project(&args, &manifest, false)?;
+                install_project(args, &manifest, false)?;
                 lifecycle.after()
             })?;
         }
@@ -493,8 +506,11 @@ fn install_steps(
             })
             .collect::<Result<Vec<Job>, Error>>()?
     } else {
+        if crate::net::offline::is_enabled() {
+            offline_indices(manifest)?;
+        }
         let resolve_started = Instant::now();
-        let mode = if args.refresh {
+        let mode = if args.refresh || args.update_all {
             index::Refresh::Force
         } else {
             index::Refresh::Ttl
@@ -571,20 +587,8 @@ fn install_steps(
         return Ok(true);
     }
 
-    /* before the wipe below, which would otherwise take a [config]-claimed
-    packages/shared with it and leave the guard inside with nothing to see.
-    it prints when it removes something, so it opens the output and the
-    sections below separate themselves from it */
-    let mut printed = progress.suspend(|| remove_legacy_outs(manifest, previous.as_ref()));
-
-    /* installs rebuild from scratch each run. every env's output folder is
-    wiped even with nothing to install, so removing the last dependency
-    leaves no stale packages */
-    for environment in Environment::ALL {
-        let out = manifest.packages_out(environment);
-        if out.exists() {
-            fs::remove_dir_all(&out)?;
-        }
+    if crate::net::offline::is_enabled() {
+        offline_archives(&jobs)?;
     }
 
     /* extraction can happen before we know the environment and so the
@@ -592,14 +596,39 @@ fn install_steps(
     moves it into place, same filesystem as the outputs */
     let staging = Path::new(".ember-staging").to_path_buf();
     let packages_started = Instant::now();
-    if !jobs.is_empty() {
-        // off a terminal the ✓ lines are the record, so they get their heading back
-        if !progress.is_live() {
-            section("Installing packages", &mut printed);
-        }
-        progress.phase("install", jobs.len() as u64);
+    let job_count = jobs.len();
+    if job_count > 0 {
+        progress.phase("download", job_count as u64);
     }
-    let locked = install_packages(manifest, jobs, &staging, &progress, cache);
+    let mut printed = false;
+    /* runs once every download is in staging, so a download that fails
+    leaves the packages folders of the last install as they were */
+    let clear = || -> Result<(), Error> {
+        /* before the wipe below, which would otherwise take a [config]-claimed
+        packages/shared with it and leave the guard inside with nothing to see.
+        it prints when it removes something, so it opens the output and the
+        sections below separate themselves from it */
+        printed = progress.suspend(|| remove_legacy_outs(manifest, previous.as_ref()));
+
+        /* installs rebuild from scratch each run. every env's output folder is
+        wiped even with nothing to install, so removing the last dependency
+        leaves no stale packages */
+        for environment in Environment::ALL {
+            let out = manifest.packages_out(environment);
+            if out.exists() {
+                fs::remove_dir_all(&out)?;
+            }
+        }
+        if job_count > 0 {
+            // off a terminal the ✓ lines are the record, so they get their heading back
+            if !progress.is_live() {
+                section("Installing packages", &mut printed);
+            }
+            progress.phase("install", job_count as u64);
+        }
+        Ok(())
+    };
+    let locked = install_packages(manifest, jobs, &staging, &progress, cache, clear);
     // staging cleanup used to be skipped on error, leaking the directory
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -871,6 +900,7 @@ fn fast_path(
 ) -> Result<FastPath, Error> {
     if args.locked
         || args.refresh
+        || args.update_all
         || !args.update.is_empty()
         || !manifest.workspace_members().is_empty()
     {
@@ -1126,7 +1156,10 @@ fn pin_hashes(jobs: &mut [Job], lock: Option<&Lockfile>, update: &[String]) -> R
             .iter()
             .any(|name| name.eq_ignore_ascii_case(&job.name))
         {
-            index::evict_archive(url);
+            // offline, the archive in the cache is the only one there is
+            if !crate::net::offline::is_enabled() {
+                index::evict_archive(url);
+            }
             continue;
         }
         let locked = lock
@@ -1407,24 +1440,113 @@ fn write_state_stamps(
     }
 }
 
+/** fails an offline install that must resolve, when an index of
+ember.toml has no copy on this computer. it names each one, so one run with
+a network gets them all. an index that only a dependency of a dependency
+uses is not known yet: the resolve stops at it, also before any file
+changes. */
+fn offline_indices(manifest: &Manifest) -> Result<(), Error> {
+    let mut missing = BTreeSet::new();
+    for (_, dependency) in manifest.all_dependencies() {
+        let manifest::Dependency::Registry { index, .. } = dependency else {
+            continue;
+        };
+        let url = manifest.index_url(index.as_deref())?;
+        if !index::index_in_cache(url) {
+            missing.insert(format!("the index {url}"));
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::OfflineMissing(missing.into_iter().collect()))
+    }
+}
+
+/** fails an offline install before it changes a file, when the caches do
+not hold each package. the error lists them all, where the downloads would
+stop at the first. an optional package installs when it can, so it is not
+in the list. */
+fn offline_archives(jobs: &[Job]) -> Result<(), Error> {
+    let missing: BTreeSet<String> = jobs
+        .iter()
+        .filter(|job| !job.optional && !index::source_in_cache(&job.source))
+        .map(|job| match &job.source {
+            index::DownloadSource::Git { url, rev, .. } => {
+                format!("{}, commit {rev} of {url}", job.name)
+            }
+            _ => format!("the archive of {}", package_id(&job.name, &job.version)),
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::OfflineMissing(missing.into_iter().collect()))
+    }
+}
+
+/** runs `work` on each of `jobs`, over at most [`WORKERS`] threads. `each`
+hears every result on this thread, in the order the jobs finish. when it
+returns false the pool takes no more jobs, and the ones in flight run out. */
+fn pooled<J: Send, R: Send>(
+    jobs: Vec<J>,
+    work: impl Fn(&J) -> R + Sync,
+    mut each: impl FnMut(J, R) -> bool,
+) {
+    let workers = jobs.len().min(WORKERS);
+    let queue = Mutex::new(VecDeque::from(jobs));
+    let stopped = AtomicBool::new(false);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let (queue, stopped, work) = (&queue, &stopped, &work);
+            scope.spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    let next = queue.lock().expect("job queue lock").pop_front();
+                    let Some(job) = next else { break };
+                    let result = work(&job);
+                    // a closed channel means the run is over, stop quietly
+                    if sender.send((job, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (job, result) in receiver {
+            if !each(job, result) {
+                stopped.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
 /** downloads, stages, and links every package, one row of `progress` per
 package in flight. the caller owns the display, so it comes down on an
 error too.
 
-registry packages fan out over a small thread pool. each worker owns one
-job at a time end to end, download, extract, rewrite, parse, under its
-own staging dir, so nothing is shared but the target `.ember` parents. a
-worker's row stays up until this thread writes the package's link file and
-fills its slot in `locked` by job
-index, so lockfile order is exactly the resolver's order no matter who
-finishes first. on the first error the pool stops taking work, in-flight
-requests run out against their timeouts, and that error is returned. */
+the work has two halves, and `clear` runs between them. the first half
+downloads and extracts each registry and git package under `staging_root`,
+and writes nothing else. `clear` then removes the packages folders of the
+last install. the second half moves each package into the store and links
+it. so a download that fails, or a run that stops in the downloads, leaves
+the last install whole.
+
+each half fans out over a small thread pool. a worker owns one job at a
+time under the job's own staging dir, so nothing is shared but the target
+`.ember` parents. this thread writes the package's link file and fills its
+slot in `locked` by job index, so lockfile order is exactly the resolver's
+order no matter who finishes first. on the first error the pool stops
+taking work, in-flight requests run out against their timeouts, and that
+error is returned. */
 fn install_packages(
     manifest: &Manifest,
     jobs: Vec<Job>,
     staging_root: &Path,
     progress: &Progress,
     cache: index::CachePolicy,
+    clear: impl FnOnce() -> Result<(), Error>,
 ) -> Result<Vec<LockedPackage>, Error> {
     let mut slots: Vec<Option<LockedPackage>> = Vec::new();
     slots.resize_with(jobs.len(), || None);
@@ -1432,144 +1554,144 @@ fn install_packages(
     /* workspace members and path folders link in place on this thread, no
     network and they touch source dirs the user owns. registry and git jobs
     queue for the pool */
-    let mut queue: VecDeque<(usize, Job)> = VecDeque::new();
-    for (slot, job) in jobs.into_iter().enumerate() {
-        if job.source.in_place().is_some() {
-            let task = progress.task(package_id(&job.name, &job.version));
-            slots[slot] = Some(link_in_place(manifest, job, progress, task)?);
-        } else {
-            queue.push_back((slot, job));
+    let (in_place, queue): (Vec<_>, Vec<_>) = jobs
+        .into_iter()
+        .enumerate()
+        .partition(|(_, job)| job.source.in_place().is_some());
+
+    if !queue.is_empty() {
+        if staging_root.exists() {
+            fs::remove_dir_all(staging_root)?;
         }
+        fs::create_dir_all(staging_root)?;
     }
-    if queue.is_empty() {
-        return Ok(slots.into_iter().flatten().collect());
+    /* context suffixed, the same package installing under two roots is two
+    concurrent jobs, and they must not tear down each other's staging */
+    let staging_of = |job: &Job| {
+        staging_root.join(format!(
+            "{}_{}",
+            job.name.replace('/', "_"),
+            job.context.dir_name()
+        ))
+    };
+
+    /* errors are kept by lowest job index, not arrival order. when an
+    outage fails several in-flight downloads at once, the error the user
+    sees shouldn't depend on thread timing */
+    let mut first_error: Option<(usize, Error)> = None;
+    /// keeps `error` when no lower slot has one, and stops the pool.
+    fn keep_first(first: &mut Option<(usize, Error)>, slot: usize, error: Error) -> bool {
+        if first.as_ref().is_none_or(|(lowest, _)| slot < *lowest) {
+            *first = Some((slot, error));
+        }
+        false
     }
-
-    if staging_root.exists() {
-        fs::remove_dir_all(staging_root)?;
-    }
-    fs::create_dir_all(staging_root)?;
-
-    let workers = queue.len().min(WORKERS);
-    let queue = Mutex::new(queue);
-    let failed = AtomicBool::new(false);
-    let (sender, receiver) = std::sync::mpsc::channel();
-
-    let mut first_error: Option<Error> = None;
     let mut skipped: HashSet<usize> = HashSet::new();
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let sender = sender.clone();
-            let queue = &queue;
-            let failed = &failed;
-            scope.spawn(move || {
-                loop {
-                    if failed.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let next = queue.lock().expect("job queue lock").pop_front();
-                    let Some((slot, job)) = next else { break };
-
-                    /* context suffixed, the same package installing under
-                    two roots is two concurrent jobs, and they must not
-                    tear down each other's staging */
-                    let staging = staging_root.join(format!(
-                        "{}_{}",
-                        job.name.replace('/', "_"),
-                        job.context.dir_name()
-                    ));
-                    /* the row lives until this thread's result is handled,
-                    the link file written on the main thread included */
-                    let task = progress.task(package_id(&job.name, &job.version));
-                    let result = install_one(manifest, &job, &staging, cache, progress, &task);
-                    // an optional package that fails is skipped, so the others go on
-                    if result.as_ref().is_err_and(|error| !skips(&job, error)) {
-                        failed.store(true, Ordering::Relaxed);
-                    }
-                    // a closed channel means the run is over, stop quietly
-                    if sender.send((slot, job, result, task)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-
-        /* errors are kept by lowest job index, not arrival order. when an
-        outage fails several in-flight downloads at once, the error the
-        user sees shouldn't depend on thread timing */
-        let mut error_slot = usize::MAX;
-        for (slot, job, result, task) in receiver {
-            match result {
-                Ok(extracted) => {
-                    if let Err(error) = write_registry_link(manifest, &job, &extracted, progress) {
-                        failed.store(true, Ordering::Relaxed);
-                        if slot < error_slot {
-                            error_slot = slot;
-                            first_error = Some(error);
-                        }
-                        continue;
-                    }
-                    // transitives have no link, show where they landed instead
-                    let shown = job
-                        .link
-                        .clone()
-                        .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
-                    let source = job
-                        .source
-                        .local_label()
-                        .map_or(String::new(), |label| format!(" ({label})"));
-                    // the folder under packages/, so a Luwu project shows `luwu/`
-                    task.done(&ui::success_line(&format!(
-                        "{}@{} → {}/{shown}{source}",
-                        job.name,
-                        job.version,
-                        manifest.packages_dir(job.context)
-                    )));
-                    /* a local publish can replace a version, so its hash means
-                    nothing. a git commit is its own integrity */
-                    let sha256 = (job.index_url != crate::registry::local::NAME
-                        && !matches!(job.source, index::DownloadSource::Git { .. }))
-                    .then_some(extracted.sha256);
-                    slots[slot] = Some(LockedPackage {
-                        name: job.name,
-                        version: job.version,
-                        environment: extracted.environment,
-                        context: (job.context != extracted.environment).then_some(job.context),
-                        link: job.link,
-                        index: job.index_url,
-                        redirects: job.redirects,
-                        patch: job.patch.map(|patch| patch.record),
-                        optional: job.optional,
-                        features: job.features,
-                        source: job.source,
-                        sha256,
-                    });
-                }
-                /* ponytail: only the failed package goes. an optional
-                package whose required dependency failed stays, with no
-                link to it. drop the package's optional subtree if that
-                matters */
-                Err(error) if skips(&job, &error) => {
-                    progress.warn(&format!(
-                        "skipped optional dependency {}: {error}",
-                        package_id(&job.name, &job.version)
-                    ));
-                    skipped.insert(slot);
-                }
-                Err(error) => {
-                    if slot < error_slot {
-                        error_slot = slot;
-                        first_error = Some(error);
-                    }
-                }
+    let mut fetched: Vec<(usize, Job, Fetched)> = Vec::new();
+    pooled(
+        queue,
+        |(_, job)| {
+            let task = progress.task(package_id(&job.name, &job.version));
+            let result = fetch_one(job, &staging_of(job), cache, &task);
+            task.step();
+            result
+        },
+        |(slot, job), result| match result {
+            Ok(package) => {
+                fetched.push((slot, job, package));
+                true
             }
-        }
-    });
-
-    if let Some(error) = first_error {
+            /* ponytail: only the failed package goes. an optional
+            package whose required dependency failed stays, with no
+            link to it. drop the package's optional subtree if that
+            matters */
+            Err(error) if skips(&job, &error) => {
+                progress.warn(&format!(
+                    "skipped optional dependency {}: {error}",
+                    package_id(&job.name, &job.version)
+                ));
+                skipped.insert(slot);
+                true
+            }
+            Err(error) => keep_first(&mut first_error, slot, error),
+        },
+    );
+    if let Some((_, error)) = first_error {
         return Err(error);
     }
+
+    clear()?;
+
+    for (slot, job) in in_place {
+        let task = progress.task(package_id(&job.name, &job.version));
+        slots[slot] = Some(link_in_place(manifest, job, progress, task)?);
+    }
+
+    pooled(
+        fetched,
+        |(_, job, _)| {
+            /* the row lives until this thread's result is handled, the
+            link file written on the main thread included */
+            let task = progress.task(package_id(&job.name, &job.version));
+            let placed = place_one(manifest, job, &staging_of(job), progress);
+            (placed, task)
+        },
+        |(slot, job, fetched), (placed, task)| {
+            let (entry, types) = match placed {
+                Ok(placed) => placed,
+                Err(error) => return keep_first(&mut first_error, slot, error),
+            };
+            let extracted = Extracted {
+                environment: fetched.environment,
+                sha256: fetched.sha256,
+                entry,
+                types,
+            };
+            if let Err(error) = write_registry_link(manifest, &job, &extracted, progress) {
+                return keep_first(&mut first_error, slot, error);
+            }
+            // transitives have no link, show where they landed instead
+            let shown = job
+                .link
+                .clone()
+                .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
+            let source = job
+                .source
+                .local_label()
+                .map_or(String::new(), |label| format!(" ({label})"));
+            // the folder under packages/, so a Luwu project shows `luwu/`
+            task.done(&ui::success_line(&format!(
+                "{}@{} → {}/{shown}{source}",
+                job.name,
+                job.version,
+                manifest.packages_dir(job.context)
+            )));
+            /* a local publish can replace a version, so its hash means
+            nothing. a git commit is its own integrity */
+            let sha256 = (job.index_url != crate::registry::local::NAME
+                && !matches!(job.source, index::DownloadSource::Git { .. }))
+            .then_some(extracted.sha256);
+            slots[slot] = Some(LockedPackage {
+                name: job.name,
+                version: job.version,
+                environment: extracted.environment,
+                context: (job.context != extracted.environment).then_some(job.context),
+                link: job.link,
+                index: job.index_url,
+                redirects: job.redirects,
+                patch: job.patch.map(|patch| patch.record),
+                optional: job.optional,
+                features: job.features,
+                source: job.source,
+                sha256,
+            });
+            true
+        },
+    );
+    if let Some((_, error)) = first_error {
+        return Err(error);
+    }
+
     /* every slot must have reported. a hole here is an embr bug, and
     silently writing a shorter lockfile would be far worse than failing */
     slots
@@ -1594,6 +1716,13 @@ fn skips(job: &Job, error: &Error) -> bool {
     job.optional && !matches!(error, Error::IntegrityMismatch { .. })
 }
 
+/// what the download of one package gave. the tree itself is in its staging dir.
+struct Fetched {
+    environment: Environment,
+    /// the SHA-256 of the archive it came from.
+    sha256: String,
+}
+
 /// what a worker learned about one extracted package, links come later.
 struct Extracted {
     environment: Environment,
@@ -1604,19 +1733,15 @@ struct Extracted {
     types: package::Exports,
 }
 
-/** one registry package, end to end except the link file. download or
-cache hit, extract under `staging`, detect the environment, move into the
-store, mirror project files, rewrite instance requires, and pull exported
-types. runs on a worker thread. */
-fn install_one(
-    manifest: &Manifest,
+/** the first half of one registry or git package: download or cache hit,
+extract under `staging`, patch, and detect the environment. it writes
+under `staging` only. runs on a worker thread. */
+fn fetch_one(
     job: &Job,
     staging: &Path,
     cache: index::CachePolicy,
-    progress: &Progress,
     task: &Task,
-) -> Result<Extracted, Error> {
-    let started = Instant::now();
+) -> Result<Fetched, Error> {
     if staging.exists() {
         with_retry(|| fs::remove_dir_all(staging))?;
     }
@@ -1653,7 +1778,23 @@ fn install_one(
         None => package::environment(staging)
             .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
     };
+    Ok(Fetched {
+        environment,
+        sha256,
+    })
+}
 
+/** the second half of one package, all but the link file: move the staged
+tree into the store, mirror project files, rewrite instance requires, and
+pull exported types. gives the entry point, None when it found none, and
+the types. runs on a worker thread. */
+fn place_one(
+    manifest: &Manifest,
+    job: &Job,
+    staging: &Path,
+    progress: &Progress,
+) -> Result<(Option<String>, package::Exports), Error> {
+    let started = Instant::now();
     /* real contents live under <out>/.ember/<scope>_<name>/ where <out> is
     the CONTEXT's folder, not the package's own environment. each root is
     self contained, so a server package's roblox deps stay under server.
@@ -1676,7 +1817,7 @@ fn install_one(
     let entry = entry_for(manifest, &job.name, &storage, &mut warner(progress));
     rojo::mirror_disk_layout(&storage, &mut warner(progress));
 
-    let (entry, types) = match entry {
+    let placed = match entry {
         Some(entry) => {
             /* packages from any index can talk roblox instance paths
             like require(script.Parent.X), wally stuff especially but ports
@@ -1702,12 +1843,7 @@ fn install_one(
 
     // suspended so a timings line can't tear the live display from a worker thread
     progress.suspend(|| ui::timing(&format!("package {}", job.name), started));
-    Ok(Extracted {
-        environment,
-        sha256,
-        entry,
-        types,
-    })
+    Ok(placed)
 }
 
 /// one retry after a beat, for transient Windows file-sharing refusals.
@@ -3720,6 +3856,7 @@ mod tests {
                 &base.join("staging"),
                 &progress,
                 index::CachePolicy::Bypass,
+                || Ok(()),
             )
         };
         assert!(install(job(true)).unwrap().is_empty());
@@ -3819,6 +3956,7 @@ mod tests {
             &base.join("staging"),
             &Progress::hidden(),
             index::CachePolicy::Use,
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(locked[0].version, "");

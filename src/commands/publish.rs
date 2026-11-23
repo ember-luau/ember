@@ -25,9 +25,26 @@ pub struct PublishArgs {
     /// Publish to the local registry in ~/.ember/local, with no login and no upload
     #[arg(long)]
     pub local: bool,
+    /// Print what was published as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
+    ui::json_or_text(args.json, || {
+        let mut published = Vec::new();
+        publish(&args, &mut published)?;
+        Ok(serde_json::json!({
+            "version": ui::JSON_VERSION,
+            "dry_run": args.dry_run,
+            "local": args.local,
+            "published": published,
+        }))
+    })
+}
+
+/// `published` gets one entry for each archive that went out, or that a dry run packed.
+fn publish(args: &PublishArgs, published: &mut Vec<serde_json::Value>) -> Result<(), Error> {
     let manifest = Manifest::load()?;
 
     /* read off the manifest before publish_project consumes it. `prepublish`
@@ -49,7 +66,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let oidc_token = oidc_token.as_deref();
 
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, &args, oidc_token)?;
+        publish_project(manifest, args, oidc_token, published)?;
         return lifecycle.after();
     }
 
@@ -60,7 +77,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, &args, oidc_token) {
+    if let Err(error) = publish_project(manifest, args, oidc_token, published) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -74,7 +91,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, &args, oidc_token)?;
+            publish_project(manifest, args, oidc_token, published)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -100,6 +117,7 @@ fn publish_project(
     mut manifest: Manifest,
     args: &PublishArgs,
     oidc_token: Option<&str>,
+    published: &mut Vec<serde_json::Value>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -145,13 +163,7 @@ fn publish_project(
         .iter()
         .any(|target| target.language.builder().is_some() && ids.contains(&target.id()));
     if building && manifest.all_dependencies().next().is_some() {
-        let args = super::install::InstallArgs {
-            locked: false,
-            offline: false,
-            refresh: false,
-            strict_peers: false,
-            update: Vec::new(),
-        };
+        let args = super::install::InstallArgs::default();
         super::install::install_project(&args, &manifest, false)?;
     }
     for target in manifest.targets() {
@@ -216,7 +228,7 @@ fn publish_project(
             &mut token,
         );
         match result {
-            Ok(()) => {}
+            Ok(record) => published.push(record),
             // one target fails the way a single publish always has
             Err(error) if count == 1 => return Err(error),
             Err(error) => {
@@ -267,7 +279,7 @@ fn select_targets(targets: &[Target], selected: &[String]) -> Result<Vec<String>
 /** packs and uploads the one target that `manifest` holds. `builds` has
 the outcome of each compiler that the selected targets need. `token` is
 the Ember token, read on the first upload and kept for the next. a trusted
-publish keeps none. */
+publish keeps none. gives the entry of the archive for `--json`. */
 fn publish_target(
     root: &Path,
     manifest: &Manifest,
@@ -276,7 +288,7 @@ fn publish_target(
     args: &PublishArgs,
     oidc_token: Option<&str>,
     token: &mut Option<String>,
-) -> Result<(), Error> {
+) -> Result<serde_json::Value, Error> {
     let target = manifest.target().expect("publish sets one target");
     let id = target.id();
     if let Some(program) = target.language.builder() {
@@ -326,6 +338,14 @@ fn publish_target(
         });
     }
 
+    let (name, version) = package.rsplit_once('@').unwrap_or((package, ""));
+    let record = serde_json::json!({
+        "name": name,
+        "version": version,
+        "target": id,
+        "bytes": archive.len(),
+    });
+
     let entry = entry_line(root, target.main.as_deref());
     if entry.is_none() {
         eprintln!(
@@ -361,13 +381,13 @@ fn publish_target(
                 println!("  {}", file.display());
             }
         }
-        return Ok(());
+        return Ok(record);
     }
 
     if args.local {
         local::publish(manifest, &archive)?;
         ui::print_success(&format!("Published {package} ({id}) to the local registry"));
-        return Ok(());
+        return Ok(record);
     }
 
     // EMBER_TOKEN or the stored login first
@@ -384,7 +404,7 @@ fn publish_target(
     {
         upload(None, Some(&trusted), &archive)?;
         ui::print_success(&format!("Published {package} ({id})"));
-        return Ok(());
+        return Ok(record);
     }
     // the browser login only when there is no token at all, and never in CI
     let stored = match stored {
@@ -416,7 +436,7 @@ fn publish_target(
     *token = Some(stored);
 
     ui::print_success(&format!("Published {package} ({id})"));
-    Ok(())
+    Ok(record)
 }
 
 /** rewrites workspace deps into registry ones, pesde's conversion exactly.
@@ -1230,6 +1250,7 @@ mod tests {
                     dry_run: true,
                     targets: Vec::new(),
                     local: false,
+                    json: false,
                 },
                 None,
                 &mut None,
@@ -1293,6 +1314,7 @@ mod tests {
                 dry_run: true,
                 targets: Vec::new(),
                 local: false,
+                json: false,
             },
             None,
             &mut None,

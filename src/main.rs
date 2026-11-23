@@ -42,6 +42,9 @@ fn main() {
     }
 
     let cli = parse_cli(embr::cli::expand_shortcut(args));
+    if cli.offline || ui::env_on("EMBER_OFFLINE") {
+        embr::net::offline::enable();
+    }
     let Some(command) = cli.command else {
         print_root_help();
         return;
@@ -309,6 +312,7 @@ mod tests {
 
         let Ok(Cli {
             command: Some(Commands::Run(run)),
+            ..
         }) = parse(&["embr", "build:prod", "--watch"])
         else {
             panic!("`embr build:prod` should run the build:prod script");

@@ -868,6 +868,28 @@ pub fn is_fresh(url: &str) -> bool {
     cache_dir(url).is_ok_and(|dir| stamp_fresh(&dir.join(REFRESH_STAMP), index_ttl()))
 }
 
+/** whether an offline run can read the index at `url`: the local
+registry, or a clone in the index cache. an index that is an API, such as
+Forest, has no copy on disk. */
+pub(crate) fn index_in_cache(url: &str) -> bool {
+    url == local::NAME || cache_dir(url).is_ok_and(|dir| dir.join(".git").exists())
+}
+
+/** whether an offline run can install from `source`: a folder, an archive
+of the local registry or of the archive cache, or a commit in the git
+cache. */
+pub(crate) fn source_in_cache(source: &DownloadSource) -> bool {
+    match source {
+        DownloadSource::Zip { url } | DownloadSource::TarGz { url } => {
+            local::read_archive(url).is_some_and(|archive| archive.is_ok())
+                || archive_entry(url)
+                    .is_some_and(|entry| entry.is_file() && meta_path(&entry).is_file())
+        }
+        DownloadSource::Git { url, rev, .. } => git::has_commit(url, rev),
+        DownloadSource::Workspace { .. } | DownloadSource::Path { .. } => true,
+    }
+}
+
 /// marks when an index cache last attempted a refresh, see `Refresh`.
 const REFRESH_STAMP: &str = ".ember-refreshed";
 

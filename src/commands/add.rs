@@ -13,7 +13,6 @@ use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
@@ -55,6 +54,9 @@ pub struct AddArgs {
     /// Add a whole scope without the question
     #[arg(long, short = 'y')]
     pub yes: bool,
+    /// Print what went into ember.toml as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// one argument of `embr add`.
@@ -141,6 +143,27 @@ impl Indices {
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
+    ui::json_or_text(args.json, || add(&args))
+}
+
+/// the `--json` document: each package that went into `table` of ember.toml.
+fn added(table: &str, planned: &[Planned]) -> serde_json::Value {
+    let added: Vec<serde_json::Value> = planned
+        .iter()
+        .map(|package| {
+            serde_json::json!({
+                "name": package.name,
+                "alias": package.alias,
+                "version": package.version.to_string(),
+                "requirement": package.entry.get("version").and_then(|value| value.as_str()),
+                "table": table,
+            })
+        })
+        .collect();
+    serde_json::json!({ "version": ui::JSON_VERSION, "added": added })
+}
+
+fn add(args: &AddArgs) -> Result<serde_json::Value, Error> {
     let manifest = Manifest::load()?;
 
     /* `preadd` runs before anything else, the index prompt included -- it is
@@ -187,12 +210,11 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
             || items
                 .iter()
                 .any(|item| item.key.is_none() && !is_local(&item.package)));
-    let prompted =
-        if asks && crate::project::settings::index_prompt() && std::io::stdin().is_terminal() {
-            prompt_index_key(&manifest)?
-        } else {
-            None
-        };
+    let prompted = if asks && crate::project::settings::index_prompt() && ui::can_prompt() {
+        prompt_index_key(&manifest)?
+    } else {
+        None
+    };
     let index_key = |package: &str, has_key: bool| -> Result<Option<String>, Error> {
         Ok(match &args.index {
             Some(key) => Some(key.clone()),
@@ -266,7 +288,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
             println!("  {name}");
         }
         if !args.yes {
-            if !std::io::stdin().is_terminal() {
+            if !ui::can_prompt() {
                 return Err(Error::AddNeedsYes(scope.clone()));
             }
             inquire::set_global_render_config(crate::ui::render_config());
@@ -280,7 +302,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
                 .prompt()?
             {
                 println!("Nothing added");
-                return Ok(());
+                return Ok(added(table, &[]));
             }
         }
         for name in new {
@@ -437,7 +459,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         return Err(Error::AddFailed(failures));
     }
     if planned.is_empty() {
-        return Ok(());
+        return Ok(added(table, &[]));
     }
 
     let dependencies = document.table_or_create(table)?;
@@ -498,7 +520,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     }
 
     // `postadd` sees the written manifest, so it can go straight to installing
-    lifecycle.after()
+    lifecycle.after()?;
+    Ok(added(table, &planned))
 }
 
 /// reads one argument. `scope/` and `scope/*` name a whole scope. a

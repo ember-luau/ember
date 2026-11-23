@@ -13,6 +13,10 @@ pub struct Cli {
     a usage error: it is what someone types when they want to see the tool. */
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Download nothing: work from the caches on this computer, and fail when something is not in them. EMBER_OFFLINE=1 does the same
+    #[arg(long, global = true)]
+    pub offline: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -109,6 +113,12 @@ pub enum Commands {
     #[command(visible_alias = "i")]
     Install(commands::install::InstallArgs),
 
+    /// Move packages to the newest versions that ember.toml takes, or show that change with --dry-run
+    Update(commands::update::UpdateArgs),
+
+    /// Check that ember.toml is valid and that ember.lock is its lock; installs nothing
+    Check(commands::check::CheckArgs),
+
     /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
 
@@ -178,8 +188,38 @@ pub enum Outcome {
     Exit(i32),
 }
 
+/** what `command` gets from the network when it can do nothing without
+it, so an offline run stops before the command starts. None for a command
+that works from the caches: its own miss says what is not there. */
+fn needs_network(command: &Commands) -> Option<&'static str> {
+    use commands::{auth::AuthCommand, self_cmd::SelfCommand};
+    match command {
+        Commands::Search(_) => Some("`embr search` reads the registry"),
+        Commands::Publish(args) if !args.local && !args.dry_run => {
+            Some("`embr publish` uploads to the registry; --local and --dry-run work offline")
+        }
+        Commands::Yank(_) => Some("`embr yank` writes to the registry"),
+        Commands::Deprecate(_) => Some("`embr deprecate` writes to the registry"),
+        Commands::Notices(args) if args.command.is_some() => {
+            Some("`embr notices add` and `remove` write to the registry")
+        }
+        Commands::Auth(args) if matches!(args.command, AuthCommand::Login { .. }) => {
+            Some("`embr auth login` reaches the registry")
+        }
+        Commands::SelfManage(SelfCommand::Update { .. }) => {
+            Some("`embr self update` downloads a release from GitHub")
+        }
+        _ => None,
+    }
+}
+
 /// runs one parsed command.
 pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
+    if crate::net::offline::is_enabled()
+        && let Some(needs) = needs_network(&command)
+    {
+        return Err(Error::Offline(needs.to_string()));
+    }
     let done = |result: Result<(), Error>| result.map(|()| Outcome::Done);
     /* a --json run prints one document on stdout, so no "Done in" line
     may follow it */
@@ -193,13 +233,15 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),
-        Commands::Add(args) => done(commands::add::run(args)),
-        Commands::Remove(args) => done(commands::remove::run(args)),
+        Commands::Add(args) => shown(args.json, commands::add::run(args)),
+        Commands::Remove(args) => shown(args.json, commands::remove::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
         Commands::Migrate(args) => done(commands::migrate::run(args)),
-        Commands::Install(args) => done(commands::install::run(args)),
+        Commands::Install(args) => shown(args.json, commands::install::run(args)),
+        Commands::Update(args) => shown(args.json, commands::update::run(args)),
+        Commands::Check(args) => commands::check::run(args),
         Commands::Patch(args) => done(commands::patch::run(args)),
-        Commands::Publish(args) => done(commands::publish::run(args)),
+        Commands::Publish(args) => shown(args.json, commands::publish::run(args)),
         Commands::Outdated(args) => shown(args.json, commands::outdated::run(args)),
         Commands::Tree(args) => shown(args.json, commands::tree::tree(args)),
         Commands::Why(args) => shown(args.json, commands::tree::why(args)),

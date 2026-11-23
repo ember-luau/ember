@@ -1,6 +1,6 @@
-/*! `--offline`: the run downloads nothing. one switch for the process,
-which the HTTP agents, the git fetches and the npm install each ask before
-they reach for the network. it is off until [`enable`] and never goes off
+/*! `--offline`, or `EMBER_OFFLINE=1`: the run downloads nothing. one switch
+for the process, which the HTTP agents, the git fetches and the npm install
+each ask before they reach for the network. it is off until [`enable`] and never goes off
 again, since a run that was told to stay offline has no step that may go
 online. */
 
