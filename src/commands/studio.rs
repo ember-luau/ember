@@ -216,6 +216,12 @@ fn init() -> Result<(), Error> {
     if occupied {
         return Err(Error::StudioExists);
     }
+    if !ui::can_prompt() {
+        return Err(Error::NoTerminal(
+            "`embr studio init` asks how Studio opens the project",
+            "write the [studio] table in ember.toml by hand",
+        ));
+    }
 
     inquire::set_global_render_config(ui::render_config());
 

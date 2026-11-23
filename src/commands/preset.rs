@@ -17,7 +17,6 @@ use crate::sys::paths;
 use crate::ui;
 use clap::Subcommand;
 use std::fs;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
 
@@ -567,7 +566,7 @@ fn apply(spec: &str, force: bool, yes: bool, dry_run: bool) -> Result<(), Error>
         return Ok(());
     }
     if !yes {
-        if !std::io::stdin().is_terminal() {
+        if !ui::can_prompt() {
             return Err(Error::Preset(
                 "apply asks before it writes ember.toml; pass --yes to skip the question"
                     .to_string(),

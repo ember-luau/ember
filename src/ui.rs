@@ -462,6 +462,82 @@ pub fn print_json(document: &serde_json::Value) -> Result<(), Error> {
     }
 }
 
+/** runs `work` with stdout pointed at stderr, then puts stdout back. a
+`--json` run prints one document on stdout, and the work before it has
+lines of its own: the progress, the summary, and what a hook's commands
+print. the swap is at the file descriptor, so a child process follows it. */
+#[cfg(unix)]
+pub fn stdout_to_stderr<T>(work: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    // SAFETY: `dup` and `dup2` take file descriptors and touch no memory
+    let saved = unsafe { libc::dup(1) };
+    if saved >= 0 {
+        unsafe { libc::dup2(2, 1) };
+    }
+    let result = work();
+    let _ = std::io::stdout().flush();
+    if saved >= 0 {
+        // SAFETY: as above, and `saved` is a descriptor that this function opened
+        unsafe {
+            libc::dup2(saved, 1);
+            libc::close(saved);
+        }
+    }
+    result
+}
+
+/// see the Unix copy. Windows reads the standard handle at each write, so a swap of the handle does it.
+#[cfg(windows)]
+pub fn stdout_to_stderr<T>(work: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    let _ = std::io::stdout().flush();
+    // SAFETY: both calls take a handle id and a handle, and touch no memory
+    let saved = unsafe {
+        let saved = GetStdHandle(STD_OUTPUT_HANDLE);
+        SetStdHandle(STD_OUTPUT_HANDLE, GetStdHandle(STD_ERROR_HANDLE));
+        saved
+    };
+    let result = work();
+    let _ = std::io::stdout().flush();
+    // SAFETY: as above
+    unsafe { SetStdHandle(STD_OUTPUT_HANDLE, saved) };
+    result
+}
+
+/** [`stdout_to_stderr`] around `work` for a `--json` run, and then the
+document that `work` returns goes to stdout. a run without `--json` prints
+as it always does and drops the document. */
+pub fn json_or_text(
+    json: bool,
+    work: impl FnOnce() -> Result<serde_json::Value, Error>,
+) -> Result<(), Error> {
+    if !json {
+        return work().map(drop);
+    }
+    print_json(&stdout_to_stderr(work)?)
+}
+
+/// whether the environment variable `name` is on: set, and not empty, `0` or `false`.
+pub fn env_on(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value_on(&value))
+}
+
+fn value_on(value: &str) -> bool {
+    !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+}
+
+/** whether embr may ask a question. no terminal on stdin can answer one,
+and a CI job sets `CI` and has nobody to answer, also when it gives the
+job a terminal. */
+pub fn can_prompt() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && !env_on("CI")
+}
+
 /// dimmed "Done in 142ms" line.
 pub fn print_elapsed(duration: Duration) {
     println!(
@@ -502,8 +578,18 @@ mod tests {
 
     use super::{
         ACCENT, Painted, RESET, Stylize, accent, color_for, fg, format_duration, printable,
-        strip_controls, visible_width,
+        strip_controls, value_on, visible_width,
     };
+
+    #[test]
+    fn an_environment_switch_is_off_for_empty_zero_and_false() {
+        for off in ["", "0", "false", "FALSE"] {
+            assert!(!value_on(off), "{off:?}");
+        }
+        for on in ["1", "true", "yes", "woodpecker"] {
+            assert!(value_on(on), "{on:?}");
+        }
+    }
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {

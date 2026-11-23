@@ -26,7 +26,6 @@ use clap::Subcommand;
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Subcommand, Debug)]
@@ -423,7 +422,7 @@ fn to_github(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result
         println!("  {}", tar_path(file));
     }
     if !yes {
-        if !std::io::stdin().is_terminal() {
+        if !ui::can_prompt() {
             return Err(Error::Template(
                 "github asks before it creates a repository; pass --yes to skip the question"
                     .to_string(),

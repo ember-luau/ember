@@ -669,6 +669,29 @@ pub enum Error {
     #[error("{0}; --offline lets embr download nothing")]
     Offline(String),
 
+    /** `--offline`, and the install needs these downloads. the list is
+    whole, and the install has changed no file. */
+    #[error(
+        "embr is offline (--offline), and {} not in a cache:{}\nembr changed no file. Run the command again with a network connection",
+        if .0.len() == 1 { "this is" } else { "these are" },
+        .0.iter().map(|item| format!("\n  {item}")).collect::<String>()
+    )]
+    OfflineMissing(Vec<String>),
+
+    /// `embr update` got a name that no package of ember.lock has.
+    #[error(
+        "ember.lock has no package '{0}'; name a package as scope/name or by its alias in ember.toml, or run `embr update` with no name"
+    )]
+    UpdateUnknown(String),
+
+    /// `embr check`: ember.lock is not the lock of this ember.toml.
+    #[error("{0}")]
+    LockMismatch(String),
+
+    /// a command must ask a question, and stdin is no terminal or `CI` is set.
+    #[error("{0}, and no terminal can answer; {1}")]
+    NoTerminal(&'static str, &'static str),
+
     /** a downloaded archive does not have the SHA-256 that its index entry
     or ember.lock records. embr did not extract or cache it. */
     #[error(
@@ -864,14 +887,54 @@ pub enum Error {
 }
 
 impl Error {
-    /** The status embr should exit with. 1 for anything embr itself decided,
-    but a hook failure forwards the child's own code, so a `preinstall` that
-    exits 3 makes `embr install` exit 3 and CI reads the real reason rather
-    than a flattened "something went wrong". */
+    /** The status embr should exit with. 1 for a failure embr itself
+    decided. 3 for an ember.lock that is not the lock of this ember.toml,
+    and 4 for a download that `--offline` or a missing network stopped, so a
+    CI job can tell those from a broken project. a hook failure forwards the
+    child's own code, so a `preinstall` that exits 3 makes `embr install`
+    exit 3 and CI reads the real reason rather than a flattened "something
+    went wrong". 2 is a usage error, which clap reports before this. */
     pub fn exit_code(&self) -> i32 {
+        use crate::net::http::error::HttpError;
         match self {
             Error::HookFailed { code, .. } if *code != 0 => *code,
+            Error::LockfileDrift | Error::LockMismatch(_) => 3,
+            Error::Offline(_)
+            | Error::OfflineMissing(_)
+            | Error::Http(HttpError::Offline { .. }) => 4,
+            // no name lookup and no connection: the request never left this computer
+            Error::Http(HttpError::Request(error))
+                if matches!(
+                    error.kind(),
+                    ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed
+                ) =>
+            {
+                4
+            }
+            // git says this when the clone or the pull of an index finds no network
+            Error::IndexFetch { reason, .. } if reason.contains("Could not resolve host") => 4,
             _ => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn exit_codes_tell_a_lock_and_the_network_from_a_plain_failure() {
+        let hook = |code| Error::HookFailed {
+            hook: "preinstall".to_string(),
+            code,
+        };
+        assert_eq!(Error::LockfileMissing.exit_code(), 1);
+        assert_eq!(Error::LockfileDrift.exit_code(), 3);
+        assert_eq!(Error::LockMismatch(String::new()).exit_code(), 3);
+        assert_eq!(Error::Offline(String::new()).exit_code(), 4);
+        assert_eq!(Error::OfflineMissing(Vec::new()).exit_code(), 4);
+        // a hook keeps its own code, also one that embr uses
+        assert_eq!(hook(3).exit_code(), 3);
+        assert_eq!(hook(7).exit_code(), 7);
     }
 }

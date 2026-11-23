@@ -22,7 +22,11 @@ pub enum SelfCommand {
         prerelease: bool,
     },
     /// Remove embr from your system
-    Uninstall,
+    Uninstall {
+        /// Remove embr without the question
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Set up ember.toml IntelliSense in VS Code
     Code,
     /// Show or set the index a dependency uses when ember.toml names none
@@ -50,7 +54,7 @@ pub fn run(command: SelfCommand) -> Result<(), Error> {
     match command {
         SelfCommand::Install => install(),
         SelfCommand::Update { prerelease } => update(prerelease),
-        SelfCommand::Uninstall => uninstall(),
+        SelfCommand::Uninstall { yes } => uninstall(yes),
         SelfCommand::Code => code(),
         SelfCommand::DefaultIndex { index, reset } => default_index(index, reset),
         SelfCommand::IndexPrompt { state } => index_prompt(state),
@@ -351,20 +355,28 @@ fn unpack_update(asset_name: &str, bytes: &[u8], staging: &Path) -> Result<PathB
     Ok(binary)
 }
 
-fn uninstall() -> Result<(), Error> {
+fn uninstall(yes: bool) -> Result<(), Error> {
     let dir = paths::ember_dir()?;
     if !dir.exists() {
         return Err(Error::NotInstalled(dir));
     }
 
-    inquire::set_global_render_config(crate::ui::render_config());
-    let confirmed = inquire::Confirm::new(&format!("Remove {}?", dir.display()))
-        .with_help_message("Deletes embr and removes it from your PATH")
-        .with_default(false)
-        .prompt()?;
-    if !confirmed {
-        println!("Aborted");
-        return Ok(());
+    if !yes {
+        if !crate::ui::can_prompt() {
+            return Err(Error::NoTerminal(
+                "`embr self uninstall` asks before it removes embr",
+                "pass --yes to remove it",
+            ));
+        }
+        inquire::set_global_render_config(crate::ui::render_config());
+        let confirmed = inquire::Confirm::new(&format!("Remove {}?", dir.display()))
+            .with_help_message("Deletes embr and removes it from your PATH")
+            .with_default(false)
+            .prompt()?;
+        if !confirmed {
+            println!("Aborted");
+            return Ok(());
+        }
     }
 
     remove_from_path(&dir.join("bin"))?;

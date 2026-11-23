@@ -7,7 +7,6 @@ use crate::project::manifest::{
 use crate::sys::git;
 use clap::Args;
 use inquire::{Select, Text, validator::Validation};
-use std::io::IsTerminal;
 use std::path::Path;
 
 #[derive(Args, Debug, Default)]
@@ -241,7 +240,7 @@ pub fn run(mut args: InitArgs) -> Result<(), Error> {
 fn create(args: InitArgs, manifest_path: &Path) -> Result<(), Error> {
     /* a flag answers its question. without one, a terminal gets the
     question, and anything else (CI, a script, --yes) gets the default */
-    let interactive = !args.yes && std::io::stdin().is_terminal();
+    let interactive = !args.yes && crate::ui::can_prompt();
     if interactive {
         println!("{INTRO}");
         inquire::set_global_render_config(crate::ui::render_config());

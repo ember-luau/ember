@@ -100,6 +100,12 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
 
     let name = match name {
         Some(name) => name,
+        None if !ui::can_prompt() => {
+            return Err(Error::NoTerminal(
+                "`embr index add` asks for the index name",
+                "pass the name and the URL as arguments",
+            ));
+        }
         None => inquire::Text::new("Index name:")
             .with_autocomplete(Suggestions(
                 KNOWN_INDICES
@@ -122,6 +128,12 @@ fn add(name: Option<String>, url: Option<String>) -> Result<(), Error> {
         // well-known name already gives us the url, only ask otherwise
         None => match known_url(&name) {
             Some(url) => url.to_string(),
+            None if !ui::can_prompt() => {
+                return Err(Error::NoTerminal(
+                    "`embr index add` asks for the URL of an index that it does not know",
+                    "pass the URL as the second argument",
+                ));
+            }
             None => inquire::Text::new("Index URL:")
                 .with_autocomplete(Suggestions(
                     KNOWN_INDICES
@@ -171,6 +183,12 @@ fn remove(name: Option<String>) -> Result<(), Error> {
             if keys.is_empty() {
                 println!("No indices defined in ember.toml");
                 return Ok(());
+            }
+            if !ui::can_prompt() {
+                return Err(Error::NoTerminal(
+                    "`embr index remove` asks which index to remove",
+                    "pass its name as an argument",
+                ));
             }
             inquire::set_global_render_config(ui::render_config());
             inquire::Select::new("Remove which index?", keys).prompt()?
