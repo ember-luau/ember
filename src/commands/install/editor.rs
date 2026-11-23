@@ -518,10 +518,12 @@ fn sync_definitions(
         ) {
             continue;
         }
+        let folder =
+            crate::sys::paths::store_folder(&package.name).map_err(|error| error.to_string())?;
         let store = manifest
             .packages_out(package.context())
             .join(STORE_DIR)
-            .join(package.name.replace('/', "_"));
+            .join(folder);
         let files = definition_files(&dir.join(&store));
         let several = files.len() > 1;
         for file in files {
@@ -686,6 +688,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: DownloadSource::Zip {
                 url: format!("https://example.com/{name}"),
             },

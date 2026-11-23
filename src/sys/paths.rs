@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 
 /// ~/.ember, the root of everything embr installs or caches.
 pub fn ember_dir() -> Result<PathBuf, Error> {
+    /* a unit test never reads or writes the ~/.ember of the person who
+    runs it: no login, no cache, no index clone. each test thread shares
+    this one folder, and no test changes HOME to get it */
+    #[cfg(test)]
+    let home = std::env::temp_dir().join("embr-unit-test-home");
+    #[cfg(not(test))]
     let home = dirs::home_dir().ok_or(Error::NoHomeDir)?;
     Ok(home.join(".ember"))
 }
@@ -106,15 +112,8 @@ follows from the pid can be made first by somebody else, who then owns the
 folder that embr writes a binary or a git folder into. so the name is
 random, the folder must not exist yet, and on unix its mode is 0700. */
 pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, Error> {
-    use ring::rand::SecureRandom;
-
-    let random = ring::rand::SystemRandom::new();
     for _ in 0..8 {
-        let mut bytes = [0u8; 8];
-        random
-            .fill(&mut bytes)
-            .map_err(|_| std::io::Error::other("the system gave no random bytes"))?;
-        let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let name = random_hex()?;
         let dir = std::env::temp_dir().join(format!("{prefix}-{name}"));
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
@@ -131,6 +130,22 @@ pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, Error> {
         "could not make a new folder in the temp folder",
     )
     .into())
+}
+
+/// 16 random hex characters, for the name of a file that nobody else can name first.
+pub fn random_hex() -> Result<String, Error> {
+    use ring::rand::SecureRandom;
+
+    let mut bytes = [0u8; 8];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| std::io::Error::other("the system gave no random bytes"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// whether `path` itself is a symbolic link. a missing path is none.
+pub fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /** whether `version` is safe as the name of a storage folder: the version
@@ -160,9 +175,74 @@ pub fn is_plain_file_name(name: &str) -> bool {
         && !Path::new(name).is_absolute()
 }
 
+/** the folder of the package `name` in a package store: `scope/name` is
+`scope_name`. a git or path package says its own name, and ember.lock is
+text that a pull request can change, so the result must be one file name on
+every system. Windows reads `\` as a separator and `:` as a drive or a
+stream, drops the dots and spaces that end a name, and keeps the device
+names, `con` and `nul.txt` among them, for itself. a name that fails is
+refused before embr deletes or renames the folder it would name. */
+pub fn store_folder(name: &str) -> Result<String, Error> {
+    let folder = name.replace('/', "_");
+    let device = {
+        let stem = folder.split('.').next().unwrap_or("").trim_end();
+        let stem = stem.to_ascii_lowercase();
+        matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+            || (stem.len() == 4
+                && (stem.starts_with("com") || stem.starts_with("lpt"))
+                && stem.ends_with(|last: char| last.is_ascii_digit() && last != '0'))
+    };
+    let plain = is_plain_file_name(&folder)
+        && !folder.ends_with(['.', ' '])
+        && !folder
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        && !device;
+    if plain {
+        Ok(folder)
+    } else {
+        Err(Error::PackageFolderInvalid(name.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_name_is_one_folder_name_on_every_system() {
+        assert_eq!(store_folder("acme/lib").unwrap(), "acme_lib");
+        assert_eq!(store_folder("MyGame").unwrap(), "MyGame");
+        assert_eq!(
+            store_folder("rocks/lua-cjson_2").unwrap(),
+            "rocks_lua-cjson_2"
+        );
+        assert_eq!(store_folder("acme/con").unwrap(), "acme_con");
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a\\..\\..\\..\\..\\.git\\hooks",
+            "..\\x",
+            "C:x",
+            "C:\\Windows",
+            "a:stream",
+            "a\nb",
+            "a\u{1b}[2K",
+            "a.",
+            ".. ",
+            "a ",
+            "con",
+            "NUL",
+            "nul.txt",
+            "com1",
+            "LPT9.luau",
+            "a*b",
+            "a?b",
+        ] {
+            assert!(store_folder(bad).is_err(), "{bad:?} names a folder");
+        }
+    }
 
     #[test]
     fn everything_lives_under_dot_ember() {

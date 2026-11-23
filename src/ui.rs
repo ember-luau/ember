@@ -215,6 +215,17 @@ pub fn printable(text: &str) -> String {
     out
 }
 
+/** `text` as one line of output with no control character. an index entry
+and the manifest of a package are text that their author wrote. an escape
+sequence there rewrites the lines around it, and a line break starts a
+line that reads as a line from embr, such as `Provenance` in `embr info`. */
+pub fn one_line(text: &str) -> String {
+    strip_controls(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /** `text` with no escape sequence and no control character but the line
 break, for registry text that embr prints as its own output, such as a
 package notice. [`printable`] shows a control as an escape. this drops the
@@ -313,17 +324,24 @@ is that output arriving next has an attributable source -- doubly so for a
 hook, which nobody typed. `package` is "scope/name@version", or None in a
 project that declares no [package] and so has no such name. */
 pub fn print_script_notice(package: Option<&str>, name: &str, commands: &[String]) {
+    /* a control character shows as an escape. a carriage return or a
+    cursor move in the command would hide what the script runs, and the
+    banner is how a person sees a hook that nobody typed */
+    let name = printable(name);
     match package {
-        Some(package) => println!("{}", format!("> {package} {name}").dark_grey()),
+        Some(package) => println!("{}", format!("> {} {name}", printable(package)).dark_grey()),
         None => println!("{}", format!("> {name}").dark_grey()),
     }
     match commands {
-        [single] => println!("{}", format!("> {single}").dark_grey()),
+        [single] => println!("{}", format!("> {}", printable(single)).dark_grey()),
         /* several, so the banner doubles as the legend for the [n] tags
         their output arrives under */
         many => {
             for (index, command) in many.iter().enumerate() {
-                println!("{}", format!("> [{}] {command}", index + 1).dark_grey());
+                println!(
+                    "{}",
+                    format!("> [{}] {}", index + 1, printable(command)).dark_grey()
+                );
             }
         }
     }
@@ -360,6 +378,22 @@ pub fn print_tagged(tag: usize, line: &str, is_stderr: bool, separate: bool) {
     }
 }
 
+/** one line of output from a workspace member, behind the name of the
+member, on the stream it came from. see [`print_tagged`] for the reset. */
+pub fn print_member_line(member: &str, line: &str, is_stderr: bool) {
+    let reset = if line.contains('\u{1b}') {
+        "\u{1b}[0m"
+    } else {
+        ""
+    };
+    let tag = format!("[{member}]").with(accent());
+    if is_stderr {
+        eprintln!("{tag} {line}{reset}");
+    } else {
+        println!("{tag} {line}{reset}");
+    }
+}
+
 /// a concurrent script's command failing, reported under its own `[n]` tag.
 pub fn print_tagged_exit(tag: usize, code: i32, separate: bool) {
     let tag = format!("[{tag}]").with(accent());
@@ -382,12 +416,16 @@ what you type, so it takes the accent; the commands are reference material
 and stay out of the way. A parallel script shows every command under the
 `[n]` tag its output will carry. */
 pub fn print_script_entry(name: &str, commands: &[String]) {
-    println!("  {}", name.with(accent()));
+    // as in `print_script_notice`: the list must show what each script runs
+    println!("  {}", printable(name).with(accent()));
     match commands {
-        [single] => println!("    {}", single.as_str().dark_grey()),
+        [single] => println!("    {}", printable(single).dark_grey()),
         many => {
             for (index, command) in many.iter().enumerate() {
-                println!("    {}", format!("[{}] {command}", index + 1).dark_grey());
+                println!(
+                    "    {}",
+                    format!("[{}] {}", index + 1, printable(command)).dark_grey()
+                );
             }
         }
     }
@@ -462,6 +500,82 @@ pub fn print_json(document: &serde_json::Value) -> Result<(), Error> {
     }
 }
 
+/** runs `work` with stdout pointed at stderr, then puts stdout back. a
+`--json` run prints one document on stdout, and the work before it has
+lines of its own: the progress, the summary, and what a hook's commands
+print. the swap is at the file descriptor, so a child process follows it. */
+#[cfg(unix)]
+pub fn stdout_to_stderr<T>(work: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    // SAFETY: `dup` and `dup2` take file descriptors and touch no memory
+    let saved = unsafe { libc::dup(1) };
+    if saved >= 0 {
+        unsafe { libc::dup2(2, 1) };
+    }
+    let result = work();
+    let _ = std::io::stdout().flush();
+    if saved >= 0 {
+        // SAFETY: as above, and `saved` is a descriptor that this function opened
+        unsafe {
+            libc::dup2(saved, 1);
+            libc::close(saved);
+        }
+    }
+    result
+}
+
+/// see the Unix copy. Windows reads the standard handle at each write, so a swap of the handle does it.
+#[cfg(windows)]
+pub fn stdout_to_stderr<T>(work: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    let _ = std::io::stdout().flush();
+    // SAFETY: both calls take a handle id and a handle, and touch no memory
+    let saved = unsafe {
+        let saved = GetStdHandle(STD_OUTPUT_HANDLE);
+        SetStdHandle(STD_OUTPUT_HANDLE, GetStdHandle(STD_ERROR_HANDLE));
+        saved
+    };
+    let result = work();
+    let _ = std::io::stdout().flush();
+    // SAFETY: as above
+    unsafe { SetStdHandle(STD_OUTPUT_HANDLE, saved) };
+    result
+}
+
+/** [`stdout_to_stderr`] around `work` for a `--json` run, and then the
+document that `work` returns goes to stdout. a run without `--json` prints
+as it always does and drops the document. */
+pub fn json_or_text(
+    json: bool,
+    work: impl FnOnce() -> Result<serde_json::Value, Error>,
+) -> Result<(), Error> {
+    if !json {
+        return work().map(drop);
+    }
+    print_json(&stdout_to_stderr(work)?)
+}
+
+/// whether the environment variable `name` is on: set, and not empty, `0` or `false`.
+pub fn env_on(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value_on(&value))
+}
+
+fn value_on(value: &str) -> bool {
+    !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+}
+
+/** whether embr may ask a question. no terminal on stdin can answer one,
+and a CI job sets `CI` and has nobody to answer, also when it gives the
+job a terminal. */
+pub fn can_prompt() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && !env_on("CI")
+}
+
 /// dimmed "Done in 142ms" line.
 pub fn print_elapsed(duration: Duration) {
     println!(
@@ -502,8 +616,18 @@ mod tests {
 
     use super::{
         ACCENT, Painted, RESET, Stylize, accent, color_for, fg, format_duration, printable,
-        strip_controls, visible_width,
+        strip_controls, value_on, visible_width,
     };
+
+    #[test]
+    fn an_environment_switch_is_off_for_empty_zero_and_false() {
+        for off in ["", "0", "false", "FALSE"] {
+            assert!(!value_on(off), "{off:?}");
+        }
+        for on in ["1", "true", "yes", "woodpecker"] {
+            assert!(value_on(on), "{on:?}");
+        }
+    }
 
     #[test]
     fn sub_millisecond_floors_to_less_than_one() {

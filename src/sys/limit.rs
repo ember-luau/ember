@@ -35,6 +35,60 @@ pub fn check_zip<R: Read + std::io::Seek>(
     check_declared(declared, cap)
 }
 
+/** the error when `tar` holds a GNU sparse entry, or when the sizes that
+its entries declare add up to more than `cap`. a sparse entry stores a few
+bytes and declares the size of the file that the unpack writes, so 230
+bytes of gzip unpacked to 7 GiB under the cap of [`Capped`], which counts
+the stored bytes. no package and no tool needs one. */
+pub fn check_tar<R: Read>(tar: R, cap: u64) -> Result<()> {
+    let mut declared = 0u128;
+    for entry in tar::Archive::new(tar).entries()? {
+        let entry = entry?;
+        let header = entry.header();
+        if header.entry_type().is_gnu_sparse() {
+            return Err(Error::other(format!(
+                "the archive holds the sparse file {}, which embr does not unpack",
+                String::from_utf8_lossy(&entry.path_bytes()).escape_debug()
+            )));
+        }
+        declared += u128::from(header.size()?);
+        check_declared(declared, cap)?;
+    }
+    Ok(())
+}
+
+/** takes from `path` every mode bit outside 0755: setuid, setgid, sticky
+and the write bits of group and others. an archive sets the mode of each
+file it holds, and a file that everyone may write is a file that another
+user of the computer can change before it runs. */
+pub fn mask_mode(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let meta = std::fs::symlink_metadata(path)?;
+        let mode = meta.permissions().mode();
+        // a link has no mode of its own, and a change would go to its target
+        if !meta.file_type().is_symlink() && mode & 0o7777 & !0o755 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o755))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// [`mask_mode`] for `dir` and everything under it. links are left as they are.
+pub fn mask_modes(dir: &std::path::Path) -> Result<()> {
+    mask_mode(dir)?;
+    if std::fs::symlink_metadata(dir)?.is_dir() {
+        for entry in std::fs::read_dir(dir)? {
+            mask_modes(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn check_declared(declared: u128, cap: u64) -> Result<()> {
     if declared > u128::from(cap) {
         return Err(too_large(cap));
@@ -138,6 +192,76 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(packed)).unwrap();
         assert!(check_zip(&mut archive, 1 << 20).is_ok());
         assert!(check_zip(&mut archive, (1 << 20) - 1).is_err());
+    }
+
+    /// a tar of the two regular files `small` and one more header, `extra`.
+    fn tar_with(extra: impl FnOnce(&mut tar::Builder<Vec<u8>>)) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "a.luau", &b"abcd"[..])
+            .unwrap();
+        extra(&mut builder);
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_sparse_tar_entry_is_refused_and_declared_sizes_count() {
+        let plain = tar_with(|_| {});
+        assert!(check_tar(plain.as_slice(), 4).is_ok());
+        let error = check_tar(plain.as_slice(), 3).unwrap_err();
+        assert!(error.to_string().contains(TOO_LARGE), "{error}");
+
+        // 512 stored bytes that declare a file of 7 GiB
+        let sparse = tar_with(|builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("big.luau").unwrap();
+            header.set_mode(0o644);
+            header.set_size(512);
+            header.set_entry_type(tar::EntryType::GNUSparse);
+            let real: u64 = 7 << 30;
+            let gnu = header.as_gnu_mut().unwrap();
+            gnu.sparse[0]
+                .offset
+                .copy_from_slice(format!("{:011o}\0", real - 512).as_bytes());
+            gnu.sparse[0]
+                .numbytes
+                .copy_from_slice(format!("{:011o}\0", 512).as_bytes());
+            gnu.realsize
+                .copy_from_slice(format!("{real:011o}\0").as_bytes());
+            header.set_cksum();
+            builder.append(&header, &[b'A'; 512][..]).unwrap();
+        });
+        let error = check_tar(sparse.as_slice(), PACKAGE_BYTES).unwrap_err();
+        assert!(error.to_string().contains("sparse"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modes_are_cut_to_0755() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("embr-test-mask-modes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        for (file, before, after) in [
+            ("sub/open", 0o777, 0o755),
+            ("sub/suid", 0o4755, 0o755),
+            ("plain", 0o644, 0o644),
+            ("shared", 0o666, 0o644),
+        ] {
+            let path = dir.join(file);
+            std::fs::write(&path, "x").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(before)).unwrap();
+            mask_modes(&dir).unwrap();
+            assert_eq!(mode(&path), after, "{file}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// a gzip of zeroes is about a thousandth of what it unpacks to.

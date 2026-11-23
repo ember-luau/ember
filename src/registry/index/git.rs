@@ -247,6 +247,12 @@ fn missing(url: &str, reference: &Reference) -> Error {
     }
 }
 
+/// whether the clone of `url` in the git cache has the commit `rev`, so an export of it needs no network.
+pub(crate) fn has_commit(url: &str, rev: &str) -> bool {
+    clone_dir(url)
+        .is_ok_and(|dir| dir.exists() && commit(&dir, &Reference::Rev(rev.to_string())).is_some())
+}
+
 /** writes the files of `rev` in `url` into `dest`. a clone without the
 commit fetches first, as a `--locked` install on a new computer needs. */
 pub fn export(url: &str, rev: &str, dest: &Path) -> Result<(), Error> {

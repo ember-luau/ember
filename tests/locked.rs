@@ -96,7 +96,7 @@ fn locked_refuses_a_lock_that_another_manifest_wrote() {
     .unwrap();
     let refused = run(&game, &base, &["install", "--locked"]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert_eq!(refused.status.code(), Some(3), "{refused:?}");
     assert!(
         stderr.contains("ember.toml asks for other dependencies"),
         "{stderr}"
@@ -153,10 +153,9 @@ fn offline_installs_from_what_is_on_this_computer() {
     );
     let refused = run(&game, &base, &["install", "--offline"]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
     assert!(
-        stderr.contains("https://example.invalid/index is not in the cache")
-            && stderr.contains("--offline"),
+        stderr.contains("the index https://example.invalid/index") && stderr.contains("--offline"),
         "{stderr}"
     );
     let _ = fs::remove_dir_all(&base);

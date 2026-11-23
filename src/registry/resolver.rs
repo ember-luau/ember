@@ -3,11 +3,12 @@ use crate::project::lockfile::{Lockfile, lockfile_in};
 use crate::project::manifest::features::{self, Features};
 use crate::project::manifest::{
     Dependency, Environment, Language, Manifest, Override, dependency_target, manifest_in,
-    override_paths, parse_version_req, takes,
+    override_paths, parse_version_req, takes, takes_channel,
 };
 use crate::project::workspace::{self, Workspace};
 use crate::registry::index::git::{self, Reference};
 use crate::registry::index::{DownloadSource, Index, Refresh, ResolvedPackage};
+use crate::sys::paths;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -140,6 +141,10 @@ pub struct ResolvedInstall {
     /** its enabled features, sorted: the union over every dependent in this
     environment root, with the features that those turn on. */
     pub features: Vec<String>,
+    /** the channel that picked the version, from the `channel` of the
+    edge that resolved it. ember.lock keeps it, so the next install knows
+    that the locked version is the answer to this channel. */
+    pub channel: Option<String>,
 }
 
 /** the nearest optional edge above a queued dependency, or the dependency
@@ -153,20 +158,17 @@ enum Request {
     Registry {
         req_text: String,
         index_url: String,
+        /// see [`Dependency::Registry`]. only an entry of a manifest has one.
+        channel: Option<String>,
     },
     /** A member of this project's workspace. Like pesde, any `version` on
     the specifier is ignored locally, you get the member's current version.
     The req only matters when publishing. */
     Workspace,
     /// a path dependency: its folder, absolute and without `.` or `..`.
-    Path {
-        dir: PathBuf,
-    },
+    Path { dir: PathBuf },
     /// a git dependency, see [`git::locate`].
-    Git {
-        url: String,
-        reference: Reference,
-    },
+    Git { url: String, reference: Reference },
 }
 
 /// What one specifier asks for: where it comes from, and its `target`, if any.
@@ -511,6 +513,43 @@ fn resolve_once(
         // an error from here on happened under this entry's optional edge
         failing.clone_from(&optional);
         let req_text = match &request {
+            /* a channel asks for one exact version, so the rest of the
+            walk sees an exact requirement. ember.lock answers first: a
+            channel that moved since must not move an install. `embr
+            update` and `--refresh` empty the pins, and then the index
+            answers */
+            Request::Registry {
+                req_text,
+                index_url,
+                channel: Some(channel),
+            } => {
+                let asked = parse_version_req(req_text)?;
+                let takes_it = |version: &semver::Version| takes_channel(&asked, version);
+                // before the open, which clones the index of another registry
+                if !Index::has_channels(index_url) {
+                    return Err(Error::ChannelIndex {
+                        name,
+                        index: index_url.clone(),
+                    });
+                }
+                let version = match pins.channel(&name, channel, index_url) {
+                    Some(locked) if takes_it(locked) => locked.clone(),
+                    _ => {
+                        let index = open_index(indices, index_url, refresh, ttl_skipped)?;
+                        let version = index.channel(&name, channel)?;
+                        if !takes_it(&version) {
+                            return Err(Error::ChannelMismatch {
+                                name,
+                                channel: channel.clone(),
+                                version: version.to_string(),
+                                req: req_text.clone(),
+                            });
+                        }
+                        version
+                    }
+                };
+                format!("={version}")
+            }
             Request::Registry { req_text, .. } => req_text.clone(),
             Request::Workspace | Request::Path { .. } | Request::Git { .. } => "*".to_string(),
         };
@@ -533,6 +572,10 @@ fn resolve_once(
             }
             None => name,
         };
+        /* a git or path package says its own name, and the name is the
+        folder of the package in the store. a registry name is checked by
+        its index */
+        paths::store_folder(&name)?;
 
         /* transitives inherit their context, so their dedup gate runs
         before any network. a seed's context is decided by its own resolve,
@@ -587,6 +630,12 @@ fn resolve_once(
                 Request::Workspace
             }
             request => request,
+        };
+        /* an edge that meets a version another edge picked first leaves
+        the entry as that edge wrote it, so such an entry has no channel */
+        let channel = match &request {
+            Request::Registry { channel, .. } => channel.clone(),
+            _ => None,
         };
 
         /* children are collected, not queued. whether this package's edges
@@ -664,6 +713,8 @@ fn resolve_once(
                                         .index_url
                                         .clone()
                                         .unwrap_or_else(|| index_url.clone()),
+                                    // the registry refuses a package with a channel dependency
+                                    channel: None,
                                 },
                                 target: None,
                                 features: dependency.features.iter().cloned().collect(),
@@ -843,6 +894,7 @@ fn resolve_once(
                 redirects,
                 optional: false,
                 features: Vec::new(),
+                channel,
             },
             req: req_text,
             by: required_by.clone(),
@@ -1193,9 +1245,15 @@ fn request_for(
     owner_dir: Option<&Path>,
 ) -> Result<Ask, Error> {
     let request = match dependency {
-        Dependency::Registry { version, index, .. } => Request::Registry {
+        Dependency::Registry {
+            version,
+            index,
+            channel,
+            ..
+        } => Request::Registry {
             req_text: version.clone(),
             index_url: owner.index_url(index.as_deref())?.to_string(),
+            channel: channel.clone(),
         },
         Dependency::Workspace { .. } => Request::Workspace,
         // a path is relative to the manifest that names it
@@ -1274,9 +1332,14 @@ fn manifest_edges(
 `branch` or `tag` asked for. a branch or tag resolves to its pin while the
 pin is there, so it moves only with `relock`, which `--refresh` sets.
 `found` keeps what each URL and reference gave, so one resolve fetches a
-repository once, however many packages name it. */
+repository once, however many packages name it.
+
+`channels` is the same pin for a channel dependency: the version that
+ember.lock holds for a package, a channel and an index. it is here because this is
+the one read of ember.lock that knows what `update` names. */
 struct GitPins {
     locked: HashMap<(String, Option<String>, Option<String>), String>,
+    channels: HashMap<(String, String, String), semver::Version>,
     relock: bool,
     found: std::cell::RefCell<HashMap<(String, Reference), (String, String)>>,
 }
@@ -1287,7 +1350,7 @@ impl GitPins {
         let lock = std::fs::read_to_string(lockfile_in(project_dir))
             .ok()
             .and_then(|text| toml::from_str::<Lockfile>(&text).ok());
-        let locked = lock
+        let packages: Vec<_> = lock
             .into_iter()
             .flat_map(|lock| lock.packages)
             .filter(|package| {
@@ -1295,6 +1358,18 @@ impl GitPins {
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(&package.name))
             })
+            .collect();
+        let channels = packages
+            .iter()
+            .filter_map(|package| {
+                let version = semver::Version::parse(&package.version).ok()?;
+                let channel = package.channel.clone()?;
+                let key = (package.name.to_lowercase(), channel, package.index.clone());
+                Some((key, version))
+            })
+            .collect();
+        let locked = packages
+            .into_iter()
             .filter_map(|package| match package.source {
                 DownloadSource::Git {
                     url,
@@ -1307,6 +1382,7 @@ impl GitPins {
             .collect();
         GitPins {
             locked,
+            channels,
             relock,
             found: Default::default(),
         }
@@ -1321,6 +1397,15 @@ impl GitPins {
         let found = git::locate(url, reference, self.get(url, reference), self.relock)?;
         self.found.borrow_mut().insert(key, found.clone());
         Ok(found)
+    }
+
+    /// the locked version of `channel` of `name` in `index`. none when the run locks again.
+    fn channel(&self, name: &str, channel: &str, index: &str) -> Option<&semver::Version> {
+        if self.relock {
+            return None;
+        }
+        self.channels
+            .get(&(name.to_string(), channel.to_string(), index.to_string()))
     }
 
     /// the locked commit of `url` at `reference`. a `rev` is its own pin.
@@ -3246,6 +3331,7 @@ lib = { path = \"../libs/lib\", default-features = false }\n";
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: installs[0].source.clone(),
             sha256: None,
         }]);

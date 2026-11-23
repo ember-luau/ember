@@ -58,6 +58,10 @@ fn is_secret(file: &Path) -> bool {
         ".npmrc",
         ".netrc",
         ".pypirc",
+        ".git-credentials",
+        ".pgpass",
+        ".dockercfg",
+        "secrets.json",
         "id_rsa",
         "id_dsa",
         "id_ecdsa",
@@ -65,7 +69,17 @@ fn is_secret(file: &Path) -> bool {
         "credentials.toml",
     ]
     .contains(&name.as_str());
-    env || key || named
+    // these two names are common, so the folder decides
+    let folder = file
+        .parent()
+        .and_then(|folder| folder.file_name())
+        .and_then(|folder| folder.to_str())
+        .map(str::to_ascii_lowercase);
+    let in_folder = matches!(
+        (folder.as_deref(), name.as_str()),
+        (Some(".aws"), "credentials") | (Some(".docker"), "config.json")
+    );
+    env || key || named || in_folder
 }
 
 /// the files to publish, and the ones held back as secrets, both sorted.
@@ -107,9 +121,20 @@ fn select(root: &Path, manifest: &Manifest) -> Result<(Vec<PathBuf>, Vec<PathBuf
         .and_then(|package| package.logo.as_deref())
         .map(|logo| PathBuf::from(logo.replace('\\', "/").trim_start_matches("./")));
     let mut held = Vec::new();
+    // what `embr pack` left in the package folder is no part of the package
+    let packed = manifest.package.as_ref().map(|package| {
+        let name = archive_name(&package.name, &package.version, "");
+        name.trim_end_matches(".tar.gz").to_string()
+    });
     files.retain(|file| {
         if is_manifest(file) || logo.as_deref() == Some(file.as_path()) {
             return true;
+        }
+        if let (Some(packed), Some(name)) = (&packed, file.to_str())
+            && name.starts_with(packed.as_str())
+            && name.ends_with(".tar.gz")
+        {
+            return false;
         }
         if !includes.is_empty() && !includes.matches(file) {
             return false;
@@ -128,6 +153,15 @@ fn select(root: &Path, manifest: &Manifest) -> Result<(Vec<PathBuf>, Vec<PathBuf
     files.sort();
     held.sort();
     Ok((files, held))
+}
+
+/** the file that `embr pack` writes for the target `id` of a package:
+`<name>-<version>-<id>.tar.gz`, the name without its scope. a file of this
+shape in the package folder is never packed, so a pack does not change
+what the next pack or publish holds. */
+pub fn archive_name(name: &str, version: &str, id: &str) -> String {
+    let short = name.rsplit('/').next().unwrap_or(name);
+    format!("{short}-{version}-{id}.tar.gz")
 }
 
 /** One includes/excludes list, compiled. Entries with glob metacharacters
@@ -710,6 +744,21 @@ mod tests {
         write(&base, "deploy/server.pem", "");
         write(&base, "deploy/id_ed25519", "");
         write(&base, ".npmrc", "//registry.npmjs.org/:_authToken=x");
+        for secret in [
+            ".aws/credentials",
+            ".docker/config.json",
+            ".dockercfg",
+            ".git-credentials",
+            ".netrc",
+            ".pgpass",
+            "deploy/secrets.json",
+            "deploy/tls.key",
+        ] {
+            write(&base, secret, "x");
+        }
+        // the name alone does not say that these hold a secret
+        write(&base, "src/config.json", "{}");
+        write(&base, "src/credentials", "x");
         write(&base, "src/environment.luau", "return {}");
         write(&base, "src/keys.luau", "return {}");
 
@@ -722,6 +771,8 @@ mod tests {
             [
                 ".env.example",
                 "ember.toml",
+                "src/config.json",
+                "src/credentials",
                 "src/environment.luau",
                 "src/init.luau",
                 "src/keys.luau"
@@ -730,11 +781,19 @@ mod tests {
         assert_eq!(
             paths(held_back(&base, &plain).unwrap()),
             [
+                ".aws/credentials",
+                ".docker/config.json",
+                ".dockercfg",
                 ".env",
                 ".env.production",
+                ".git-credentials",
+                ".netrc",
                 ".npmrc",
+                ".pgpass",
                 "deploy/id_ed25519",
+                "deploy/secrets.json",
                 "deploy/server.pem",
+                "deploy/tls.key",
                 "src/.ENV"
             ]
         );
@@ -752,6 +811,8 @@ mod tests {
             [
                 "deploy/server.pem",
                 "ember.toml",
+                "src/config.json",
+                "src/credentials",
                 "src/environment.luau",
                 "src/init.luau",
                 "src/keys.luau"

@@ -496,8 +496,23 @@ pub(super) fn resolve_import(raw: &str, frame: &RequireFrame) -> Option<String> 
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, `<entry>.luwu`, then the folder's init file. empty entry = the root's own init.
+/** whether `entry` names a place inside its package: ordinary path parts
+only, so no `..`, no root and no drive. a package states its own entry, and
+install reads the file there and writes it back when it rewrites requires.
+`main = "../../../src/x"` named a file of the project before this. the empty
+entry is the root of the package. */
+pub fn entry_stays_inside(entry: &str) -> bool {
+    !entry.contains(['\\', ':'])
+        && Path::new(entry)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// the file an extensionless entry resolves to, Luau string-require style, `<entry>.luau`, `<entry>.lua`, `<entry>.luwu`, then the folder's init file. empty entry = the root's own init. None for an entry outside the package, see [`entry_stays_inside`].
 pub fn entry_source(dir: &Path, entry: &str) -> Option<PathBuf> {
+    if !entry_stays_inside(entry) {
+        return None;
+    }
     let candidates = if entry.is_empty() {
         vec![
             "init.luau".to_string(),
@@ -641,6 +656,10 @@ fn alloy_line(
         return None;
     }
     let module = format!("{input}{rest}");
+    // `[build] in` is the package's own text, and it lands in a quoted path of the barrel
+    if !entry_stays_inside(&module) || module.contains(['"', '\n', '\r']) {
+        return None;
+    }
     let has_source = ["aly", "alx"].iter().any(|ext| {
         dir.join(format!("{module}.{ext}")).is_file()
             || dir.join(&module).join(format!("init.{ext}")).is_file()
@@ -1244,7 +1263,7 @@ member is a `.luau` or `.lua` file, or a folder with an init file, one level
 deep. scripts, tests, [`GUESS_SKIPS`] and names a quoted require cannot hold
 stay out. empty when `entry` is a module. */
 pub fn collection_members(dir: &Path, entry: &str) -> Vec<String> {
-    if entry_source(dir, entry).is_some() {
+    if entry_source(dir, entry).is_some() || !entry_stays_inside(entry) {
         return Vec::new();
     }
     let Ok(children) = fs::read_dir(dir.join(entry)) else {
@@ -2303,6 +2322,36 @@ React = { name = \"jsdotlua/react\", version = \"^17.0.0\" }
 
     /** a collection gathers the modules one level deep. scripts, tests,
     folders with no init and the folders a guess skips stay out. */
+    #[test]
+    fn an_entry_outside_the_package_is_no_entry() {
+        for inside in ["", "src", "src/lib", "lib.v2/init"] {
+            assert!(entry_stays_inside(inside), "{inside}");
+        }
+        for outside in [
+            "..",
+            "../x",
+            "src/../../x",
+            "../../../../../outside/x",
+            "/etc/passwd",
+            "C:/Windows/x",
+            "C:x",
+            "..\\..\\x",
+            "\\\\server\\share\\x",
+            "./x",
+        ] {
+            assert!(!entry_stays_inside(outside), "{outside}");
+        }
+
+        let base = std::env::temp_dir().join("embr-test-entry-outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("pkg")).unwrap();
+        fs::write(base.join("x.luau"), "return 1\n").unwrap();
+        fs::write(base.join("init.luau"), "return 1\n").unwrap();
+        assert_eq!(entry_source(&base.join("pkg"), "../x"), None);
+        assert!(collection_members(&base.join("pkg"), "..").is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn collections_gather_the_modules_one_level_deep() {
         let base = std::env::temp_dir().join("embr-test-collection-members");

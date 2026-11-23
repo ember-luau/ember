@@ -19,14 +19,15 @@ use crate::net::registry;
 use crate::project::manifest::{
     EMBER_PREFIX, Environment, MANIFEST_FILE, Manifest, is_github_username,
 };
+use crate::registry::index;
 use crate::registry::pack::tar_path;
-use crate::sys::{git, paths};
+use crate::sys::{git, limit, paths};
 use crate::ui;
 use clap::Subcommand;
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
-use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Subcommand, Debug)]
@@ -423,7 +424,7 @@ fn to_github(name: &str, private: bool, repo: Option<&str>, yes: bool) -> Result
         println!("  {}", tar_path(file));
     }
     if !yes {
-        if !std::io::stdin().is_terminal() {
+        if !ui::can_prompt() {
             return Err(Error::Template(
                 "github asks before it creates a repository; pass --yes to skip the question"
                     .to_string(),
@@ -645,6 +646,12 @@ fn from_github(api: &str, repository: &str, reference: Option<&str>) -> Result<F
 }
 
 impl Fetched {
+    /** whether the template came from Ember or GitHub. a saved template and
+    a folder are files of this computer. */
+    pub fn is_remote(&self) -> bool {
+        matches!(self.files, Files::Tarball(..))
+    }
+
     /** checks every entry of a tarball. a refused archive is an error
     here, before anything is written. `wrapped` says that one folder holds
     the files, as in a GitHub tarball. */
@@ -734,7 +741,7 @@ const LOCKFILES: [&str; 5] = [
 ];
 
 /// file names that hold secrets. `.npmrc` counts only when it holds a token.
-const SECRETS: [&str; 11] = [
+const SECRETS: [&str; 15] = [
     ".env*",
     "*.pem",
     "*.key",
@@ -746,6 +753,10 @@ const SECRETS: [&str; 11] = [
     "id_ed25519*",
     ".netrc",
     ".pypirc",
+    ".git-credentials",
+    ".pgpass",
+    ".dockercfg",
+    "secrets.json",
 ];
 
 /// the compiled filters of one [`select`].
@@ -810,7 +821,11 @@ fn walk(
                 true => selection.left_out.push(format!("{}/", tar_path(&relative))),
                 false => walk(&path, root, filters, selection)?,
             }
-        } else if filters.secrets.is_match(&name) || (name == ".npmrc" && holds_token(&path)) {
+        } else if filters.secrets.is_match(&name)
+            || (name == ".npmrc" && holds_token(&path))
+            || relative.ends_with(".aws/credentials")
+            || relative.ends_with(".docker/config.json")
+        {
             selection.secrets.push(tar_path(&relative));
         } else if !kind.is_file()
             || filters.lockfiles.is_match(&name)
@@ -887,12 +902,19 @@ struct Pass {
 
 /** One pass over a tarball. a `wrapped` one is from GitHub, and the pass
 drops the `owner-repo-sha/` folder that holds its files. it checks every
-entry, and writes it under `dest` when a `dest` is given. refused: an absolute path, a `..`, a `.git` folder, a
-symlink whose target leaves the folder, a path through a symlink, and any
-entry that is not a file, a folder, or a symlink. */
+entry, and writes it under `dest` when a `dest` is given. refused: an
+absolute path, a `..`, a `.git` entry at any depth, a second entry for one
+path, and any entry that is not a file or a folder.
+
+a link is refused too. a count of the `..` in its target does not say where
+the link leads once another link is in the path: `d/x -> ..` passed, and
+`d/x/../..` then left the folder. a second entry for one path replaced the
+file that the first pass read, so the ember.toml that was checked was not
+the one that stayed. the gunzip has the cap of a package. */
 fn entries(tarball: &[u8], dest: Option<&Path>, wrapped: bool) -> Result<Pass, Error> {
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
-    let mut links: Vec<PathBuf> = Vec::new();
+    let decoder = limit::Capped::new(flate2::read::GzDecoder::new(tarball), limit::PACKAGE_BYTES);
+    let mut archive = tar::Archive::new(decoder);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut pass = Pass {
         files: 0,
         manifest: None,
@@ -908,8 +930,8 @@ fn entries(tarball: &[u8], dest: Option<&Path>, wrapped: bool) -> Result<Pass, E
         let Some(relative) = inner_path(&path, wrapped)? else {
             continue;
         };
-        if links.iter().any(|link| relative.starts_with(link)) {
-            return Err(refused(&path, "goes through a symlink"));
+        if !seen.insert(relative.clone()) {
+            return Err(refused(&path, "is in the archive twice"));
         }
         match kind {
             tar::EntryType::Directory => {}
@@ -921,14 +943,10 @@ fn entries(tarball: &[u8], dest: Option<&Path>, wrapped: bool) -> Result<Pass, E
                     pass.manifest = Some(text);
                 }
             }
-            tar::EntryType::Symlink => {
-                let target = entry
-                    .link_name()?
-                    .ok_or_else(|| refused(&path, "is a symlink with no target"))?;
-                check_link(&relative, &target).map_err(|reason| refused(&path, reason))?;
-                links.push(relative.clone());
+            tar::EntryType::Symlink | tar::EntryType::Link => {
+                return Err(refused(&path, "is a link, and a template holds no link"));
             }
-            _ => return Err(refused(&path, "is not a file, a folder, or a symlink")),
+            _ => return Err(refused(&path, "is not a file or a folder")),
         }
         if let Some(dest) = dest {
             let out = dest.join(&relative);
@@ -936,6 +954,7 @@ fn entries(tarball: &[u8], dest: Option<&Path>, wrapped: bool) -> Result<Pass, E
                 fs::create_dir_all(parent)?;
             }
             entry.unpack(&out)?;
+            limit::mask_mode(&out)?;
         }
     }
     Ok(pass)
@@ -950,8 +969,8 @@ fn refused(path: &Path, reason: &str) -> Error {
 
 /** the path of an entry inside the template: inside the wrapping folder of
 a `wrapped` tarball, else the path as it is. None for the top folder
-itself. an absolute path, a `..`, a drive letter, and a `.git` folder are
-refused. */
+itself. an absolute path, a `..`, a drive letter, and a `.git` entry at any
+depth are refused. */
 fn inner_path(path: &Path, wrapped: bool) -> Result<Option<PathBuf>, Error> {
     let top = usize::from(wrapped);
     let mut parts = Vec::new();
@@ -965,25 +984,14 @@ fn inner_path(path: &Path, wrapped: bool) -> Result<Option<PathBuf>, Error> {
             _ => return Err(refused(path, "leaves the folder")),
         }
     }
-    if parts.get(top).is_some_and(|part| *part == ".git") {
+    // git reads `.GIT` and `.git.` as its folder on Windows and macOS
+    if parts[top.min(parts.len())..]
+        .iter()
+        .any(|part| index::is_git_name(part))
+    {
         return Err(refused(path, "is in a .git folder"));
     }
     Ok((parts.len() > top).then(|| parts[top..].iter().collect()))
-}
-
-/** whether a symlink at `at` with `target` stays inside the folder that
-holds `at`. relative targets only, and no `..` past the top. */
-fn check_link(at: &Path, target: &Path) -> Result<(), &'static str> {
-    let mut depth = at.components().count().saturating_sub(1);
-    for component in target.components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir if depth > 0 => depth -= 1,
-            _ => return Err("links outside the folder"),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1252,6 +1260,7 @@ mod tests {
             ("../evil.txt", Regular, None, "x"),
             (".git/hooks/post-checkout", Regular, None, "x"),
             ("out", Symlink, Some("../outside"), ""),
+            ("src/.GIT/config", Regular, None, "x"),
         ] {
             let archive = tarball(&[("ember.toml", Regular, None, "[target]\n"), bad]);
             assert!(
@@ -1366,24 +1375,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_inside_the_template_is_kept() {
-        let dest = folder("extract-link");
-        let archive = tarball(&[
-            ("top/ember.toml", Regular, None, "[target]\n"),
-            ("top/src/init.luau", Regular, None, "return {}\n"),
-            ("top/src/main.luau", Symlink, Some("init.luau"), ""),
-            ("top/docs/src", Symlink, Some("../src"), ""),
-        ]);
-        extract(archive, &dest).unwrap();
-        assert_eq!(
-            fs::read_link(dest.join("src/main.luau")).unwrap(),
-            Path::new("init.luau")
-        );
-        let _ = fs::remove_dir_all(&dest);
-    }
-
     #[test]
     fn an_unsafe_tarball_writes_nothing() {
         let manifest = ("top/ember.toml", Regular, None, "[target]\n");
@@ -1394,6 +1385,19 @@ mod tests {
             ("top/out", Symlink, Some("../../outside"), ""),
             ("top/abs", Symlink, Some("/etc"), ""),
             ("top/hard", Link, Some("top/ember.toml"), ""),
+            // a link that stays inside is a link too
+            ("top/src/main.luau", Symlink, Some("init.luau"), ""),
+            // a `.git` below the top, and the names that Windows reads as `.git`
+            ("top/sub/.git/config", Regular, None, "x"),
+            ("top/.GIT/config", Regular, None, "x"),
+            ("top/sub/.git.", Regular, None, "x"),
+            // the second ember.toml would replace the one that the check read
+            (
+                "top/ember.toml",
+                Regular,
+                None,
+                "[scripts]\npreinstall = \"id\"\n",
+            ),
         ] {
             let dest = folder("extract-bad");
             let archive = tarball(&[manifest, bad]);
@@ -1405,12 +1409,14 @@ mod tests {
             assert_eq!(fs::read_dir(&dest).unwrap().count(), 0, "{}", bad.0);
         }
 
-        // a file written through an earlier symlink is refused too
+        /* `d/x -> ..` stays in the folder by a count of its `..`, and
+        `d/x/../..` then leads out of it. the regular ember.toml is what the
+        check read, and the link of the same name is what stayed */
         let dest = folder("extract-through");
         let archive = tarball(&[
             manifest,
-            ("top/dir", Symlink, Some("."), ""),
-            ("top/dir/x.txt", Regular, None, "x"),
+            ("top/d/x", Symlink, Some(".."), ""),
+            ("top/ember.toml", Symlink, Some("d/x/../../victim.txt"), ""),
         ]);
         assert!(matches!(extract(archive, &dest), Err(Error::Template(_))));
         assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);

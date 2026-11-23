@@ -3,14 +3,16 @@ use crate::{
     project::{
         hooks::{self, Lifecycle},
         manifest::{Manifest, Script},
+        workspace::Workspace,
     },
     sys::{paths, process},
     ui,
 };
 use clap::Args;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::{Condvar, Mutex, PoisonError};
 
 /** The `[scripts]` names that are also subcommands, so `embr build` works
 without `run`. npm's idea, and deliberately npm's scale: a handful of verbs
@@ -67,14 +69,53 @@ with an optional `--` separator: `embr run build -- --watch` and `embr build \
 --watch` reach the script identically.\n\n\
 build, test, start, serve, dev and fmt are also subcommands, so `run` is \
 optional for those six. It is optional too for a name that starts with one of \
-them and a colon, such as `embr dev:gameplay`. Every other script needs it.")]
+them and a colon, such as `embr dev:gameplay`. Every other script needs it.\n\n\
+In a workspace, --workspace, --package, --filter and --changed select members, \
+and the script runs in each selected member that defines it. Two or more of \
+these flags select the members of each. A member runs after the members that \
+it depends on with `workspace = `, and each line of its output starts with \
+its name. --jobs runs members at once. After a member fails, no new member \
+starts unless --continue is given, and the command exits with code 1. These \
+flags go before the script name: each word after the name goes to the script.")]
 pub struct RunArgs {
-    /// Name of the script under [scripts] in ember.toml or the global manifest; omit to list them all
-    pub name: Option<String>,
+    /// Run the script in each workspace member that defines it, in dependency order
+    #[arg(long)]
+    pub workspace: bool,
 
-    /// Extra arguments appended to the script's command line
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub args: Vec<String>,
+    /// Run the script in this workspace member, by package name, folder name or path; repeat it for more
+    #[arg(short, long = "package", value_name = "MEMBER")]
+    pub packages: Vec<String>,
+
+    /// Run the script in the workspace members whose name or path matches this glob; repeat it for more
+    #[arg(long, value_name = "GLOB")]
+    pub filter: Vec<String>,
+
+    /// Run the script in the workspace members with a changed file, and in the members that depend on them
+    #[arg(long)]
+    pub changed: bool,
+
+    /// Git ref that --changed compares the files with
+    #[arg(long, value_name = "REF", default_value = "HEAD", requires = "changed")]
+    pub since: String,
+
+    /// Number of workspace members that run at once
+    #[arg(short, long, value_name = "N", default_value_t = 1)]
+    pub jobs: usize,
+
+    /// Run the other workspace members after one fails
+    #[arg(long = "continue")]
+    pub keep_going: bool,
+
+    /* the script name, then its arguments. one list, so each word after
+    the name goes to the script, also a word that is a flag of `embr run`:
+    `embr run test --filter x` gives `--filter x` to the test script. */
+    /// Name of the script under [scripts] in ember.toml or the global manifest, then extra arguments for its command line; omit both to list the scripts
+    #[arg(
+        value_name = "NAME [ARGS]",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub words: Vec<String>,
 }
 
 /// the arguments a [`SHORTCUTS`] subcommand takes: the script name is its own.
@@ -108,13 +149,253 @@ pub fn shortcut(names: &[&str], args: ShortcutArgs) -> Result<(), Error> {
 }
 
 pub fn run(args: RunArgs) -> Result<(), Error> {
+    let name = args.words.first();
+    /* the list takes a word with a hyphen, so a flag that embr does not
+    know lands here as the name */
+    if let Some(flag) = name.filter(|name| name.starts_with('-')) {
+        return Err(fail(format!(
+            "`embr run` has no option '{flag}'; its options go before the script name, see `embr run --help`"
+        )));
+    }
+    let extra = args.words.get(1..).unwrap_or_default();
+    if args.workspace || !args.packages.is_empty() || !args.filter.is_empty() || args.changed {
+        let name = name
+            .ok_or_else(|| fail("Name the script to run in the workspace members".to_string()))?;
+        return members(&args, name, extra);
+    }
     let manifest = project()?;
     let global = global_scripts()?;
-    match &args.name {
-        Some(name) => script(manifest.as_ref(), &global, name, &args.args),
+    match name {
+        Some(name) => script(manifest.as_ref(), &global, name, extra),
         // bare `embr run` is a question, not a mistake. npm answers it the same way
         None => list(manifest.as_ref(), &global),
     }
+}
+
+fn fail(message: String) -> Error {
+    std::io::Error::other(message).into()
+}
+
+/** runs the script `name` in the workspace members that the flags select
+and that define it, each after the members that it depends on.
+
+each member is a child `embr run` in the folder of the member, so its
+hooks, its banner and a script of several commands work as they do alone.
+the output of a member is piped and gets the name of the member in front
+of each line, since members run at once with `--jobs`. */
+fn members(args: &RunArgs, name: &str, extra: &[String]) -> Result<(), Error> {
+    let workspace = Workspace::here()?.ok_or_else(|| {
+        fail(
+            "This folder is in no workspace; the workspace flags need an ember.toml that lists members under [target] workspace"
+                .to_string(),
+        )
+    })?;
+    // before a member runs: a cycle has no order to run in
+    let order = workspace.order()?;
+
+    let mut selected = BTreeSet::new();
+    if args.workspace {
+        selected.extend(0..workspace.members.len());
+    }
+    for package in &args.packages {
+        selected.insert(
+            workspace
+                .find(package)
+                .ok_or_else(|| Error::NoWorkspaceMember(package.clone()))?,
+        );
+    }
+    for glob in &args.filter {
+        let matcher = globset::Glob::new(glob)
+            .map_err(|error| Error::WorkspaceGlobInvalid {
+                glob: glob.clone(),
+                reason: error.to_string(),
+            })?
+            .compile_matcher();
+        let matched: Vec<usize> = (0..workspace.members.len())
+            .filter(|&member| {
+                let manifest = &workspace.members[member].manifest;
+                matcher.is_match(workspace.members[member].label())
+                    || manifest.name().is_some_and(|name| matcher.is_match(name))
+                    || matcher.is_match(workspace.path_of(member))
+            })
+            .collect();
+        if matched.is_empty() {
+            return Err(fail(format!("No workspace member matches '{glob}'")));
+        }
+        selected.extend(matched);
+    }
+    if args.changed {
+        selected.extend(workspace.changed(&args.since)?);
+    }
+    if selected.is_empty() {
+        // only --changed selects nothing without an error
+        println!("No workspace member has a change since {}", args.since);
+        return Ok(());
+    }
+
+    let queue: Vec<usize> = order
+        .into_iter()
+        .filter(|member| selected.contains(member))
+        .filter(|&member| {
+            workspace.members[member]
+                .manifest
+                .scripts
+                .contains_key(name)
+        })
+        .collect();
+    if queue.is_empty() {
+        return Err(fail(format!(
+            "No selected workspace member has a script named '{name}'"
+        )));
+    }
+
+    /* a member waits for each member of this run that it depends on, also
+    through a member that is not in the run */
+    let edges = workspace.edges();
+    let waits_for = |member: usize| -> Vec<usize> {
+        let mut seen = BTreeSet::new();
+        let mut stack = edges[member].clone();
+        while let Some(on) = stack.pop() {
+            if seen.insert(on) {
+                stack.extend(&edges[on]);
+            }
+        }
+        seen.into_iter().filter(|on| queue.contains(on)).collect()
+    };
+    let waits: BTreeMap<usize, Vec<usize>> = queue
+        .iter()
+        .map(|&member| (member, waits_for(member)))
+        .collect();
+
+    #[derive(Default)]
+    struct State {
+        queue: Vec<usize>,
+        running: usize,
+        finished: BTreeSet<usize>,
+        failed: Vec<usize>,
+        stopped: bool,
+    }
+    let state = Mutex::new(State {
+        queue: queue.clone(),
+        ..State::default()
+    });
+    let turn = Condvar::new();
+    let embr = std::env::current_exe()?;
+
+    std::thread::scope(|scope| {
+        for _ in 0..args.jobs.clamp(1, queue.len()) {
+            scope.spawn(|| {
+                loop {
+                    let mut now = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let member = loop {
+                        if now.stopped || now.queue.is_empty() {
+                            return;
+                        }
+                        let ready = now.queue.iter().position(|member| {
+                            waits[member].iter().all(|on| now.finished.contains(on))
+                        });
+                        if let Some(ready) = ready {
+                            break now.queue.remove(ready);
+                        }
+                        now = turn.wait(now).unwrap_or_else(PoisonError::into_inner);
+                    };
+                    now.running += 1;
+                    drop(now);
+
+                    let label = workspace.members[member].label();
+                    let code =
+                        member_script(&embr, &workspace.members[member].dir, &label, name, extra);
+                    let mut now = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    now.running -= 1;
+                    now.finished.insert(member);
+                    if code != 0 {
+                        ui::print_member_line(&label, &format!("exited with code {code}"), true);
+                        now.failed.push(member);
+                        // without --continue no new member starts. the running ones finish
+                        now.stopped = !args.keep_going;
+                    }
+                    turn.notify_all();
+                }
+            });
+        }
+    });
+
+    let state = state.into_inner().unwrap_or_else(PoisonError::into_inner);
+    if state.failed.is_empty() {
+        return Ok(());
+    }
+    let labels = |members: &[usize]| -> String {
+        let mut labels: Vec<String> = members
+            .iter()
+            .map(|&member| workspace.members[member].label())
+            .collect();
+        labels.sort();
+        labels.join(", ")
+    };
+    let mut message = format!("'{name}' failed in {}", labels(&state.failed));
+    if !state.queue.is_empty() {
+        message.push_str(&format!(
+            "; not started: {}; `--continue` runs them too",
+            labels(&state.queue)
+        ));
+    }
+    ui::print_error(&message);
+    // a member keeps its own code in its line. the run of many has one code
+    std::process::exit(1);
+}
+
+/** runs `embr run <name>` in `dir` and gives its exit code. each line of
+its output goes to the same stream of this process, behind `label`. */
+fn member_script(embr: &Path, dir: &Path, label: &str, name: &str, extra: &[String]) -> i32 {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new(embr);
+    command
+        .arg("run")
+        .arg(name)
+        .args(extra)
+        .current_dir(dir)
+        // members run at once, and one terminal input cannot serve them all
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // a pipe is no terminal, so the member would drop the colour that this run shows
+    if ui::want_color() {
+        command.env("FORCE_COLOR", "1").env("CLICOLOR_FORCE", "1");
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            ui::print_member_line(label, &format!("could not start: {error}"), true);
+            return 1;
+        }
+    };
+    let pump = |stream: Option<Box<dyn std::io::Read + Send>>, is_stderr: bool| {
+        move || {
+            let Some(stream) = stream else { return };
+            for line in std::io::BufReader::new(stream).split(b'\n').flatten() {
+                ui::print_member_line(label, &String::from_utf8_lossy(&line), is_stderr);
+            }
+        }
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    let stderr = child
+        .stderr
+        .take()
+        .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    std::thread::scope(|scope| {
+        scope.spawn(pump(stdout, false));
+        scope.spawn(pump(stderr, true));
+    });
+    child
+        .wait()
+        .ok()
+        .and_then(|status| status.code())
+        .unwrap_or(1)
 }
 
 /** the manifest in the current directory, None outside a project. a

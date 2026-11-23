@@ -7,6 +7,8 @@ use crate::error::Error;
 use crate::project::lockfile::{LockedPackage, Lockfile};
 use crate::project::manifest::{Environment, Manifest, manifest_in};
 use crate::project::package::{self, DependencyKind};
+use crate::registry::index::DownloadSource;
+use crate::registry::notices;
 use crate::ui;
 use crate::ui::Stylize;
 use clap::Args;
@@ -34,7 +36,8 @@ pub struct WhyArgs {
 
 pub fn tree(args: TreeArgs) -> Result<(), Error> {
     let (manifest, lock) = load()?;
-    let graph = Graph::read(&manifest, &lock, Path::new(""))?;
+    let mut graph = Graph::read(&manifest, &lock, Path::new(""))?;
+    graph.marks = marks(&lock.packages);
     if args.json {
         return ui::print_json(&graph.tree_json(args.depth));
     }
@@ -99,6 +102,59 @@ pub(crate) fn brought_in_by(
     Some(by)
 }
 
+/// what the index copy on disk says about one locked package.
+pub(crate) struct Marks {
+    /** the newest version that is not yanked: the newest stable one, or
+    the newest prerelease when the package has no stable version. */
+    pub latest: Option<String>,
+    /// the package, or the locked version, is deprecated.
+    pub deprecated: bool,
+    /// the locked version is yanked.
+    pub yanked: bool,
+}
+
+/** the marks of each package of `packages`, in that order. it reads only
+the index copies on disk and makes no request, so `embr tree` stays a
+command that works offline. None for a package whose index is not on disk,
+or lists no versions for it. */
+pub(crate) fn marks(packages: &[LockedPackage]) -> Vec<Option<Marks>> {
+    let items = notices::gather(packages, false, &mut Vec::new());
+    let mut indices = std::collections::HashMap::new();
+    packages
+        .iter()
+        .zip(items)
+        .map(|(package, items)| {
+            if !matches!(
+                package.source,
+                DownloadSource::Zip { .. } | DownloadSource::TarGz { .. }
+            ) {
+                return None;
+            }
+            let index = indices
+                .entry(package.index.as_str())
+                .or_insert_with(|| notices::open(&package.index, false))
+                .as_ref()?;
+            let (candidates, _) = index.read(&package.name).ok()?;
+            let newest = |stable: bool| {
+                candidates
+                    .iter()
+                    .filter(|candidate| !candidate.yanked)
+                    .map(|candidate| &candidate.version)
+                    .filter(|version| !stable || version.pre.is_empty())
+                    .max()
+            };
+            let has = |kind| items.iter().any(|item| item.kind == kind);
+            Some(Marks {
+                latest: newest(true)
+                    .or_else(|| newest(false))
+                    .map(ToString::to_string),
+                deprecated: has(notices::Kind::Deprecated),
+                yanked: has(notices::Kind::Yanked),
+            })
+        })
+        .collect()
+}
+
 /// the `--json` version of a package, null for a path package, which has none.
 fn version_json(package: &LockedPackage) -> Option<&str> {
     (!package.version.is_empty()).then_some(package.version.as_str())
@@ -129,6 +185,8 @@ struct Graph<'lock> {
     packages: &'lock [LockedPackage],
     roots: Vec<Root>,
     children: Vec<Vec<Edge>>,
+    /// see [`marks`]. empty until `embr tree` fills it, and then no package has a mark.
+    marks: Vec<Option<Marks>>,
 }
 
 impl<'lock> Graph<'lock> {
@@ -183,7 +241,7 @@ impl<'lock> Graph<'lock> {
 
         let mut children = Vec::new();
         for package in packages {
-            let (storage, in_place) = stored_at(manifest, package);
+            let (storage, in_place) = stored_at(manifest, package)?;
             let storage = project.join(storage);
             if !storage.is_dir() {
                 return Err(Error::NotInstalledYet(format!(
@@ -232,6 +290,7 @@ impl<'lock> Graph<'lock> {
             packages,
             roots,
             children,
+            marks: Vec::new(),
         })
     }
 
@@ -253,14 +312,26 @@ impl<'lock> Graph<'lock> {
     fn label(&self, node: usize, alias: &str) -> String {
         let package = &self.packages[node];
         let mut label = package.id();
+        // the lock and the manifest of a package are text that others wrote
         if !package.features.is_empty() {
-            label.push_str(&format!(" [{}]", package.features.join(", ")));
+            let features = ui::one_line(&package.features.join(", "));
+            label.push_str(&format!(" [{features}]"));
         }
         if package.name.rsplit('/').next() != Some(alias) {
+            let alias = ui::one_line(alias);
             label.push_str(&format!(" as '{alias}'").dark_grey().to_string());
         }
         if let Some(source) = package.source.local_label() {
+            let source = ui::one_line(&source);
             label.push_str(&format!(" ({source})").dark_grey().to_string());
+        }
+        if let Some(Some(marks)) = self.marks.get(node) {
+            if marks.deprecated {
+                label.push_str(&" (deprecated)".yellow().to_string());
+            }
+            if marks.yanked {
+                label.push_str(&" (yanked)".yellow().to_string());
+            }
         }
         label
     }
@@ -391,7 +462,7 @@ impl<'lock> Graph<'lock> {
                 dependencies.push(self.node_json(*child, alias, kind, depth, shown));
             }
         }
-        json!({
+        let mut json = json!({
             "alias": alias,
             "name": package.name,
             "version": version_json(package),
@@ -402,7 +473,14 @@ impl<'lock> Graph<'lock> {
             "peer": matches!(kind, DependencyKind::Peer(_)),
             "repeated": repeated,
             "dependencies": dependencies,
-        })
+        });
+        // the keys are absent when the index copy on disk does not have the package
+        if let Some(Some(marks)) = self.marks.get(node) {
+            json["latest"] = json!(marks.latest);
+            json["deprecated"] = json!(marks.deprecated);
+            json["yanked"] = json!(marks.yanked);
+        }
+        json
     }
 
     /** every path from a manifest entry down to a package that `wanted`
@@ -504,7 +582,7 @@ impl<'lock> Graph<'lock> {
             let package = &self.packages[target];
             let mut head = package.id();
             if let Some(source) = package.source.local_label() {
-                head.push_str(&format!(" ({source})"));
+                head.push_str(&format!(" ({})", ui::one_line(&source)));
             }
             if grouped {
                 head.push_str(&format!(" in {}", package.context()));

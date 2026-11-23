@@ -125,6 +125,11 @@ impl Task {
         self.row.set_position(done);
     }
 
+    /// the task finished a step that prints no line. the run bar steps.
+    pub fn step(self) {
+        self.run.inc(1);
+    }
+
     /** the task finished. the run bar steps, and off a terminal `line`
     prints in place of the row nobody sees. */
     pub fn done(self, line: &str) {

@@ -3,8 +3,8 @@ use crate::net::registry;
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{
-    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Environment, Language, Manifest, features,
-    parse_version_req, split_package_name,
+    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Environment, Language, Manifest, check_channel, features,
+    parse_version_req, split_package_name, takes_channel,
 };
 use crate::registry::index::{Index, Refresh, ResolvedPackage};
 use crate::registry::local;
@@ -13,7 +13,6 @@ use crate::ui;
 use clap::Args;
 use inquire::validator::Validation;
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
@@ -25,6 +24,9 @@ pub struct AddArgs {
     /// Version requirement, defaults to "^" meaning latest; for one package only
     #[arg(long)]
     pub version: Option<String>,
+    /// Follow this channel of the package, such as `beta`, in place of a version requirement; for one package only
+    #[arg(long, value_name = "NAME")]
+    pub channel: Option<String>,
     /// Index key from [indices], skips the prompt
     #[arg(long)]
     pub index: Option<String>,
@@ -55,6 +57,9 @@ pub struct AddArgs {
     /// Add a whole scope without the question
     #[arg(long, short = 'y')]
     pub yes: bool,
+    /// Print what went into ember.toml as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// one argument of `embr add`.
@@ -123,6 +128,15 @@ impl Indices {
         }
     }
 
+    /// the version that `channel` of `name` names, with the same retry as [`Indices::resolve`].
+    fn channel(&mut self, url: &str, name: &str, channel: &str) -> Result<semver::Version, Error> {
+        let index = self.get(url)?;
+        match index.channel(name, channel) {
+            Err(_) if index.ttl_skipped() => self.force(url)?.channel(name, channel),
+            result => result,
+        }
+    }
+
     /// the packages of `scope`, with the same retry as [`Indices::resolve`].
     fn scope(&mut self, url: &str, scope: &str) -> Result<Vec<String>, Error> {
         let index = self.get(url)?;
@@ -141,6 +155,36 @@ impl Indices {
 }
 
 pub fn run(args: AddArgs) -> Result<(), Error> {
+    ui::json_or_text(args.json, || add(&args))
+}
+
+/// the `--json` document: each package that went into `table` of ember.toml.
+fn added(table: &str, planned: &[Planned]) -> serde_json::Value {
+    let added: Vec<serde_json::Value> = planned
+        .iter()
+        .map(|package| {
+            let mut entry = serde_json::json!({
+                "name": package.name,
+                "alias": package.alias,
+                "version": package.version.to_string(),
+                "requirement": package.entry.get("version").and_then(|value| value.as_str()),
+                "table": table,
+            });
+            // `requirement` is null beside a channel that has none
+            if let Some(channel) = package
+                .entry
+                .get("channel")
+                .and_then(|value| value.as_str())
+            {
+                entry["channel"] = channel.into();
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({ "version": ui::JSON_VERSION, "added": added })
+}
+
+fn add(args: &AddArgs) -> Result<serde_json::Value, Error> {
     let manifest = Manifest::load()?;
 
     /* `preadd` runs before anything else, the index prompt included -- it is
@@ -168,6 +212,12 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         if args.version.is_some() {
             return Err(Error::AddOneOnly { flag: "--version" });
         }
+        if args.channel.is_some() {
+            return Err(Error::AddOneOnly { flag: "--channel" });
+        }
+    }
+    if let Some(channel) = &args.channel {
+        check_channel(channel)?;
     }
     if args.version.is_some() && items.iter().any(|item| item.req.is_some()) {
         return Err(Error::AddVersionTwice(args.packages[0].clone()));
@@ -187,12 +237,11 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
             || items
                 .iter()
                 .any(|item| item.key.is_none() && !is_local(&item.package)));
-    let prompted =
-        if asks && crate::project::settings::index_prompt() && std::io::stdin().is_terminal() {
-            prompt_index_key(&manifest)?
-        } else {
-            None
-        };
+    let prompted = if asks && crate::project::settings::index_prompt() && ui::can_prompt() {
+        prompt_index_key(&manifest)?
+    } else {
+        None
+    };
     let index_key = |package: &str, has_key: bool| -> Result<Option<String>, Error> {
         Ok(match &args.index {
             Some(key) => Some(key.clone()),
@@ -266,7 +315,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
             println!("  {name}");
         }
         if !args.yes {
-            if !std::io::stdin().is_terminal() {
+            if !ui::can_prompt() {
                 return Err(Error::AddNeedsYes(scope.clone()));
             }
             inquire::set_global_render_config(crate::ui::render_config());
@@ -280,7 +329,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
                 .prompt()?
             {
                 println!("Nothing added");
-                return Ok(());
+                return Ok(added(table, &[]));
             }
         }
         for name in new {
@@ -318,12 +367,26 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         };
         let index_key = index_key(&item.package, item.key.is_some())?;
         let index_url = manifest.index_url(index_key.as_deref())?.to_string();
-        let req_text = item
-            .req
-            .clone()
-            .or_else(|| args.version.clone())
-            .unwrap_or_else(|| "^".to_string());
+        let stated = item.req.clone().or_else(|| args.version.clone());
+        let req_text = stated.clone().unwrap_or_else(|| "^".to_string());
         let req = parse_version_req(&req_text)?;
+        /* a channel picks the one version that it names now. the entry
+        keeps the channel, and a requirement only when the user gave one */
+        let req = match &args.channel {
+            Some(channel) => {
+                let version = indices.channel(&index_url, &name, channel)?;
+                if !takes_channel(&req, &version) {
+                    return Err(Error::ChannelMismatch {
+                        name,
+                        channel: channel.clone(),
+                        version: version.to_string(),
+                        req: req_text,
+                    });
+                }
+                parse_version_req(&format!("={version}"))?
+            }
+            None => req,
+        };
 
         let package = indices.resolve(&index_url, &name, &req, prefer)?;
         if let Some(allow) = allow
@@ -342,7 +405,17 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
 
         let mut entry = toml_edit::InlineTable::new();
         entry.insert("name", name.clone().into());
-        entry.insert("version", req_text.into());
+        match &args.channel {
+            Some(channel) => {
+                if let Some(stated) = stated {
+                    entry.insert("version", stated.into());
+                }
+                entry.insert("channel", channel.clone().into());
+            }
+            None => {
+                entry.insert("version", req_text.into());
+            }
+        }
         if let Some(key) = &index_key {
             entry.insert("index", key.clone().into());
         }
@@ -437,7 +510,7 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
         return Err(Error::AddFailed(failures));
     }
     if planned.is_empty() {
-        return Ok(());
+        return Ok(added(table, &[]));
     }
 
     let dependencies = document.table_or_create(table)?;
@@ -498,7 +571,8 @@ pub fn run(args: AddArgs) -> Result<(), Error> {
     }
 
     // `postadd` sees the written manifest, so it can go straight to installing
-    lifecycle.after()
+    lifecycle.after()?;
+    Ok(added(table, &planned))
 }
 
 /// reads one argument. `scope/` and `scope/*` name a whole scope. a

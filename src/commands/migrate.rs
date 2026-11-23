@@ -19,7 +19,6 @@ use crate::registry::index::forest;
 use crate::ui;
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IsTerminal;
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
 
@@ -108,7 +107,7 @@ struct Plan {
 pub fn run(args: MigrateArgs) -> Result<(), Error> {
     /* the same rule as init: a terminal gets the question, and anything
     else (CI, a script, --yes) gets the default, which is every file */
-    let ask = !args.yes && std::io::stdin().is_terminal();
+    let ask = !args.yes && ui::can_prompt();
 
     migrate_in(Path::new("."), ask)
 }

@@ -13,6 +13,10 @@ pub struct Cli {
     a usage error: it is what someone types when they want to see the tool. */
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Download nothing: work from the caches on this computer, and fail when something is not in them. EMBER_OFFLINE=1 does the same
+    #[arg(long, global = true)]
+    pub offline: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,7 +111,13 @@ pub enum Commands {
 
     /// Install dependencies and tools from ember.toml
     #[command(visible_alias = "i")]
-    Install(commands::install::InstallArgs),
+    Install(commands::install::InstallCommand),
+
+    /// Move packages to the newest versions that ember.toml takes, or show that change with --dry-run
+    Update(commands::update::UpdateArgs),
+
+    /// Check that ember.toml is valid and that ember.lock is its lock; installs nothing
+    Check(commands::check::CheckArgs),
 
     /// Publish this package to the ember registry
     Publish(commands::publish::PublishArgs),
@@ -136,6 +146,13 @@ pub enum Commands {
     /// Mark a package, or one version, as deprecated, with a reason
     Deprecate(commands::deprecate::DeprecateArgs),
 
+    /// Move, remove, or list the channels of a package: names such as `beta` for one version
+    #[command(subcommand)]
+    Channel(commands::channel::ChannelCommand),
+
+    /// Set or remove the release notes of a published version
+    Notes(commands::notes::NotesArgs),
+
     /// List the notices, warnings and deprecations of the installed packages, or post a notice
     Notices(commands::notices::NoticesArgs),
 
@@ -148,6 +165,18 @@ pub enum Commands {
     /// Manage embr's caches
     #[command(subcommand)]
     Cache(commands::cache::CacheCommand),
+
+    /// Check this embr, the project here, the registry and the caches; repairs nothing, and exits 1 on a failure
+    Doctor(commands::doctor::DoctorArgs),
+
+    /// Write the archive that `embr publish` would upload to a file
+    Pack(commands::pack::PackArgs),
+
+    /// Copy the archive of each package in ember.lock to a folder, for a computer with no network
+    Export(commands::export::ExportArgs),
+
+    /// Put the archives of an `embr export` folder where `embr install --offline --locked` finds them
+    Import(commands::export::ImportArgs),
 
     /// Manage this embr installation
     #[command(subcommand, name = "self")]
@@ -178,13 +207,54 @@ pub enum Outcome {
     Exit(i32),
 }
 
+/** what `command` gets from the network when it can do nothing without
+it, so an offline run stops before the command starts. None for a command
+that works from the caches: its own miss says what is not there. */
+fn needs_network(command: &Commands) -> Option<&'static str> {
+    use commands::{auth::AuthCommand, self_cmd::SelfCommand};
+    match command {
+        Commands::Search(_) => Some("`embr search` reads the registry"),
+        Commands::Publish(args) if !args.local && !args.dry_run => {
+            Some("`embr publish` uploads to the registry; --local and --dry-run work offline")
+        }
+        Commands::Publish(args) if !args.local && args.channel.is_some() => Some(
+            "`embr publish --channel` reads the versions of the package from the registry; --local works offline",
+        ),
+        Commands::Channel(_) => Some("`embr channel` reads and writes the registry"),
+        Commands::Notes(_) => Some("`embr notes` writes to the registry"),
+        Commands::Yank(_) => Some("`embr yank` writes to the registry"),
+        Commands::Deprecate(_) => Some("`embr deprecate` writes to the registry"),
+        Commands::Notices(args) if args.command.is_some() => {
+            Some("`embr notices add` and `remove` write to the registry")
+        }
+        Commands::Auth(args) if matches!(args.command, AuthCommand::Login { .. }) => {
+            Some("`embr auth login` reaches the registry")
+        }
+        Commands::SelfManage(SelfCommand::Update { .. }) => {
+            Some("`embr self update` downloads a release from GitHub")
+        }
+        _ => None,
+    }
+}
+
 /// runs one parsed command.
 pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
+    if crate::net::offline::is_enabled()
+        && let Some(needs) = needs_network(&command)
+    {
+        return Err(Error::Offline(needs.to_string()));
+    }
     let done = |result: Result<(), Error>| result.map(|()| Outcome::Done);
     /* a --json run prints one document on stdout, so no "Done in" line
     may follow it */
     let shown = |json: bool, result: Result<(), Error>| {
         result.map(|()| if json { Outcome::Quiet } else { Outcome::Done })
+    };
+    /* a check that ran and found a problem has printed it. it exits 1
+    with no error line */
+    let checked = |json: bool, result: Result<bool, Error>| match result {
+        Ok(false) => Ok(Outcome::Exit(1)),
+        result => shown(json, result.map(|_| ())),
     };
     match command {
         Commands::Init(args) => done(commands::init::run(args)),
@@ -193,13 +263,17 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         /* execute hands the terminal to another program, so its exit code
         passes through as-is and no "Done in" line prints */
         Commands::Execute(args) => commands::execute::run(args).map(Outcome::Exit),
-        Commands::Add(args) => done(commands::add::run(args)),
-        Commands::Remove(args) => done(commands::remove::run(args)),
+        Commands::Add(args) => shown(args.json, commands::add::run(args)),
+        Commands::Remove(args) => shown(args.json, commands::remove::run(args)),
         Commands::Index(command) => done(commands::index::run(command)),
         Commands::Migrate(args) => done(commands::migrate::run(args)),
-        Commands::Install(args) => done(commands::install::run(args)),
+        Commands::Install(command) => {
+            shown(command.args.json, commands::install::run_command(command))
+        }
+        Commands::Update(args) => shown(args.json, commands::update::run(args)),
+        Commands::Check(args) => commands::check::run(args),
         Commands::Patch(args) => done(commands::patch::run(args)),
-        Commands::Publish(args) => done(commands::publish::run(args)),
+        Commands::Publish(args) => shown(args.json, commands::publish::run(args)),
         Commands::Outdated(args) => shown(args.json, commands::outdated::run(args)),
         Commands::Tree(args) => shown(args.json, commands::tree::tree(args)),
         Commands::Why(args) => shown(args.json, commands::tree::why(args)),
@@ -208,11 +282,17 @@ pub fn dispatch(command: Commands) -> Result<Outcome, Error> {
         Commands::Auth(args) => done(commands::auth::run(args)),
         Commands::Yank(args) => done(commands::yank::run(args)),
         Commands::Deprecate(args) => done(commands::deprecate::run(args)),
+        Commands::Channel(command) => shown(command.is_json(), commands::channel::run(command)),
+        Commands::Notes(args) => shown(args.json, commands::notes::run(args)),
         Commands::Notices(args) => shown(args.json, commands::notices::run(args)),
         Commands::Audit(args) => shown(args.json, commands::audit::run(args)),
         /* the protocol owns stdout, so no "Done in" line may follow it */
         Commands::Mcp => commands::mcp::run().map(|()| Outcome::Quiet),
-        Commands::Cache(command) => done(commands::cache::run(command)),
+        Commands::Cache(command) => checked(command.is_json(), commands::cache::run(command)),
+        Commands::Doctor(args) => checked(args.json, commands::doctor::run(args)),
+        Commands::Pack(args) => shown(args.json, commands::pack::run(args)),
+        Commands::Export(args) => shown(args.json, commands::export::export(args)),
+        Commands::Import(args) => shown(args.json, commands::export::import(args)),
         Commands::SelfManage(command) => done(commands::self_cmd::run(command)),
         Commands::Tool(command) => {
             let json = matches!(command, commands::tool::ToolCommand::List { json: true });

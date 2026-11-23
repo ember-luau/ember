@@ -78,6 +78,12 @@ Ember token. The API makes the token when the user approves the code. */
 pub fn login() -> Result<Credentials, Error> {
     let api = registry::api_url();
     let started = start(&api, &login_name())?;
+    if !registry::is_login_page(&started.verification_uri, &api) {
+        return Err(Error::AuthFailed(format!(
+            "the registry named the page {}, which is not an https address of the registry or of github.com",
+            ui::printable(&started.verification_uri)
+        )));
+    }
     print_instructions(&started);
     open_browser(&started.verification_uri);
     let spinner = ui::spinner("Waiting for the approval in the browser");
@@ -87,6 +93,17 @@ pub fn login() -> Result<Credentials, Error> {
     save(&credentials)?;
     ui::print_success(&format!("Logged in as {}", credentials.login));
     Ok(credentials)
+}
+
+/** refuses a token that no HTTP header can hold: a space, a line break or
+any other character that is not printable ASCII. ureq refuses the header
+then, and its error names the whole value. `source` says where the token
+is from, and the token itself is in no message. */
+pub fn check_token(token: &str, source: &'static str) -> Result<(), Error> {
+    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(Error::TokenMalformed(source));
+    }
+    Ok(())
 }
 
 /// EMBER_TOKEN, when it is set and not empty.
@@ -102,6 +119,7 @@ token that embr 0.9 stored is traded for an Ember token on first use. a
 GitHub token that the API refuses is deleted, as a dead login. */
 pub fn token() -> Result<Option<String>, Error> {
     if let Some(token) = env_token() {
+        check_token(&token, TOKEN_VAR)?;
         return Ok(Some(token));
     }
     /* one trade at a time. without the lock, each download worker of an
@@ -111,6 +129,7 @@ pub fn token() -> Result<Option<String>, Error> {
     let Some(stored) = load()? else {
         return Ok(None);
     };
+    check_token(&stored.token, "the stored login")?;
     if stored.token.starts_with(TOKEN_PREFIX) {
         return Ok(Some(stored.token));
     }
@@ -142,10 +161,10 @@ pub fn exchange(api: &str, github_token: &str) -> Result<Credentials, Error> {
         login: String,
     }
     let url = format!("{api}/v1/auth/token");
-    let answer: Exchanged = call(http::agent().post(&url), github_token)?;
+    let answer: Exchanged = call(http::manual_redirect_agent().post(&url), github_token)?;
     Ok(Credentials {
         token: answer.token,
-        login: answer.login,
+        login: ui::one_line(&answer.login),
     })
 }
 
@@ -155,19 +174,24 @@ pub fn check(api: &str, token: &str) -> Result<Credentials, Error> {
     struct Me {
         login: String,
     }
-    let me: Me = call(http::agent().get(&format!("{api}/api/me")), token)?;
+    let me: Me = call(
+        http::manual_redirect_agent().get(&format!("{api}/api/me")),
+        token,
+    )?;
     Ok(Credentials {
         token: token.to_string(),
-        login: me.login,
+        login: ui::one_line(&me.login),
     })
 }
 
 /// sends `request` with `token` and reads the JSON answer.
 fn call<T: DeserializeOwned>(request: ureq::Request, token: &str) -> Result<T, Error> {
-    request
+    check_token(token, "the token")?;
+    let response = request
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .call();
+    http::no_redirect(response)
         .map_err(registry::api_error)?
         .into_json()
         .map_err(|error| http::error::HttpError::from(error).into())
@@ -237,7 +261,10 @@ fn print_instructions(started: &Started) {
     );
     println!(
         "Approve only if the page shows the code {}",
-        started.user_code.as_str().with(accent).bold(),
+        ui::strip_controls(&started.user_code)
+            .as_str()
+            .with(accent)
+            .bold(),
     );
 }
 
@@ -295,7 +322,7 @@ fn poll(
                 let token: Token = response.into_json().map_err(HttpError::from)?;
                 return Ok(Credentials {
                     token: token.token,
-                    login: token.login,
+                    login: ui::one_line(&token.login),
                 });
             }
             Err(ureq::Error::Status(400, response)) => response
@@ -399,6 +426,42 @@ mod tests {
 
         // a GitHub token that the API refuses is a dead login, not an error
         assert!(upgrade(&api, "gho_dead").unwrap().is_none());
+    }
+
+    /** a token with a line break is no header value. ureq says so with the
+    whole header in its error, and `embr doctor --json` printed that. */
+    #[test]
+    fn a_token_that_no_header_holds_is_refused_and_not_printed() {
+        assert!(check_token("ember_abc123", TOKEN_VAR).is_ok());
+        for token in [
+            "ember_secret\nx",
+            "ember secret",
+            "ember_secret\r",
+            "ember_sécret",
+            "",
+        ] {
+            let error = check_token(token, TOKEN_VAR).unwrap_err().to_string();
+            assert!(error.contains(TOKEN_VAR), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+        }
+        // no request goes out, and the error of a check names no token
+        let (api, log) = mock::serve(|_| mock::reply("200 OK", r#"{"login":"octocat"}"#));
+        let error = check(&api, "ember_secret\nx").err().unwrap().to_string();
+        assert!(!error.contains("secret"), "{error}");
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// the token goes to the API and to no address that the API names.
+    #[test]
+    fn a_token_check_follows_no_redirect() {
+        let (other, other_log) = mock::serve(|_| mock::reply("200 OK", r#"{"login":"mallory"}"#));
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {other}/api/me\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (api, _) = mock::serve(move |_| redirect.clone());
+        assert!(check(&api, "ember_good").is_err());
+        assert!(other_log.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -42,6 +42,9 @@ fn main() {
     }
 
     let cli = parse_cli(embr::cli::expand_shortcut(args));
+    if cli.offline || ui::env_on("EMBER_OFFLINE") {
+        embr::net::offline::enable();
+    }
     let Some(command) = cli.command else {
         print_root_help();
         return;
@@ -309,12 +312,12 @@ mod tests {
 
         let Ok(Cli {
             command: Some(Commands::Run(run)),
+            ..
         }) = parse(&["embr", "build:prod", "--watch"])
         else {
             panic!("`embr build:prod` should run the build:prod script");
         };
-        assert_eq!(run.name.as_deref(), Some("build:prod"));
-        assert_eq!(run.args, ["--watch"]);
+        assert_eq!(run.words, ["build:prod", "--watch"]);
         assert!(parse(&["embr", "format:check"]).is_ok());
 
         // a script that is no shortcut, an empty tail, or no colon still needs `run`

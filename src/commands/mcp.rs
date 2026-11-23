@@ -368,7 +368,8 @@ impl SearchEntry {
             parts.push(format!("deprecated: {reason}"));
         }
         parts.push(format!("install: embr add {}", self.name));
-        format!("- {}", parts.join(" | "))
+        // a package is one line, and `embr search` prints it on a terminal
+        format!("- {}", crate::ui::one_line(&parts.join(" | ")))
     }
 }
 
@@ -533,7 +534,11 @@ pub(crate) fn search_registries(args: &SearchAllArgs, fetch: Fetch, timeout: Dur
                     lines.push('\n');
                 }
             }
-            Err(reason) => failures.push_str(&format!("- {}: {reason}\n", registry.name())),
+            Err(reason) => failures.push_str(&format!(
+                "- {}: {}\n",
+                registry.name(),
+                crate::ui::one_line(&reason.to_string())
+            )),
         }
     }
     let mut text = if counts.is_empty() {
@@ -716,7 +721,7 @@ fn registry_hit(
         downloads: None,
         description: non_empty(description).map(str::to_string),
         deprecated: None,
-        line: format!("- {}", parts.join(" | ")),
+        line: format!("- {}", crate::ui::one_line(&parts.join(" | "))),
     }
 }
 

@@ -47,8 +47,11 @@ pub fn bulk_agent() -> &'static ureq::Agent {
 }
 
 /** [`bulk_agent`] that gives every redirect back to the caller. a request
-that carries the Ember token or a link key goes through it, because ureq
-sends custom headers on to the redirect target. */
+that carries a token, an OIDC token or a link key goes through it, because
+ureq sends custom headers on to the redirect target. a write goes through
+it too: ureq follows a 301, 302 or 303 as a GET with no body, and the
+answer of that GET then reads as the answer of the write. see
+[`no_redirect`]. */
 pub fn manual_redirect_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -60,6 +63,22 @@ pub fn manual_redirect_agent() -> &'static ureq::Agent {
             .redirects(0)
             .build()
     })
+}
+
+/** the answer of a request through [`manual_redirect_agent`], with a 3xx
+as the error that a 4xx is. a write that the registry did not take is then
+no success, and the caller sends nothing on to the address of the
+redirect. */
+#[allow(clippy::result_large_err)] // the callers match on ureq's own error
+pub fn no_redirect(
+    response: Result<ureq::Response, ureq::Error>,
+) -> Result<ureq::Response, ureq::Error> {
+    match response {
+        Ok(response) if (300..400).contains(&response.status()) => {
+            Err(ureq::Error::Status(response.status(), response))
+        }
+        other => other,
+    }
 }
 
 /// Sets our User-Agent first so callers can still override it.
@@ -232,6 +251,22 @@ pub(crate) mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ureq puts the header and its value in the error of a bad header, and the value is a token.
+    #[test]
+    fn a_bad_header_error_names_no_value() {
+        let error = agent()
+            .get("http://127.0.0.1:1/")
+            .set("Authorization", "Bearer ghp_secret\nx")
+            .call()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ghp_secret"),
+            "ureq changed: {error}"
+        );
+        let shown = error::HttpError::from(error).to_string();
+        assert!(!shown.contains("ghp_secret"), "{shown}");
+    }
 
     #[test]
     fn a_body_over_the_cap_is_refused() {

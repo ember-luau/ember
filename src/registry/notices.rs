@@ -98,6 +98,8 @@ pub struct Meta {
     pub deprecated: Option<String>,
     pub replacement: Option<String>,
     pub notices: Vec<Notice>,
+    /// `[meta.channels]`: each channel and the one version that it names.
+    pub channels: std::collections::BTreeMap<String, String>,
 }
 
 impl Meta {
@@ -118,10 +120,18 @@ impl Meta {
             .flatten()
             .filter_map(Notice::of)
             .collect();
+        let channels = meta
+            .and_then(|meta| meta.get("channels"))
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+            .filter_map(|(channel, version)| Some((channel.clone(), version.as_str()?.to_string())))
+            .collect();
         Meta {
             deprecated: text("deprecated"),
             replacement: text("replacement"),
             notices,
+            channels,
         }
     }
 }
@@ -270,7 +280,7 @@ pub fn items(
 /** an index to read notices from. `fetch` false reads only a copy that is
 on disk already, with no request: an install that resolved nothing must
 not reach the network for this. Forest keeps no package files. */
-fn open(url: &str, fetch: bool) -> Option<Index> {
+pub(crate) fn open(url: &str, fetch: bool) -> Option<Index> {
     if forest::is_forest(url) || crate::registry::index::luarocks::is_luarocks(url) {
         return None;
     }

@@ -32,6 +32,9 @@ const MOVED: [(&str, &str); 2] = [
 /// points embr at another API, such as a local backend. unset means [`API_URL`].
 pub const API_VAR: &str = "EMBER_API_URL";
 
+/// the header of a publish that names the channel to set.
+const CHANNEL_HEADER: &str = "X-Ember-Channel";
+
 /// the header that carries an unlisted package's link key.
 const LINK_KEY_HEADER: &str = "Ember-Link-Key";
 
@@ -183,6 +186,31 @@ fn refused(error: ureq::Error, name: &str, access: &Access) -> Error {
     }
 }
 
+/** the package answer of `name` as JSON, with the token and the link key
+that embr holds for it. beside `versions` it has the keys that no index
+file has, such as `trust` and `notes`. */
+pub fn package_answer(name: &str) -> Result<serde_json::Value, Error> {
+    let body = package(&api_url(), name, &Access::of(name)?)?;
+    Ok(serde_json::from_str(&body).map_err(HttpError::from)?)
+}
+
+/** each version of `name` that the registry holds, yanked ones included.
+none for a package that the registry does not have, or does not show to
+this caller: the publish that follows then gets the refusal. */
+pub fn published_versions(name: &str) -> Result<Vec<semver::Version>, Error> {
+    let answer = match package_answer(name) {
+        Err(Error::HiddenNotFound { .. }) => return Ok(Vec::new()),
+        answer => answer?,
+    };
+    // a key is "<version> <target>", as in the package file
+    Ok(answer["versions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|versions| versions.keys())
+        .filter_map(|key| semver::Version::parse(key.split(' ').next()?).ok())
+        .collect())
+}
+
 /// the error for any failed API call. a 403 is a refusal, not a rate limit.
 pub fn api_error(error: ureq::Error) -> Error {
     match error {
@@ -218,9 +246,15 @@ version already exists, 413 over the size cap. `oidc_token` is the
 Actions OIDC token when there is one. It rides along in its own header.
 next to an Ember `token` it is provenance only. with no token it is the
 credential, and the API takes it when the package names this workflow as
-a trusted publisher. */
-pub fn publish(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
-    publish_at(&api_url(), token, oidc_token, archive)
+a trusted publisher. `channel` goes in `X-Ember-Channel`: the API then
+sets that channel to the version of the archive, in the same index commit. */
+pub fn publish(
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    archive: &[u8],
+    channel: Option<&str>,
+) -> Result<(), Error> {
+    publish_at(&api_url(), token, oidc_token, archive, channel)
 }
 
 fn publish_at(
@@ -228,10 +262,13 @@ fn publish_at(
     token: Option<&str>,
     oidc_token: Option<&str>,
     archive: &[u8],
+    channel: Option<&str>,
 ) -> Result<(), Error> {
     let url = format!("{api}/v1/publish");
-    // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
-    let mut request = http::bulk_agent()
+    /* no overall deadline, a package archive on a slow uplink shouldn't die
+    at the minute mark. no redirect: the OIDC token is a custom header, and
+    ureq sends those on to another host */
+    let mut request = http::manual_redirect_agent()
         .post(&url)
         .set("User-Agent", http::USER_AGENT)
         .set("Content-Type", "application/gzip");
@@ -241,7 +278,10 @@ fn publish_at(
     if let Some(oidc_token) = oidc_token {
         request = request.set(crate::net::provenance::HEADER, oidc_token);
     }
-    let response = request.send_bytes(archive);
+    if let Some(channel) = channel {
+        request = request.set(CHANNEL_HEADER, channel);
+    }
+    let response = http::no_redirect(request.send_bytes(archive));
 
     match response {
         Ok(_) => Ok(()),
@@ -298,6 +338,60 @@ pub fn deprecate(
         None => call("DELETE", None),
     }
     .map(drop)
+}
+
+/** moves `channel` of `name` to `version`, a published version that is not
+yanked, through `PUT /v1/packages/{scope}/{name}/channels/{channel}`.
+`version` None removes the channel through `DELETE`. owners only, as for
+a deprecation. */
+pub fn channel(
+    token: &str,
+    name: &str,
+    channel: &str,
+    version: Option<&semver::Version>,
+) -> Result<(), Error> {
+    let path = format!("/v1/packages/{name}/channels/{channel}");
+    let api = api_url();
+    let call = |method, body| owner_call(&api, token, "channel change", method, &path, None, body);
+    match version {
+        Some(version) => call(
+            "PUT",
+            Some(serde_json::json!({ "version": version.to_string() })),
+        ),
+        None => call("DELETE", None),
+    }
+    .map(drop)
+}
+
+/** sets the release notes of a version through `PUT
+/v1/packages/{scope}/{name}/{version}/notes`, with the Markdown as the
+body. `body` None removes them through `DELETE`. `oidc_token` is the
+credential of a trusted publisher that has no Ember token, in the header
+of a publish. */
+pub fn notes(
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    name: &str,
+    version: &semver::Version,
+    body: Option<&str>,
+) -> Result<(), Error> {
+    let url = format!("{}/v1/packages/{name}/{version}/notes", api_url());
+    let method = if body.is_some() { "PUT" } else { "DELETE" };
+    let mut request = http::manual_redirect_agent()
+        .request(method, &url)
+        .set("User-Agent", http::USER_AGENT);
+    if let Some(token) = token {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    } else if let Some(oidc_token) = oidc_token {
+        request = request.set(crate::net::provenance::HEADER, oidc_token);
+    }
+    let response = match body {
+        Some(body) => request
+            .set("Content-Type", "text/markdown")
+            .send_string(body),
+        None => request.call(),
+    };
+    owner_answer("release notes", response).map(drop)
 }
 
 /** posts a notice on `name`, or on the versions that the semver range
@@ -357,7 +451,7 @@ pub(crate) fn owner_call(
     if let Some(target) = target {
         url.push_str(&format!("?target={target}"));
     }
-    let request = http::agent()
+    let request = http::manual_redirect_agent()
         .request(method, &url)
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"));
@@ -378,7 +472,7 @@ pub(crate) fn owner_upload(
     path: &str,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let response = http::bulk_agent()
+    let response = http::manual_redirect_agent()
         .put(&format!("{api}{path}"))
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"))
@@ -393,7 +487,7 @@ fn owner_answer(
     action: &'static str,
     response: Result<ureq::Response, ureq::Error>,
 ) -> Result<String, Error> {
-    match response {
+    match http::no_redirect(response) {
         Ok(response) => Ok(response.into_string()?),
         Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {
             action,
@@ -405,9 +499,57 @@ fn owner_answer(
 }
 
 fn error_message(status: u16, body: Option<&str>) -> String {
+    if (300..400).contains(&status) {
+        return format!(
+            "the registry answered HTTP {status}, a redirect, and embr sends no token and no upload to another address; check {API_VAR}"
+        );
+    }
     body.and_then(|body| serde_json::from_str::<ErrorBody>(body).ok())
         .map(|body| body.error)
         .unwrap_or_else(|| format!("the registry answered HTTP {status}"))
+}
+
+/** `url` without the `user:password@` of its host. EMBER_API_URL can hold
+one, and embr prints the URL in `embr doctor` and in a publish. */
+pub fn without_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
+/** whether embr may show `uri` as the page of a login and open it: an
+https address on github.com, on the host of the API `api`, or on the site
+that the API host is `api.` of. the answer of `POST /v1/cli/login` is text
+from the network, and the system opener starts a program for a `file:` or
+a custom scheme. an API on plain http, a local backend, may name its own
+host. */
+pub fn is_login_page(uri: &str, api: &str) -> bool {
+    let host_of = |url: &str| {
+        origin(url).and_then(|origin| {
+            let (scheme, authority) = origin.split_once("://")?;
+            let host = authority.rsplit('@').next()?;
+            let host = host.split(':').next()?.to_string();
+            Some((scheme.to_string(), host))
+        })
+    };
+    let (Some((scheme, host)), Some((api_scheme, api_host))) = (host_of(uri), host_of(api)) else {
+        return false;
+    };
+    if uri.chars().any(|c| c.is_control() || c.is_whitespace()) || host.is_empty() {
+        return false;
+    }
+    let site = api_host.strip_prefix("api.").unwrap_or(&api_host);
+    let ours = host == api_host || host == site;
+    match scheme.as_str() {
+        "https" => ours || host == "github.com",
+        "http" => ours && api_scheme == "http",
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +661,113 @@ mod tests {
         assert!(!followed.contains("ember_abc"), "{followed}");
     }
 
+    /** a write that the registry answers with a redirect is no success, and
+    the address of the redirect gets no request: no token, no OIDC token
+    and no upload. ureq follows a 302 as a GET with no body, and keeps a
+    custom header on the way. */
+    #[test]
+    fn a_redirected_write_fails_and_sends_nothing_on() {
+        for status in [
+            "301 Moved Permanently",
+            "302 Found",
+            "303 See Other",
+            "307 Temporary Redirect",
+            "308 Permanent Redirect",
+        ] {
+            let (other, other_log) = mock::serve(|_| mock::reply("200 OK", "{}"));
+            let redirect = format!(
+                "HTTP/1.1 {status}\r\nLocation: {other}/collect\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let (api, api_log) = mock::serve(move |_| redirect.clone());
+
+            let published = publish_at(&api, None, Some("oidc-secret"), b"archive", None);
+            assert!(
+                matches!(&published, Err(Error::PublishFailed { message, .. }) if message.contains("redirect")),
+                "{status}: {published:?}"
+            );
+            let with_token = publish_at(
+                &api,
+                Some("ember_abc"),
+                Some("oidc-secret"),
+                b"archive",
+                None,
+            );
+            assert!(with_token.is_err(), "{status}");
+            let called = owner_call(&api, "ember_abc", "yank", "PUT", "/v1/x", None, None);
+            assert!(
+                matches!(&called, Err(Error::OwnerActionFailed { message, .. }) if message.contains("redirect")),
+                "{status}: {called:?}"
+            );
+            let uploaded = owner_upload(&api, "ember_abc", "upload", "/v1/x", b"bytes");
+            assert!(uploaded.is_err(), "{status}");
+
+            assert_eq!(api_log.lock().unwrap().len(), 4, "{status}");
+            assert!(api_log.lock().unwrap()[0].contains("x-github-oidc-token: oidc-secret"));
+            let followed = other_log.lock().unwrap();
+            assert!(followed.is_empty(), "{status}: {followed:?}");
+        }
+    }
+
+    #[test]
+    fn the_api_url_shows_without_its_password() {
+        for (url, shown) in [
+            ("https://api.emberpm.dev", "https://api.emberpm.dev"),
+            (
+                "https://user:secret@host.example/v1",
+                "https://host.example/v1",
+            ),
+            ("http://token@127.0.0.1:8787", "http://127.0.0.1:8787"),
+            ("https://a:b@c@host.example", "https://host.example"),
+            ("https://host.example/path@x", "https://host.example/path@x"),
+            ("not a url", "not a url"),
+        ] {
+            assert_eq!(without_userinfo(url), shown);
+        }
+    }
+
+    #[test]
+    fn a_login_page_is_https_on_the_registry_or_on_github() {
+        let api = "https://api.emberpm.dev";
+        for page in [
+            "https://emberpm.dev/cli/connect?code=ABCD-EFGH",
+            "https://api.emberpm.dev/cli",
+            "https://github.com/login/device",
+            "HTTPS://GitHub.com/login/device",
+        ] {
+            assert!(is_login_page(page, api), "{page}");
+        }
+        for page in [
+            "http://emberpm.dev/cli/connect",
+            "https://evil.example/cli/connect",
+            "https://emberpm.dev.evil.example/",
+            "https://github.com@evil.example/",
+            "https://evil.example/https://github.com/",
+            "file:///home/user/.ssh/id_rsa",
+            "javascript:alert(1)",
+            "vscode://extension/run?x",
+            "https://emberpm.dev/\u{1b}[2K",
+            "https://emberpm.dev/ --flag",
+            "emberpm.dev/cli",
+            "",
+        ] {
+            assert!(!is_login_page(page, api), "{page}");
+        }
+        // a local backend on plain http names its own host
+        assert!(is_login_page(
+            "http://127.0.0.1:8787/cli",
+            "http://127.0.0.1:8787"
+        ));
+        assert!(!is_login_page(
+            "http://127.0.0.1:9999/cli",
+            "https://api.emberpm.dev"
+        ));
+        assert!(!is_login_page(
+            "http://evil.example/cli",
+            "http://127.0.0.1:8787"
+        ));
+    }
+
     #[test]
     fn link_keys_have_one_shape() {
         assert!(is_link_key("0123456789abcdef0123456789abcdef"));
@@ -542,7 +791,13 @@ mod tests {
             }
         });
 
-        let refused = publish_at(&api, None, Some("header.claims.signature"), b"archive");
+        let refused = publish_at(
+            &api,
+            None,
+            Some("header.claims.signature"),
+            b"archive",
+            None,
+        );
         let Err(Error::PublishFailed { status, message }) = refused else {
             panic!("a refusal is a publish failure: {refused:?}");
         };
@@ -560,7 +815,14 @@ mod tests {
         assert!(!sent.contains("authorization"), "{sent}");
 
         // next to a token, the token is the credential, as before
-        publish_at(&api, Some("ember_abc"), Some("oidc"), b"archive").unwrap();
+        publish_at(
+            &api,
+            Some("ember_abc"),
+            Some("oidc"),
+            b"archive",
+            Some("beta"),
+        )
+        .unwrap();
         let sent = log.lock().unwrap()[1].clone();
         assert!(sent.contains("authorization: bearer ember_abc"), "{sent}");
         assert!(sent.contains("x-github-oidc-token: oidc"), "{sent}");

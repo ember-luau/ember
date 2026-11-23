@@ -10,12 +10,19 @@ pub struct RemoveArgs {
     /// Dependencies to remove, each an alias from ember.toml or a full scope/name
     #[arg(required = true)]
     pub dependencies: Vec<String>,
+    /// Print what left ember.toml as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// the tables a dependency can be in, as ember.toml names them.
 const TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "peer-dependencies"];
 
 pub fn run(args: RemoveArgs) -> Result<(), Error> {
+    ui::json_or_text(args.json, || remove(&args))
+}
+
+fn remove(args: &RemoveArgs) -> Result<serde_json::Value, Error> {
     let manifest = Manifest::load()?;
     let lifecycle = Lifecycle::of(&manifest, hooks::REMOVE);
     lifecycle.before()?;
@@ -55,7 +62,14 @@ pub fn run(args: RemoveArgs) -> Result<(), Error> {
     }
     println!("Run `embr install` to update the installed packages");
 
-    lifecycle.after()
+    lifecycle.after()?;
+    let removed: Vec<serde_json::Value> = removed
+        .iter()
+        .map(|(table, alias, name)| {
+            serde_json::json!({ "name": name, "alias": alias, "table": table })
+        })
+        .collect();
+    Ok(serde_json::json!({ "version": ui::JSON_VERSION, "removed": removed }))
 }
 
 /** the (table, alias, package name) of each entry that one of `wanted`

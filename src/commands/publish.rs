@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::net::{auth, provenance, registry};
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::{
-    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Manifest, Target, highlight,
+    DEFAULT_INDEX_NAME, DEFAULT_INDEX_URL, Dependency, Manifest, Target, check_channel, highlight,
     is_github_username, manifest_in, split_package_name, workspace_version_req,
 };
 use crate::project::package;
@@ -12,7 +12,7 @@ use crate::registry::{local, pack};
 use crate::ui;
 use clap::Args;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
@@ -25,10 +25,40 @@ pub struct PublishArgs {
     /// Publish to the local registry in ~/.ember/local, with no login and no upload
     #[arg(long)]
     pub local: bool,
+    /// Publish a prerelease to this channel, such as `beta`. embr picks the version: <version>-<channel>.<n>
+    #[arg(long, value_name = "NAME")]
+    pub channel: Option<String>,
+    /// Markdown file with the release notes of the version
+    #[arg(long, value_name = "FILE", conflicts_with = "local")]
+    pub notes: Option<PathBuf>,
+    /// Print what was published as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Error> {
+    ui::json_or_text(args.json, || {
+        let mut published = Vec::new();
+        publish(&args, &mut published)?;
+        Ok(serde_json::json!({
+            "version": ui::JSON_VERSION,
+            "dry_run": args.dry_run,
+            "local": args.local,
+            "published": published,
+        }))
+    })
+}
+
+/// `published` gets one entry for each archive that went out, or that a dry run packed.
+fn publish(args: &PublishArgs, published: &mut Vec<serde_json::Value>) -> Result<(), Error> {
     let manifest = Manifest::load()?;
+    /* both fail here, before a hook runs or an archive goes out. a notes
+    file that fails after the upload leaves a version without notes */
+    if let Some(channel) = &args.channel {
+        check_channel(channel)?;
+    }
+    let notes = args.notes.as_deref().map(super::notes::read).transpose()?;
+    let notes = notes.as_deref();
 
     /* read off the manifest before publish_project consumes it. `prepublish`
     is the hook for building whatever ships, so it runs before the archive is
@@ -49,7 +79,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let oidc_token = oidc_token.as_deref();
 
     if manifest.workspace_members().is_empty() {
-        publish_project(manifest, &args, oidc_token)?;
+        publish_project(manifest, args, notes, oidc_token, published)?;
         return lifecycle.after();
     }
 
@@ -60,7 +90,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
     let mut failed = Vec::new();
 
     let root_name = manifest.name().unwrap_or("the workspace root").to_string();
-    if let Err(error) = publish_project(manifest, &args, oidc_token) {
+    if let Err(error) = publish_project(manifest, args, notes, oidc_token, published) {
         ui::print_error(&format!("{root_name}: {error}"));
         failed.push(root_name);
     }
@@ -74,7 +104,7 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
             let manifest = Manifest::load()?;
             let lifecycle = Lifecycle::of(&manifest, hooks::PUBLISH);
             lifecycle.before()?;
-            publish_project(manifest, &args, oidc_token)?;
+            publish_project(manifest, args, notes, oidc_token, published)?;
             lifecycle.after()
         });
         if let Err(error) = result {
@@ -95,11 +125,13 @@ pub fn run(args: PublishArgs) -> Result<(), Error> {
 target that `selected` names, or for each target when it names none.
 private packages and main-less workspace roots say so and skip instead of
 failing. that's how a container root stays unpublished while its members
-go out. */
+go out. `notes` is the text of the `--notes` file. */
 fn publish_project(
     mut manifest: Manifest,
     args: &PublishArgs,
+    notes: Option<&str>,
     oidc_token: Option<&str>,
+    published: &mut Vec<serde_json::Value>,
 ) -> Result<(), Error> {
     /* the one command that needs a [package] table: it is the registry
     metadata, and nothing else in embr reads it. a workspace root without one
@@ -131,6 +163,22 @@ fn publish_project(
         return Ok(());
     }
 
+    /* a channel moves after the publish, and the version that this
+    package was tested with moves with it. the local registry refuses too,
+    so a local publish shows what the registry will say. a dev dependency
+    never reaches the project that installs the package, so it may */
+    if let Some((alias, channel)) = manifest
+        .dependencies
+        .iter()
+        .chain(&manifest.peer_dependencies)
+        .find_map(|(alias, dependency)| Some((alias, dependency.channel()?)))
+    {
+        return Err(Error::PublishChannelDependency {
+            alias: alias.clone(),
+            channel: channel.to_string(),
+        });
+    }
+
     let ids = select_targets(manifest.targets(), &args.targets)?;
     let root = Path::new(".");
     /* a dry run builds too: it shows the archives a real publish would
@@ -145,13 +193,7 @@ fn publish_project(
         .iter()
         .any(|target| target.language.builder().is_some() && ids.contains(&target.id()));
     if building && manifest.all_dependencies().next().is_some() {
-        let args = super::install::InstallArgs {
-            locked: false,
-            offline: false,
-            refresh: false,
-            strict_peers: false,
-            update: Vec::new(),
-        };
+        let args = super::install::InstallArgs::default();
         super::install::install_project(&args, &manifest, false)?;
     }
     for target in manifest.targets() {
@@ -184,6 +226,22 @@ fn publish_project(
     // the API 400s descriptions past its cap, catch that before packing too
     validate_description(package.description.as_deref())?;
 
+    /* a publish to a channel gets its version from embr, so the author
+    does not count prereleases. a version that has a prerelease part is the
+    author's own choice and goes out as it is. the version goes into the
+    archive's manifest only, and each target of this run gets the same one */
+    let version = match &args.channel {
+        Some(channel) if version.pre.is_empty() => {
+            let published = published_versions(&package_name, args.local)?;
+            let next = next_channel_version(&version, channel, &published);
+            if let Some(package) = &mut manifest.package {
+                package.version = next.to_string();
+            }
+            next
+        }
+        _ => version,
+    };
+
     /* workspace deps become registry ones in the archive's manifest,
     the on-disk ember.toml is never touched */
     convert_workspace_dependencies(&mut manifest, root)?;
@@ -193,6 +251,7 @@ fn publish_project(
         write_index_urls(&mut manifest)?;
     }
     strip_local_tables(&mut manifest);
+    strip_dev_channels(&mut manifest);
 
     let targets: Vec<Target> = std::mem::take(&mut manifest.targets)
         .into_iter()
@@ -216,7 +275,7 @@ fn publish_project(
             &mut token,
         );
         match result {
-            Ok(()) => {}
+            Ok(record) => published.push(record),
             // one target fails the way a single publish always has
             Err(error) if count == 1 => return Err(error),
             Err(error) => {
@@ -226,6 +285,7 @@ fn publish_project(
         }
     }
 
+    let mut notes_sent = Ok(());
     if !args.dry_run && failed.len() < count {
         // a name with no scope is how `embr add` finds a local package
         let (_, short_name) = split_package_name(&package_name)?;
@@ -234,12 +294,103 @@ fn publish_project(
         } else {
             &package_name
         };
-        println!("Install it with `embr add {name}`");
+        match &args.channel {
+            Some(channel) => {
+                println!("The channel {channel} now names {version}");
+                println!("Install it with `embr add {name} --channel {channel}`");
+            }
+            None => println!("Install it with `embr add {name}`"),
+        }
+        if let Some(body) = notes {
+            notes_sent = send_notes(args, &package_name, &version, body, token.as_deref());
+        }
     }
     if !failed.is_empty() {
+        // the failed targets are the error of the run, so the notes say theirs here
+        if let Err(error) = &notes_sent {
+            ui::print_error(&error.to_string());
+        }
         return Err(Error::TargetPublishFailed(failed));
     }
+    notes_sent
+}
+
+/** sends the `--notes` text for a version that this run published. the
+credential is the one of the upload: the Ember token, else a fresh Actions
+OIDC token for a trusted publisher. the version is out by now, so a failure
+says so and gives the command that sends the notes again. */
+fn send_notes(
+    args: &PublishArgs,
+    package: &str,
+    version: &semver::Version,
+    body: &str,
+    token: Option<&str>,
+) -> Result<(), Error> {
+    let trusted = match token {
+        Some(_) => None,
+        None => provenance::actions_token(),
+    };
+    ui::with_spinner("Sending the release notes", || {
+        registry::notes(token, trusted.as_deref(), package, version, Some(body))
+    })
+    .map_err(|error| Error::NotesNotSent {
+        package: format!("{package}@{version}"),
+        file: args
+            .notes
+            .as_deref()
+            .unwrap_or(Path::new("<file>"))
+            .display()
+            .to_string(),
+        reason: error.to_string(),
+    })?;
+    ui::print_success(&format!("Sent the release notes of {package}@{version}"));
     Ok(())
+}
+
+/** each version of `name` that the registry holds, yanked ones included,
+or that the local registry holds. none for a package that is not there
+yet. */
+fn published_versions(name: &str, local: bool) -> Result<Vec<semver::Version>, Error> {
+    if !local {
+        return registry::published_versions(name);
+    }
+    let index =
+        crate::registry::index::Index::open(local::NAME, crate::registry::index::Refresh::Never)?;
+    match index.read(name) {
+        Ok((entries, _)) => Ok(entries.into_iter().map(|entry| entry.version).collect()),
+        Err(Error::PackageNotFound { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/** `version` with the prerelease `<channel>.<n>`. `n` is one more than the
+highest that `published` has for this version and channel, and 1 when it
+has none. */
+fn next_channel_version(
+    version: &semver::Version,
+    channel: &str,
+    published: &[semver::Version],
+) -> semver::Version {
+    let highest = published
+        .iter()
+        .filter(|other| {
+            (other.major, other.minor, other.patch) == (version.major, version.minor, version.patch)
+        })
+        .filter_map(|other| {
+            other
+                .pre
+                .as_str()
+                .strip_prefix(channel)?
+                .strip_prefix('.')?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let mut next = version.clone();
+    next.pre = semver::Prerelease::new(&format!("{channel}.{}", highest + 1))
+        .expect("a channel name is a prerelease identifier");
+    next
 }
 
 /** the IDs of the targets that `selected` names, in manifest order, or of
@@ -267,7 +418,7 @@ fn select_targets(targets: &[Target], selected: &[String]) -> Result<Vec<String>
 /** packs and uploads the one target that `manifest` holds. `builds` has
 the outcome of each compiler that the selected targets need. `token` is
 the Ember token, read on the first upload and kept for the next. a trusted
-publish keeps none. */
+publish keeps none. gives the entry of the archive for `--json`. */
 fn publish_target(
     root: &Path,
     manifest: &Manifest,
@@ -276,7 +427,7 @@ fn publish_target(
     args: &PublishArgs,
     oidc_token: Option<&str>,
     token: &mut Option<String>,
-) -> Result<(), Error> {
+) -> Result<serde_json::Value, Error> {
     let target = manifest.target().expect("publish sets one target");
     let id = target.id();
     if let Some(program) = target.language.builder() {
@@ -326,6 +477,18 @@ fn publish_target(
         });
     }
 
+    let (name, version) = package.rsplit_once('@').unwrap_or((package, ""));
+    let mut record = serde_json::json!({
+        "name": name,
+        "version": version,
+        "target": id,
+        "bytes": archive.len(),
+    });
+    // as `member` in the document of an update: the key is there when it says something
+    if let Some(channel) = &args.channel {
+        record["channel"] = channel.as_str().into();
+    }
+
     let entry = entry_line(root, target.main.as_deref());
     if entry.is_none() {
         eprintln!(
@@ -336,8 +499,12 @@ fn publish_target(
     let destination = if args.local {
         "the local registry".to_string()
     } else {
-        registry::api_url()
+        registry::without_userinfo(&registry::api_url())
     };
+    // `embr pack` takes the archive here, in place of the upload
+    if let Some(written) = super::pack::intercept(manifest, &id, &archive) {
+        return written.map(|()| record);
+    }
     if args.dry_run {
         println!(
             "Would publish {package} ({id}) to {destination}, {} bytes:",
@@ -348,6 +515,12 @@ fn publish_target(
         }
         if let Some(entry) = entry {
             println!("Entry: {entry}");
+        }
+        if let Some(channel) = &args.channel {
+            println!("Channel: {channel} would name {version}");
+        }
+        if let Some(notes) = &args.notes {
+            println!("Release notes: {}", notes.display());
         }
         for feature in &owned {
             let count = feature.files.len();
@@ -361,13 +534,13 @@ fn publish_target(
                 println!("  {}", file.display());
             }
         }
-        return Ok(());
+        return Ok(record);
     }
 
     if args.local {
-        local::publish(manifest, &archive)?;
+        local::publish(manifest, &archive, args.channel.as_deref())?;
         ui::print_success(&format!("Published {package} ({id}) to the local registry"));
-        return Ok(());
+        return Ok(record);
     }
 
     // EMBER_TOKEN or the stored login first
@@ -382,9 +555,9 @@ fn publish_target(
     if stored.is_none()
         && let Some(trusted) = provenance::actions_token()
     {
-        upload(None, Some(&trusted), &archive)?;
+        upload(None, Some(&trusted), &archive, args.channel.as_deref())?;
         ui::print_success(&format!("Published {package} ({id})"));
-        return Ok(());
+        return Ok(record);
     }
     // the browser login only when there is no token at all, and never in CI
     let stored = match stored {
@@ -394,7 +567,8 @@ fn publish_target(
         }
         None => auth::login()?.token,
     };
-    let stored = match upload(Some(&stored), oidc_token, &archive) {
+    let channel = args.channel.as_deref();
+    let stored = match upload(Some(&stored), oidc_token, &archive, channel) {
         // CI has no one to approve a login
         Err(Error::PublishFailed { status: 401, .. }) if auth::env_token().is_some() => {
             return Err(Error::TokenRejected);
@@ -405,7 +579,7 @@ fn publish_target(
             auth::clear()?;
             eprintln!("warning: the registry rejected the stored token; logging in again");
             let fresh = auth::login()?.token;
-            upload(Some(&fresh), oidc_token, &archive)?;
+            upload(Some(&fresh), oidc_token, &archive, channel)?;
             fresh
         }
         other => {
@@ -416,7 +590,7 @@ fn publish_target(
     *token = Some(stored);
 
     ui::print_success(&format!("Published {package} ({id})"));
-    Ok(())
+    Ok(record)
 }
 
 /** rewrites workspace deps into registry ones, pesde's conversion exactly.
@@ -478,6 +652,7 @@ fn convert_workspace_dependencies(
         *dependency = Dependency::Registry {
             name: name.clone(),
             version: workspace_version_req(version, &member_version)?,
+            channel: None,
             index: member
                 .manifest
                 .indices
@@ -557,6 +732,7 @@ fn convert_local_dependencies(manifest: &mut Manifest, project_dir: &Path) -> Re
             *dependency = Dependency::Registry {
                 name,
                 version,
+                channel: None,
                 index,
                 target,
                 entry,
@@ -677,6 +853,22 @@ fn strip_local_tables(manifest: &mut Manifest) {
     }
 }
 
+/** takes `channel` off each dev dependency of the archive's manifest. the
+registry reads that manifest and knows no channel there. an entry with no
+`version` drops out, as a path dev dependency without one does: only the
+tests of this project use it. */
+fn strip_dev_channels(manifest: &mut Manifest) {
+    manifest.dev_dependencies.retain(|_, dependency| {
+        let Dependency::Registry {
+            version, channel, ..
+        } = dependency
+        else {
+            return true;
+        };
+        channel.take().is_none() || !version.is_empty()
+    });
+}
+
 /// registry caps descriptions at 200 chars, counted as chars, not bytes.
 fn validate_description(description: Option<&str>) -> Result<(), Error> {
     let Some(description) = description else {
@@ -692,9 +884,14 @@ fn validate_description(description: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn upload(token: Option<&str>, oidc_token: Option<&str>, archive: &[u8]) -> Result<(), Error> {
+fn upload(
+    token: Option<&str>,
+    oidc_token: Option<&str>,
+    archive: &[u8],
+    channel: Option<&str>,
+) -> Result<(), Error> {
     ui::with_spinner("Uploading package", || {
-        registry::publish(token, oidc_token, archive)
+        registry::publish(token, oidc_token, archive, channel)
     })
 }
 
@@ -1023,6 +1220,32 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_publish_counts_from_the_versions_of_its_own_line() {
+        let published: Vec<semver::Version> = [
+            "1.2.0",
+            "1.2.0-beta.9",
+            "1.3.0-beta.1",
+            "1.3.0-beta.4",
+            "1.3.0-beta.x",
+            "1.3.0-beta",
+            "1.3.0-beta-2.6",
+            "1.3.0-rc.7",
+        ]
+        .iter()
+        .map(|version| semver::Version::parse(version).unwrap())
+        .collect();
+        let next = |version: &str, channel: &str| {
+            let version = semver::Version::parse(version).unwrap();
+            next_channel_version(&version, channel, &published).to_string()
+        };
+        assert_eq!(next("1.3.0", "beta"), "1.3.0-beta.5");
+        assert_eq!(next("1.3.0", "rc"), "1.3.0-rc.8");
+        assert_eq!(next("1.3.0", "beta-2"), "1.3.0-beta-2.7");
+        assert_eq!(next("1.3.0", "next"), "1.3.0-next.1");
+        assert_eq!(next("1.4.0", "beta"), "1.4.0-beta.1");
+    }
+
+    #[test]
     fn descriptions_past_the_cap_are_rejected() {
         assert!(validate_description(None).is_ok());
         assert!(validate_description(Some("short and sweet")).is_ok());
@@ -1230,6 +1453,9 @@ mod tests {
                     dry_run: true,
                     targets: Vec::new(),
                     local: false,
+                    channel: None,
+                    notes: None,
+                    json: false,
                 },
                 None,
                 &mut None,
@@ -1293,6 +1519,9 @@ mod tests {
                 dry_run: true,
                 targets: Vec::new(),
                 local: false,
+                channel: None,
+                notes: None,
+                json: false,
             },
             None,
             &mut None,

@@ -131,6 +131,7 @@ pub fn extract(
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
             limit::check_zip(&mut archive, limit::TOOL_BYTES)?;
             archive.extract(dest)?;
+            limit::mask_modes(dest)?;
         }
         Kind::TarGz => {
             let mut decoded = limit::CappedBytes::new(limit::TOOL_BYTES);
@@ -148,9 +149,7 @@ pub fn extract(
             )?;
             unpack_tar_or_raw(&decoded.bytes, dest, raw_target)?;
         }
-        Kind::Tar => {
-            tar::Archive::new(bytes).unpack(dest)?;
-        }
+        Kind::Tar => unpack_tar(bytes, dest)?,
         Kind::Raw => {
             fs::write(raw_target, bytes)?;
         }
@@ -176,11 +175,18 @@ is the only way to tell, and getting it wrong either drops the tool's whole
 directory or writes a tar where a binary belongs. */
 fn unpack_tar_or_raw(bytes: &[u8], dest: &Path, raw_target: &Path) -> Result<(), Error> {
     if looks_like_tar(bytes) {
-        tar::Archive::new(bytes).unpack(dest)?;
+        unpack_tar(bytes, dest)?;
     } else {
         fs::write(raw_target, bytes)?;
     }
     Ok(())
+}
+
+/// unpacks the tar `bytes` after [`limit::check_tar`], and cuts the modes with [`limit::mask_modes`].
+fn unpack_tar(bytes: &[u8], dest: &Path) -> Result<(), Error> {
+    limit::check_tar(bytes, limit::TOOL_BYTES)?;
+    tar::Archive::new(bytes).unpack(dest)?;
+    Ok(limit::mask_modes(dest)?)
 }
 
 /// whether `bytes` open a tar, by the ustar magic every tar since the 80s writes at offset 257.

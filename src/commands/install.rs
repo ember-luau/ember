@@ -26,7 +26,7 @@ use std::time::Instant;
 
 mod editor;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 #[command(after_long_help = "\
 When ember.toml, ember.lock, and the global tools file are unchanged since the \
 last successful install, `install` trusts the lockfile: within the index \
@@ -42,12 +42,8 @@ pub struct InstallArgs {
     #[arg(long)]
     pub locked: bool,
 
-    /// Download nothing: install from the caches on this computer, and fail when something is not in them
-    #[arg(long, conflicts_with = "refresh")]
-    pub offline: bool,
-
     /// Move every package to the newest version that ember.toml takes, re-fetch indices, and re-download archives even when caches are fresh
-    #[arg(long)]
+    #[arg(long, conflicts_with = "offline")]
     pub refresh: bool,
 
     /// Fail when a package needs a peer dependency that is missing or has a version that does not match
@@ -57,6 +53,42 @@ pub struct InstallArgs {
     /// Move this package to the newest version that ember.toml takes, and lock its archive hash again, also when the hash changed; a git package moves to the newest commit of its branch or tag
     #[arg(long, value_name = "PACKAGE", conflicts_with = "locked")]
     pub update: Vec<String>,
+
+    /// Print the changes to ember.lock as one JSON document on stdout
+    #[arg(long)]
+    pub json: bool,
+
+    /** `embr update` with no name: every package moves as with `--refresh`,
+    and an archive in the cache stays in use. */
+    #[arg(skip)]
+    pub update_all: bool,
+}
+
+/** `embr install` as the command line has it: the install flags, and `-p`,
+which narrows the install to one workspace member. a struct of its own, so
+the commands that build an [`InstallArgs`] themselves need no new field. */
+#[derive(Args, Debug)]
+pub struct InstallCommand {
+    #[command(flatten)]
+    pub args: InstallArgs,
+
+    /// Install only this workspace member, by package name, folder name or path
+    #[arg(short, long = "package", value_name = "MEMBER")]
+    pub package: Option<String>,
+}
+
+/// [`run`], in the folder of the member that `-p` names when it is given.
+pub fn run_command(command: InstallCommand) -> Result<(), Error> {
+    let Some(name) = command.package else {
+        return run(command.args);
+    };
+    let workspace = Workspace::here()?.ok_or_else(|| {
+        std::io::Error::other("This folder is in no workspace, so --package names no member")
+    })?;
+    let member = workspace
+        .find(&name)
+        .ok_or(Error::NoWorkspaceMember(name))?;
+    workspace::in_dir(&workspace.members[member].dir, || run(command.args))
 }
 
 struct Job {
@@ -97,48 +129,13 @@ struct JobPatch {
 const WORKERS: usize = 8;
 
 /// stamp file the fast path reads, under each `<out>/.ember/`.
-const STATE_FILE: &str = ".state";
+pub(crate) const STATE_FILE: &str = ".state";
 
 /// the per-environment package store inside `packages/`.
 pub(crate) const STORE_DIR: &str = ".ember";
 
 /// alias, pinned tool, and whether the pin came from ~/.ember/tools.toml.
 type ToolJob = (String, Tool, bool);
-
-/** an Alloy project builds each installed Alloy package again from its
-.aly, .alx, and .d.aly sources with the `alloy` on PATH, so it runs code
-from the Alloy it reads and not from the publisher's compiler. a package
-that does not build keeps the Luau it was published with, so this warns
-and goes on. the output is captured: the live display owns the terminal. */
-fn build_alloy_packages(
-    manifest: &Manifest,
-    stored: &[StoredPackage],
-    warn: &mut impl FnMut(String),
-) {
-    if manifest.target().map(|target| target.language) != Some(Language::Alloy) {
-        return;
-    }
-    for package in stored
-        .iter()
-        .filter(|package| !package.in_place && is_alloy_package(&package.storage))
-    {
-        let built = std::process::Command::new("alloy")
-            .arg("build")
-            .current_dir(&package.storage)
-            .output();
-        match built {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                warn("warning: alloy is not on PATH, so the Alloy packages keep the Luau they were published with".to_string());
-                return;
-            }
-            Ok(output) if output.status.success() => {}
-            _ => warn(format!(
-                "warning: {} does not build from its Alloy sources, so it keeps its published Luau",
-                package.name
-            )),
-        }
-    }
-}
 
 /** warns when an installed package's `requires` asks for a version that
 the program on PATH does not have. it never fails the install: the program
@@ -267,7 +264,7 @@ fn is_alloy_package(dir: &Path) -> bool {
 
 /** what the current ember.lock pins, so a yanked version it holds keeps
 installing. no lockfile, or one that does not parse, pins nothing. */
-fn pinned_versions() -> resolver::Pinned {
+pub(crate) fn pinned_versions() -> resolver::Pinned {
     let mut pinned = resolver::Pinned::new();
     let Ok(lock) = Lockfile::load() else {
         return pinned;
@@ -284,11 +281,19 @@ fn pinned_versions() -> resolver::Pinned {
 }
 
 pub fn run(args: InstallArgs) -> Result<(), Error> {
-    if args.offline {
-        crate::net::offline::enable();
+    if !args.json {
+        return install(&args, Manifest::load()?);
     }
-    let manifest = Manifest::load()?;
+    ui::json_or_text(true, || {
+        let manifest = Manifest::load()?;
+        let before = super::update::locked(&manifest)?;
+        install(&args, manifest)?;
+        let after = super::update::locked(&Manifest::load()?)?;
+        Ok(super::update::document(&before, &after, false))
+    })
+}
 
+fn install(args: &InstallArgs, manifest: Manifest) -> Result<(), Error> {
     /* the root's hooks bracket the whole command, members included, so a
     `postinstall` that builds the project sees a fully installed tree.
     each member's own hooks bracket only that member, in its own directory */
@@ -297,7 +302,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
 
     // an Azul project pushes the changed packages folders into Studio
     let auto_push = super::studio::AutoPush::before(&manifest);
-    install_project(&args, &manifest, true)?;
+    install_project(args, &manifest, true)?;
     auto_push.after(&manifest);
 
     /* a workspace root installs every member too, pesde's order, root
@@ -315,7 +320,7 @@ pub fn run(args: InstallArgs) -> Result<(), Error> {
                 let manifest = Manifest::load()?;
                 let lifecycle = Lifecycle::of(&manifest, hooks::INSTALL);
                 lifecycle.before()?;
-                install_project(&args, &manifest, false)?;
+                install_project(args, &manifest, false)?;
                 lifecycle.after()
             })?;
         }
@@ -370,7 +375,10 @@ workspace member installs its own peers. `project` holds the project. */
 fn peer_warnings(manifest: &Manifest, packages: &[LockedPackage], project: &Path) -> Vec<String> {
     let mut lines = BTreeSet::new();
     for package in packages {
-        let (storage, in_place) = stored_at(manifest, package);
+        // a name that is no folder name has no folder to read
+        let Ok((storage, in_place)) = stored_at(manifest, package) else {
+            continue;
+        };
         if in_place {
             continue;
         }
@@ -445,6 +453,10 @@ fn install_steps(
 
     let progress = Progress::start("resolve");
 
+    /* the channel that picked each entry, by package and root. a job has
+    no use for it, so it goes around the jobs to the lock that this run
+    writes */
+    let mut channels: HashMap<(String, Environment), String> = HashMap::new();
     let mut jobs: Vec<Job> = if args.locked {
         let lock = Lockfile::load()?;
         /* a v1 lock predates contexts. replaying it would scatter a
@@ -474,6 +486,9 @@ fn install_steps(
         lock.packages
             .into_iter()
             .map(|package| {
+                if let Some(channel) = &package.channel {
+                    channels.insert((package.name.clone(), package.context()), channel.clone());
+                }
                 let patch = locked_patch(&package.name, Path::new("."), package.patch)?;
                 Ok(Job {
                     name: package.name,
@@ -493,8 +508,11 @@ fn install_steps(
             })
             .collect::<Result<Vec<Job>, Error>>()?
     } else {
+        if crate::net::offline::is_enabled() {
+            offline_indices(manifest)?;
+        }
         let resolve_started = Instant::now();
-        let mode = if args.refresh {
+        let mode = if args.refresh || args.update_all {
             index::Refresh::Force
         } else {
             index::Refresh::Ttl
@@ -518,24 +536,29 @@ fn install_steps(
         ui::timing("resolve", resolve_started);
         resolved
             .into_iter()
-            .map(|package| Job {
-                name: package.name,
-                // the lock keeps no version for a path folder, see `DownloadSource::Path`
-                version: match package.source {
-                    index::DownloadSource::Path { .. } => String::new(),
-                    _ => package.version.to_string(),
-                },
-                environment: package.environment,
-                context: package.context,
-                source: package.source,
-                sha256: package.sha256,
-                sha256_in_lock: false,
-                index_url: package.index_url,
-                link: package.link,
-                redirects: package.redirects,
-                patch: None,
-                optional: package.optional,
-                features: package.features,
+            .map(|package| {
+                if let Some(channel) = package.channel {
+                    channels.insert((package.name.clone(), package.context), channel);
+                }
+                Job {
+                    name: package.name,
+                    // the lock keeps no version for a path folder, see `DownloadSource::Path`
+                    version: match package.source {
+                        index::DownloadSource::Path { .. } => String::new(),
+                        _ => package.version.to_string(),
+                    },
+                    environment: package.environment,
+                    context: package.context,
+                    source: package.source,
+                    sha256: package.sha256,
+                    sha256_in_lock: false,
+                    index_url: package.index_url,
+                    link: package.link,
+                    redirects: package.redirects,
+                    patch: None,
+                    optional: package.optional,
+                    features: package.features,
+                }
             })
             .collect()
     };
@@ -571,20 +594,8 @@ fn install_steps(
         return Ok(true);
     }
 
-    /* before the wipe below, which would otherwise take a [config]-claimed
-    packages/shared with it and leave the guard inside with nothing to see.
-    it prints when it removes something, so it opens the output and the
-    sections below separate themselves from it */
-    let mut printed = progress.suspend(|| remove_legacy_outs(manifest, previous.as_ref()));
-
-    /* installs rebuild from scratch each run. every env's output folder is
-    wiped even with nothing to install, so removing the last dependency
-    leaves no stale packages */
-    for environment in Environment::ALL {
-        let out = manifest.packages_out(environment);
-        if out.exists() {
-            fs::remove_dir_all(&out)?;
-        }
+    if crate::net::offline::is_enabled() {
+        offline_archives(&jobs)?;
     }
 
     /* extraction can happen before we know the environment and so the
@@ -592,19 +603,47 @@ fn install_steps(
     moves it into place, same filesystem as the outputs */
     let staging = Path::new(".ember-staging").to_path_buf();
     let packages_started = Instant::now();
-    if !jobs.is_empty() {
-        // off a terminal the ✓ lines are the record, so they get their heading back
-        if !progress.is_live() {
-            section("Installing packages", &mut printed);
-        }
-        progress.phase("install", jobs.len() as u64);
+    let job_count = jobs.len();
+    if job_count > 0 {
+        progress.phase("download", job_count as u64);
     }
-    let locked = install_packages(manifest, jobs, &staging, &progress, cache);
+    let mut printed = false;
+    /* runs once every download is in staging, so a download that fails
+    leaves the packages folders of the last install as they were */
+    let clear = || -> Result<(), Error> {
+        /* before the wipe below, which would otherwise take a [config]-claimed
+        packages/shared with it and leave the guard inside with nothing to see.
+        it prints when it removes something, so it opens the output and the
+        sections below separate themselves from it */
+        printed = progress.suspend(|| remove_legacy_outs(manifest, previous.as_ref()));
+
+        /* installs rebuild from scratch each run. every env's output folder is
+        wiped even with nothing to install, so removing the last dependency
+        leaves no stale packages */
+        for environment in Environment::ALL {
+            let out = manifest.packages_out(environment);
+            if out.exists() {
+                fs::remove_dir_all(&out)?;
+            }
+        }
+        if job_count > 0 {
+            // off a terminal the ✓ lines are the record, so they get their heading back
+            if !progress.is_live() {
+                section("Installing packages", &mut printed);
+            }
+            progress.phase("install", job_count as u64);
+        }
+        Ok(())
+    };
+    let locked = install_packages(manifest, jobs, &staging, &progress, cache, clear);
     // staging cleanup used to be skipped on error, leaking the directory
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
-    let locked = locked?;
+    let mut locked = locked?;
+    for package in &mut locked {
+        package.channel = channels.remove(&(package.name.clone(), package.context()));
+    }
     ui::timing("packages", packages_started);
 
     /* second pass now that everything is extracted, link files inside
@@ -616,8 +655,8 @@ fn install_steps(
             /* members link in place, so they're link targets like anything
             else but never get written into, that would dirty a source tree
             the user edits */
-            let (storage, in_place) = stored_at(manifest, package);
-            StoredPackage {
+            let (storage, in_place) = stored_at(manifest, package)?;
+            Ok(StoredPackage {
                 /* resolved once here rather than per nested link, and
                 silently: whoever installed this package already said out
                 loud if its entry had to be guessed */
@@ -631,13 +670,18 @@ fn install_steps(
                 requires: manifest.require_style(package.context()),
                 lazy_collections: lazy_collections(manifest, package.context()),
                 features: package.features.clone(),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let nested_started = Instant::now();
     link_nested_dependencies(&stored, &mut |message| progress.warn(&message));
     ui::timing("nested-links", nested_started);
-    build_alloy_packages(manifest, &stored, &mut |message| progress.warn(&message));
+    /* install never runs `alloy build` in a package. the build reads the
+    package's own alloy.toml, where `[ingots]` names a program to start and
+    `[build] out` with `clean` deletes Luau in a folder outside the package.
+    an import into another project builds that project by its own
+    alloy.toml too, so a check of one file does not hold. an Alloy package
+    is used through the Luau it was published with. */
     check_versions(manifest, &stored, version_on_path, &mut |message| {
         progress.warn(&message)
     });
@@ -831,7 +875,7 @@ fn patches_state_text(manifest_text: &str) -> String {
 }
 
 /// the full state hash as things stand right now, None if any input is unreadable.
-fn current_state_hash(include_global: bool) -> Option<String> {
+pub(crate) fn current_state_hash(include_global: bool) -> Option<String> {
     let (manifest_text, tools_text, patches_text) = state_inputs(include_global)?;
     let lock_text = fs::read_to_string(crate::project::lockfile::lockfile_path()).ok()?;
     Some(state_hash(
@@ -871,6 +915,7 @@ fn fast_path(
 ) -> Result<FastPath, Error> {
     if args.locked
         || args.refresh
+        || args.update_all
         || !args.update.is_empty()
         || !manifest.workspace_members().is_empty()
     {
@@ -1126,7 +1171,10 @@ fn pin_hashes(jobs: &mut [Job], lock: Option<&Lockfile>, update: &[String]) -> R
             .iter()
             .any(|name| name.eq_ignore_ascii_case(&job.name))
         {
-            index::evict_archive(url);
+            // offline, the archive in the cache is the only one there is
+            if !crate::net::offline::is_enabled() {
+                index::evict_archive(url);
+            }
             continue;
         }
         let locked = lock
@@ -1328,8 +1376,16 @@ may spell the old folder in requires and `$path`s that embr cannot rewrite,
 so the one build this breaks has to arrive with its reason attached.
 returns whether it removed anything. */
 fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
+    remove_legacy_outs_in(Path::new(""), manifest, lock)
+}
+
+/** [`remove_legacy_outs`] for the project in `project`. the test names the
+folder, so it does not move the working directory of the process, where
+the git of another test runs. */
+fn remove_legacy_outs_in(project: &Path, manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
     let mut removed = false;
     for (legacy, environment) in manifest.legacy_packages_outs() {
+        let legacy = project.join(legacy);
         if !legacy.join(STORE_DIR).is_dir() {
             continue;
         }
@@ -1338,7 +1394,8 @@ fn remove_legacy_outs(manifest: &Manifest, lock: Option<&Lockfile>) -> bool {
             continue;
         };
         let claimed = Environment::ALL.into_iter().any(|environment| {
-            std::path::absolute(manifest.packages_out(environment)).is_ok_and(|out| out == absolute)
+            std::path::absolute(project.join(manifest.packages_out(environment)))
+                .is_ok_and(|out| out == absolute)
         });
         if claimed {
             continue;
@@ -1407,24 +1464,113 @@ fn write_state_stamps(
     }
 }
 
+/** fails an offline install that must resolve, when an index of
+ember.toml has no copy on this computer. it names each one, so one run with
+a network gets them all. an index that only a dependency of a dependency
+uses is not known yet: the resolve stops at it, also before any file
+changes. */
+fn offline_indices(manifest: &Manifest) -> Result<(), Error> {
+    let mut missing = BTreeSet::new();
+    for (_, dependency) in manifest.all_dependencies() {
+        let manifest::Dependency::Registry { index, .. } = dependency else {
+            continue;
+        };
+        let url = manifest.index_url(index.as_deref())?;
+        if !index::index_in_cache(url) {
+            missing.insert(format!("the index {url}"));
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::OfflineMissing(missing.into_iter().collect()))
+    }
+}
+
+/** fails an offline install before it changes a file, when the caches do
+not hold each package. the error lists them all, where the downloads would
+stop at the first. an optional package installs when it can, so it is not
+in the list. */
+fn offline_archives(jobs: &[Job]) -> Result<(), Error> {
+    let missing: BTreeSet<String> = jobs
+        .iter()
+        .filter(|job| !job.optional && !index::source_in_cache(&job.source))
+        .map(|job| match &job.source {
+            index::DownloadSource::Git { url, rev, .. } => {
+                format!("{}, commit {rev} of {url}", job.name)
+            }
+            _ => format!("the archive of {}", package_id(&job.name, &job.version)),
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::OfflineMissing(missing.into_iter().collect()))
+    }
+}
+
+/** runs `work` on each of `jobs`, over at most [`WORKERS`] threads. `each`
+hears every result on this thread, in the order the jobs finish. when it
+returns false the pool takes no more jobs, and the ones in flight run out. */
+fn pooled<J: Send, R: Send>(
+    jobs: Vec<J>,
+    work: impl Fn(&J) -> R + Sync,
+    mut each: impl FnMut(J, R) -> bool,
+) {
+    let workers = jobs.len().min(WORKERS);
+    let queue = Mutex::new(VecDeque::from(jobs));
+    let stopped = AtomicBool::new(false);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let (queue, stopped, work) = (&queue, &stopped, &work);
+            scope.spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    let next = queue.lock().expect("job queue lock").pop_front();
+                    let Some(job) = next else { break };
+                    let result = work(&job);
+                    // a closed channel means the run is over, stop quietly
+                    if sender.send((job, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (job, result) in receiver {
+            if !each(job, result) {
+                stopped.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
 /** downloads, stages, and links every package, one row of `progress` per
 package in flight. the caller owns the display, so it comes down on an
 error too.
 
-registry packages fan out over a small thread pool. each worker owns one
-job at a time end to end, download, extract, rewrite, parse, under its
-own staging dir, so nothing is shared but the target `.ember` parents. a
-worker's row stays up until this thread writes the package's link file and
-fills its slot in `locked` by job
-index, so lockfile order is exactly the resolver's order no matter who
-finishes first. on the first error the pool stops taking work, in-flight
-requests run out against their timeouts, and that error is returned. */
+the work has two halves, and `clear` runs between them. the first half
+downloads and extracts each registry and git package under `staging_root`,
+and writes nothing else. `clear` then removes the packages folders of the
+last install. the second half moves each package into the store and links
+it. so a download that fails, or a run that stops in the downloads, leaves
+the last install whole.
+
+each half fans out over a small thread pool. a worker owns one job at a
+time under the job's own staging dir, so nothing is shared but the target
+`.ember` parents. this thread writes the package's link file and fills its
+slot in `locked` by job index, so lockfile order is exactly the resolver's
+order no matter who finishes first. on the first error the pool stops
+taking work, in-flight requests run out against their timeouts, and that
+error is returned. */
 fn install_packages(
     manifest: &Manifest,
     jobs: Vec<Job>,
     staging_root: &Path,
     progress: &Progress,
     cache: index::CachePolicy,
+    clear: impl FnOnce() -> Result<(), Error>,
 ) -> Result<Vec<LockedPackage>, Error> {
     let mut slots: Vec<Option<LockedPackage>> = Vec::new();
     slots.resize_with(jobs.len(), || None);
@@ -1432,144 +1578,146 @@ fn install_packages(
     /* workspace members and path folders link in place on this thread, no
     network and they touch source dirs the user owns. registry and git jobs
     queue for the pool */
-    let mut queue: VecDeque<(usize, Job)> = VecDeque::new();
-    for (slot, job) in jobs.into_iter().enumerate() {
-        if job.source.in_place().is_some() {
-            let task = progress.task(package_id(&job.name, &job.version));
-            slots[slot] = Some(link_in_place(manifest, job, progress, task)?);
-        } else {
-            queue.push_back((slot, job));
+    let (in_place, queue): (Vec<_>, Vec<_>) = jobs
+        .into_iter()
+        .enumerate()
+        .partition(|(_, job)| job.source.in_place().is_some());
+
+    if !queue.is_empty() {
+        if staging_root.exists() {
+            fs::remove_dir_all(staging_root)?;
         }
+        fs::create_dir_all(staging_root)?;
     }
-    if queue.is_empty() {
-        return Ok(slots.into_iter().flatten().collect());
+    /* context suffixed, the same package installing under two roots is two
+    concurrent jobs, and they must not tear down each other's staging */
+    let staging_of = |job: &Job| -> Result<PathBuf, Error> {
+        Ok(staging_root.join(format!(
+            "{}_{}",
+            paths::store_folder(&job.name)?,
+            job.context.dir_name()
+        )))
+    };
+
+    /* errors are kept by lowest job index, not arrival order. when an
+    outage fails several in-flight downloads at once, the error the user
+    sees shouldn't depend on thread timing */
+    let mut first_error: Option<(usize, Error)> = None;
+    /// keeps `error` when no lower slot has one, and stops the pool.
+    fn keep_first(first: &mut Option<(usize, Error)>, slot: usize, error: Error) -> bool {
+        if first.as_ref().is_none_or(|(lowest, _)| slot < *lowest) {
+            *first = Some((slot, error));
+        }
+        false
     }
-
-    if staging_root.exists() {
-        fs::remove_dir_all(staging_root)?;
-    }
-    fs::create_dir_all(staging_root)?;
-
-    let workers = queue.len().min(WORKERS);
-    let queue = Mutex::new(queue);
-    let failed = AtomicBool::new(false);
-    let (sender, receiver) = std::sync::mpsc::channel();
-
-    let mut first_error: Option<Error> = None;
     let mut skipped: HashSet<usize> = HashSet::new();
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let sender = sender.clone();
-            let queue = &queue;
-            let failed = &failed;
-            scope.spawn(move || {
-                loop {
-                    if failed.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let next = queue.lock().expect("job queue lock").pop_front();
-                    let Some((slot, job)) = next else { break };
-
-                    /* context suffixed, the same package installing under
-                    two roots is two concurrent jobs, and they must not
-                    tear down each other's staging */
-                    let staging = staging_root.join(format!(
-                        "{}_{}",
-                        job.name.replace('/', "_"),
-                        job.context.dir_name()
-                    ));
-                    /* the row lives until this thread's result is handled,
-                    the link file written on the main thread included */
-                    let task = progress.task(package_id(&job.name, &job.version));
-                    let result = install_one(manifest, &job, &staging, cache, progress, &task);
-                    // an optional package that fails is skipped, so the others go on
-                    if result.as_ref().is_err_and(|error| !skips(&job, error)) {
-                        failed.store(true, Ordering::Relaxed);
-                    }
-                    // a closed channel means the run is over, stop quietly
-                    if sender.send((slot, job, result, task)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-
-        /* errors are kept by lowest job index, not arrival order. when an
-        outage fails several in-flight downloads at once, the error the
-        user sees shouldn't depend on thread timing */
-        let mut error_slot = usize::MAX;
-        for (slot, job, result, task) in receiver {
-            match result {
-                Ok(extracted) => {
-                    if let Err(error) = write_registry_link(manifest, &job, &extracted, progress) {
-                        failed.store(true, Ordering::Relaxed);
-                        if slot < error_slot {
-                            error_slot = slot;
-                            first_error = Some(error);
-                        }
-                        continue;
-                    }
-                    // transitives have no link, show where they landed instead
-                    let shown = job
-                        .link
-                        .clone()
-                        .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
-                    let source = job
-                        .source
-                        .local_label()
-                        .map_or(String::new(), |label| format!(" ({label})"));
-                    // the folder under packages/, so a Luwu project shows `luwu/`
-                    task.done(&ui::success_line(&format!(
-                        "{}@{} → {}/{shown}{source}",
-                        job.name,
-                        job.version,
-                        manifest.packages_dir(job.context)
-                    )));
-                    /* a local publish can replace a version, so its hash means
-                    nothing. a git commit is its own integrity */
-                    let sha256 = (job.index_url != crate::registry::local::NAME
-                        && !matches!(job.source, index::DownloadSource::Git { .. }))
-                    .then_some(extracted.sha256);
-                    slots[slot] = Some(LockedPackage {
-                        name: job.name,
-                        version: job.version,
-                        environment: extracted.environment,
-                        context: (job.context != extracted.environment).then_some(job.context),
-                        link: job.link,
-                        index: job.index_url,
-                        redirects: job.redirects,
-                        patch: job.patch.map(|patch| patch.record),
-                        optional: job.optional,
-                        features: job.features,
-                        source: job.source,
-                        sha256,
-                    });
-                }
-                /* ponytail: only the failed package goes. an optional
-                package whose required dependency failed stays, with no
-                link to it. drop the package's optional subtree if that
-                matters */
-                Err(error) if skips(&job, &error) => {
-                    progress.warn(&format!(
-                        "skipped optional dependency {}: {error}",
-                        package_id(&job.name, &job.version)
-                    ));
-                    skipped.insert(slot);
-                }
-                Err(error) => {
-                    if slot < error_slot {
-                        error_slot = slot;
-                        first_error = Some(error);
-                    }
-                }
+    let mut fetched: Vec<(usize, Job, Fetched)> = Vec::new();
+    pooled(
+        queue,
+        |(_, job)| {
+            let task = progress.task(package_id(&job.name, &job.version));
+            let result = staging_of(job).and_then(|staging| fetch_one(job, &staging, cache, &task));
+            task.step();
+            result
+        },
+        |(slot, job), result| match result {
+            Ok(package) => {
+                fetched.push((slot, job, package));
+                true
             }
-        }
-    });
-
-    if let Some(error) = first_error {
+            /* ponytail: only the failed package goes. an optional
+            package whose required dependency failed stays, with no
+            link to it. drop the package's optional subtree if that
+            matters */
+            Err(error) if skips(&job, &error) => {
+                progress.warn(&format!(
+                    "skipped optional dependency {}: {error}",
+                    package_id(&job.name, &job.version)
+                ));
+                skipped.insert(slot);
+                true
+            }
+            Err(error) => keep_first(&mut first_error, slot, error),
+        },
+    );
+    if let Some((_, error)) = first_error {
         return Err(error);
     }
+
+    clear()?;
+
+    for (slot, job) in in_place {
+        let task = progress.task(package_id(&job.name, &job.version));
+        slots[slot] = Some(link_in_place(manifest, job, progress, task)?);
+    }
+
+    pooled(
+        fetched,
+        |(_, job, _)| {
+            /* the row lives until this thread's result is handled, the
+            link file written on the main thread included */
+            let task = progress.task(package_id(&job.name, &job.version));
+            let placed =
+                staging_of(job).and_then(|staging| place_one(manifest, job, &staging, progress));
+            (placed, task)
+        },
+        |(slot, job, fetched), (placed, task)| {
+            let (entry, types) = match placed {
+                Ok(placed) => placed,
+                Err(error) => return keep_first(&mut first_error, slot, error),
+            };
+            let extracted = Extracted {
+                environment: fetched.environment,
+                sha256: fetched.sha256,
+                entry,
+                types,
+            };
+            if let Err(error) = write_registry_link(manifest, &job, &extracted, progress) {
+                return keep_first(&mut first_error, slot, error);
+            }
+            // transitives have no link, show where they landed instead
+            let shown = job
+                .link
+                .clone()
+                .unwrap_or_else(|| format!(".ember/{}", job.name.replace('/', "_")));
+            let source = job
+                .source
+                .local_label()
+                .map_or(String::new(), |label| format!(" ({label})"));
+            // the folder under packages/, so a Luwu project shows `luwu/`
+            task.done(&ui::success_line(&format!(
+                "{}@{} → {}/{shown}{source}",
+                job.name,
+                job.version,
+                manifest.packages_dir(job.context)
+            )));
+            /* a local publish can replace a version, so its hash means
+            nothing. a git commit is its own integrity */
+            let sha256 = (job.index_url != crate::registry::local::NAME
+                && !matches!(job.source, index::DownloadSource::Git { .. }))
+            .then_some(extracted.sha256);
+            slots[slot] = Some(LockedPackage {
+                name: job.name,
+                version: job.version,
+                environment: extracted.environment,
+                context: (job.context != extracted.environment).then_some(job.context),
+                link: job.link,
+                index: job.index_url,
+                redirects: job.redirects,
+                patch: job.patch.map(|patch| patch.record),
+                optional: job.optional,
+                features: job.features,
+                channel: None,
+                source: job.source,
+                sha256,
+            });
+            true
+        },
+    );
+    if let Some((_, error)) = first_error {
+        return Err(error);
+    }
+
     /* every slot must have reported. a hole here is an embr bug, and
     silently writing a shorter lockfile would be far worse than failing */
     slots
@@ -1594,6 +1742,13 @@ fn skips(job: &Job, error: &Error) -> bool {
     job.optional && !matches!(error, Error::IntegrityMismatch { .. })
 }
 
+/// what the download of one package gave. the tree itself is in its staging dir.
+struct Fetched {
+    environment: Environment,
+    /// the SHA-256 of the archive it came from.
+    sha256: String,
+}
+
 /// what a worker learned about one extracted package, links come later.
 struct Extracted {
     environment: Environment,
@@ -1604,19 +1759,15 @@ struct Extracted {
     types: package::Exports,
 }
 
-/** one registry package, end to end except the link file. download or
-cache hit, extract under `staging`, detect the environment, move into the
-store, mirror project files, rewrite instance requires, and pull exported
-types. runs on a worker thread. */
-fn install_one(
-    manifest: &Manifest,
+/** the first half of one registry or git package: download or cache hit,
+extract under `staging`, patch, and detect the environment. it writes
+under `staging` only. runs on a worker thread. */
+fn fetch_one(
     job: &Job,
     staging: &Path,
     cache: index::CachePolicy,
-    progress: &Progress,
     task: &Task,
-) -> Result<Extracted, Error> {
-    let started = Instant::now();
+) -> Result<Fetched, Error> {
     if staging.exists() {
         with_retry(|| fs::remove_dir_all(staging))?;
     }
@@ -1653,14 +1804,30 @@ fn install_one(
         None => package::environment(staging)
             .ok_or_else(|| Error::UnknownPackageEnvironment(job.name.clone()))?,
     };
+    Ok(Fetched {
+        environment,
+        sha256,
+    })
+}
 
+/** the second half of one package, all but the link file: move the staged
+tree into the store, mirror project files, rewrite instance requires, and
+pull exported types. gives the entry point, None when it found none, and
+the types. runs on a worker thread. */
+fn place_one(
+    manifest: &Manifest,
+    job: &Job,
+    staging: &Path,
+    progress: &Progress,
+) -> Result<(Option<String>, package::Exports), Error> {
+    let started = Instant::now();
     /* real contents live under <out>/.ember/<scope>_<name>/ where <out> is
     the CONTEXT's folder, not the package's own environment. each root is
     self contained, so a server package's roblox deps stay under server.
     workers race to create the same .ember parent, create_dir_all treats
     existing as success, and Windows occasionally answers concurrent
     creation or a fresh rename with a transient denial worth one retry */
-    let folder = job.name.replace('/', "_");
+    let folder = paths::store_folder(&job.name)?;
     let out = manifest.packages_out(job.context);
     let storage = out.join(STORE_DIR).join(&folder);
     with_retry(|| fs::create_dir_all(storage.parent().expect("storage dir has a parent")))?;
@@ -1676,7 +1843,7 @@ fn install_one(
     let entry = entry_for(manifest, &job.name, &storage, &mut warner(progress));
     rojo::mirror_disk_layout(&storage, &mut warner(progress));
 
-    let (entry, types) = match entry {
+    let placed = match entry {
         Some(entry) => {
             /* packages from any index can talk roblox instance paths
             like require(script.Parent.X), wally stuff especially but ports
@@ -1702,12 +1869,7 @@ fn install_one(
 
     // suspended so a timings line can't tear the live display from a worker thread
     progress.suspend(|| ui::timing(&format!("package {}", job.name), started));
-    Ok(Extracted {
-        environment,
-        sha256,
-        entry,
-        types,
-    })
+    Ok(placed)
 }
 
 /// one retry after a beat, for transient Windows file-sharing refusals.
@@ -1731,7 +1893,7 @@ fn write_registry_link(
     match (&job.link, &extracted.entry) {
         (Some(link), Some(entry)) => {
             let out = manifest.packages_out(job.context);
-            let folder = job.name.replace('/', "_");
+            let folder = paths::store_folder(&job.name)?;
             let (link_path, up) = link_file(&out, link)?;
             let root = format!("{up}/{STORE_DIR}/{folder}");
             fs::write(
@@ -1840,6 +2002,7 @@ fn link_in_place(
         patch: None,
         optional: job.optional,
         features: job.features,
+        channel: None,
         source: job.source,
         sha256: None,
     })
@@ -1848,17 +2011,20 @@ fn link_in_place(
 /** where install puts `package`, relative to the project, and whether that
 is a workspace member or a path folder linked in place. `embr tree` reads
 the same folders. */
-pub(crate) fn stored_at(manifest: &Manifest, package: &LockedPackage) -> (PathBuf, bool) {
-    match package.source.in_place() {
+pub(crate) fn stored_at(
+    manifest: &Manifest,
+    package: &LockedPackage,
+) -> Result<(PathBuf, bool), Error> {
+    Ok(match package.source.in_place() {
         Some(path) => (PathBuf::from(path), true),
         None => (
             manifest
                 .packages_out(package.context())
                 .join(STORE_DIR)
-                .join(package.name.replace('/', "_")),
+                .join(paths::store_folder(&package.name)?),
             false,
         ),
-    }
+    })
 }
 
 /** one installed package, as the nested-link pass sees it. */
@@ -2153,8 +2319,27 @@ what the package declares itself, then a guess from what it ships. the guess
 is announced, since a link file built on one is otherwise a mystery to
 whoever hits it, and the message names the way to correct it. last, the
 folder of a collection. the guess comes first because it keeps the link files
-of packages that install today. */
+of packages that install today. an entry outside the package is no entry,
+see [`package::entry_stays_inside`]. */
 fn entry_for(
+    manifest: &Manifest,
+    name: &str,
+    dir: &Path,
+    warn: &mut impl FnMut(String),
+) -> Option<String> {
+    let entry = found_entry(manifest, name, dir, warn)?;
+    if package::entry_stays_inside(&entry) {
+        return Some(entry);
+    }
+    warn(format!(
+        "warning: {name} names the entry '{}', which is outside the package; ignoring it",
+        ui::printable(&entry)
+    ));
+    None
+}
+
+/// [`entry_for`], before the check that the entry is inside the package.
+fn found_entry(
     manifest: &Manifest,
     name: &str,
     dir: &Path,
@@ -2250,10 +2435,26 @@ fn install_tools(
             /* another toolchain manager's shim earlier in PATH, aftman or
             rokit, would run instead of ours and report its own errors. surface
             that or the tool looks broken for no visible reason */
+            let elsewhere = tools::shim::elsewhere_on_path(command);
+            if let Some(found) = elsewhere.as_ref().filter(|_| index > 0) {
+                // see `tools::install_tool`
+                progress.warn(&format!(
+                    "warning: `{command}` of {} gets no shim: {} is that command on PATH already",
+                    tool.repository,
+                    found.display()
+                ));
+                continue;
+            }
             if let Some(shadow) = tools::shim::shadowing_executable(command) {
                 progress.warn(&format!(
                     "warning: `{command}` resolves to {} on PATH before embr's shims; that copy will run instead",
                     shadow.display()
+                ));
+            } else if let Some(hidden) = elsewhere {
+                // the alias of a cloned project's [tools] can be `git` too
+                progress.warn(&format!(
+                    "warning: embr's shim `{command}` runs in place of {} on PATH",
+                    hidden.display()
                 ));
             }
             /* two tools cannot both have one command. an alias of [tools]
@@ -2501,6 +2702,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: index::DownloadSource::Zip {
                 url: format!("https://example.com/{name}/{version}"),
             },
@@ -2965,6 +3167,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -3073,6 +3276,7 @@ mod tests {
                 patch: None,
                 optional: false,
                 features: Vec::new(),
+                channel: None,
                 source: index::DownloadSource::TarGz {
                     url: url.to_string(),
                 },
@@ -3346,13 +3550,7 @@ mod tests {
             fs::write(old.join("Thing.luau"), "return nil\n").unwrap();
             fs::write(old.join("acme/Scoped.luau"), "return nil\n").unwrap();
         };
-        // the function reads relative paths, so it has to run from the project
-        let in_base = |manifest: &Manifest| {
-            crate::project::workspace::in_dir(&base, || {
-                Ok(remove_legacy_outs(manifest, Some(&lock)))
-            })
-            .unwrap()
-        };
+        let in_base = |manifest: &Manifest| remove_legacy_outs_in(&base, manifest, Some(&lock));
 
         /* a Luwu project's packages/luau goes. a file that the lock does
         not name is the user's, so it and its folder stay */
@@ -3720,6 +3918,7 @@ mod tests {
                 &base.join("staging"),
                 &progress,
                 index::CachePolicy::Bypass,
+                || Ok(()),
             )
         };
         assert!(install(job(true)).unwrap().is_empty());
@@ -3819,6 +4018,7 @@ mod tests {
             &base.join("staging"),
             &Progress::hidden(),
             index::CachePolicy::Use,
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(locked[0].version, "");

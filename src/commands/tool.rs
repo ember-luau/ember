@@ -690,8 +690,11 @@ fn delete(name: String, version: Option<String>) -> Result<(), Error> {
     if tool_gone {
         let _ = fs::remove_dir_all(&tool_dir);
         if let (Some(shim), Ok(bin_dir)) = (shim, paths::bin_dir()) {
+            // a repository named `embr` has the name of embr's own binary there
             for shim in bins.iter().chain([&shim]) {
-                let _ = fs::remove_file(bin_dir.join(format!("{shim}{EXE_SUFFIX}")));
+                if !tools::is_reserved_alias(shim) && paths::is_plain_file_name(shim) {
+                    let _ = fs::remove_file(bin_dir.join(format!("{shim}{EXE_SUFFIX}")));
+                }
             }
         }
     }
