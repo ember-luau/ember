@@ -478,3 +478,83 @@ fn installed_files_keep_no_mode_bit_outside_0755() {
         assert_eq!(mode & 0o7777 & !0o755, 0, "{file} has mode {mode:o}");
     }
 }
+
+/** M3. the tool.toml of a release names the binaries after the main one,
+and each got a shim in ~/.ember/bin. a binary named `git` took the place of
+git in every terminal. a name that is a command of the computer already now
+gets no shim. */
+#[test]
+fn a_second_binary_of_a_tool_does_not_take_the_place_of_a_command() {
+    let base = scratch("bins");
+    let executable = |path: &Path, text: &str| {
+        write(path, text);
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let project = base.join("proj");
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n\n[tools]\nkit = \"acme/kit@1.0.0\"\n",
+    );
+    let store = base.join("home/.ember/tools/acme_kit/1.0.0");
+    for bin in ["kit", "kit-fmt", "git"] {
+        executable(&store.join(bin), "#!/bin/sh\necho attacker\n");
+    }
+    write(&store.join(".embr-bins"), "kit-fmt\ngit\n");
+    let sha = "a".repeat(64);
+    write(
+        &store.join(".embr-asset"),
+        &format!("{sha}  tool.toml\n{sha}  kit-linux-x64.zip\n"),
+    );
+    // the git of this computer
+    executable(&base.join("usr/git"), "#!/bin/sh\necho git\n");
+
+    let path = format!(
+        "{}:{}:{}",
+        base.join("home/.ember/bin").display(),
+        base.join("usr").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let installed = command(&project, &base)
+        .arg("install")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{}", text(&installed));
+    let bin = base.join("home/.ember/bin");
+    assert!(bin.join("kit").is_file() && bin.join("kit-fmt").is_file());
+    assert!(!bin.join("git").exists(), "a shim took the place of git");
+    assert!(
+        text(&installed).contains("`git` of acme/kit gets no shim"),
+        "{}",
+        text(&installed)
+    );
+
+    // the next install has nothing to do, and still writes no shim
+    let again = command(&project, &base)
+        .arg("install")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(!bin.join("git").exists());
+}
+
+/// M3. `embr tool delete someone/embr` deleted ~/.ember/bin/embr, the shim of the repository name.
+#[test]
+fn a_tool_delete_keeps_the_binaries_of_embr() {
+    let base = scratch("delete");
+    let bin = base.join("home/.ember/bin");
+    write(&bin.join("embr"), "embr\n");
+    write(&bin.join("embx"), "embx\n");
+    write(&bin.join("other"), "other\n");
+    let store = base.join("home/.ember/tools/someone_embr/1.0.0");
+    write(&store.join("embr"), "#!/bin/sh\n");
+    write(&store.join(".embr-bins"), "embx\nother\n");
+
+    let deleted = run(&base, &base, &["tool", "delete", "someone/embr"]);
+    assert!(deleted.status.success(), "{}", text(&deleted));
+    assert!(!store.exists());
+    assert!(bin.join("embr").is_file(), "embr is gone");
+    assert!(bin.join("embx").is_file(), "embx is gone");
+    assert!(!bin.join("other").exists());
+}

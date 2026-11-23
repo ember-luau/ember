@@ -146,11 +146,15 @@ pub fn is_installed(alias: &str, tool: &Tool) -> Result<bool, Error> {
         Some(package) => npm::is_stored(package, &tool.version)?,
         None => stored_is_usable(&stored_executable(&tool.repository, &tool.version)?),
     };
+    // a binary after the main one gets no shim over a command of the computer, see `install_tool`
     Ok(stored
         && shim::path(alias)?.exists()
         && extra_bins(&tool.repository, &tool.version)
             .iter()
-            .all(|bin| shim::path(bin).is_ok_and(|shim| shim.exists())))
+            .all(|bin| {
+                shim::path(bin).is_ok_and(|shim| shim.exists())
+                    || shim::elsewhere_on_path(bin).is_some()
+            }))
 }
 
 /** the SHA-256 that ember.lock records for the release assets of the
@@ -294,6 +298,10 @@ pub(crate) fn check_bins(bins: &[String]) -> Result<(), String> {
         if is_reserved_alias(bin) {
             return Err(format!("binary name '{bin}' is a command of embr"));
         }
+        // `nul`, `com1.exe` and a name that ends in a dot are no file names on Windows
+        if paths::store_folder(bin).is_err() {
+            return Err(format!("binary name '{bin}' is not a file name on Windows"));
+        }
         if bins[..index]
             .iter()
             .any(|other| other.eq_ignore_ascii_case(bin))
@@ -376,8 +384,15 @@ pub fn install_tool(
         store_release(&tool.repository, &release, alias, pins, on_bytes)?.1
     };
     shim::write(&shim::path(alias)?)?;
+    /* the person wrote the alias in [tools]. the names of the other
+    binaries come from the tool.toml of the release, and a tool that names
+    one `git` would take the place of git in every terminal. so a name that
+    is a command of this computer already gets no shim, and the caller
+    warns */
     for bin in extra_bins(&tool.repository, &tool.version) {
-        shim::write(&shim::path(&bin)?)?;
+        if shim::elsewhere_on_path(&bin).is_none() {
+            shim::write(&shim::path(&bin)?)?;
+        }
     }
     Ok(downloaded)
 }
@@ -1020,6 +1035,15 @@ mod tests {
             ),
             Err(Error::ReservedToolAlias(_))
         ));
+        // a binary name is a file name and a command name on every system
+        let bins =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert!(check_bins(&bins(&["kit", "kit-fmt", "kit.v2"])).is_ok());
+        for bad in [
+            "embr", "nul", "COM1", "aux.exe", "kit.", "../kit", "a/b", "a\\b", ".kit", "",
+        ] {
+            assert!(check_bins(&bins(&["kit", bad])).is_err(), "{bad}");
+        }
     }
 
     #[test]

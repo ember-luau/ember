@@ -2426,10 +2426,26 @@ fn install_tools(
             /* another toolchain manager's shim earlier in PATH, aftman or
             rokit, would run instead of ours and report its own errors. surface
             that or the tool looks broken for no visible reason */
+            let elsewhere = tools::shim::elsewhere_on_path(command);
+            if let Some(found) = elsewhere.as_ref().filter(|_| index > 0) {
+                // see `tools::install_tool`
+                progress.warn(&format!(
+                    "warning: `{command}` of {} gets no shim: {} is that command on PATH already",
+                    tool.repository,
+                    found.display()
+                ));
+                continue;
+            }
             if let Some(shadow) = tools::shim::shadowing_executable(command) {
                 progress.warn(&format!(
                     "warning: `{command}` resolves to {} on PATH before embr's shims; that copy will run instead",
                     shadow.display()
+                ));
+            } else if let Some(hidden) = elsewhere {
+                // the alias of a cloned project's [tools] can be `git` too
+                progress.warn(&format!(
+                    "warning: embr's shim `{command}` runs in place of {} on PATH",
+                    hidden.display()
                 ));
             }
             /* two tools cannot both have one command. an alias of [tools]

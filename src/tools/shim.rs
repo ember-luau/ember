@@ -140,6 +140,18 @@ pub fn shadowing_executable(alias: &str) -> Option<PathBuf> {
     None
 }
 
+/** the first copy of the command `alias` in a PATH folder that is not the
+folder of embr's shims, before or after it. a shim of that name would take
+the place of this program, or be hidden by it. */
+pub fn elsewhere_on_path(alias: &str) -> Option<PathBuf> {
+    let bin = paths::bin_dir().ok()?;
+    let file = format!("{alias}{}", env::consts::EXE_SUFFIX);
+    env::split_paths(&env::var_os("PATH")?)
+        .filter(|dir| !dir.as_os_str().is_empty() && *dir != bin && !paths::same_file(dir, &bin))
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+}
+
 /** Which tool an alias means. the nearest ember.toml walking up from `start`
 whose [tools] lists it wins, then the global tools file. None when
 nothing pins it, what `embr execute` asks before trying shorthands. */
