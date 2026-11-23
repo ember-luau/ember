@@ -443,10 +443,7 @@ fn download_at(
         });
     };
 
-    let mut headers: Vec<(&str, &str)> = Vec::new();
-    if matches!(source, DownloadSource::Zip { .. }) {
-        headers.push(("Wally-Version", wally::VERSION_HEADER));
-    }
+    let headers = archive_headers(source);
 
     // after the fetch, so a refused archive leaves nothing on disk
     let (bytes, sha256, from_cache) = fetch_archive(entry, url, &headers, cache, expect, on_bytes)?;
@@ -676,8 +673,16 @@ fn store_archive(entry: &Path, bytes: &[u8], url: &str) -> std::io::Result<()> {
     let dir = entry.parent().expect("cache entries have a parent");
     fs::create_dir_all(dir)?;
 
-    let meta = format!("v1 {} {:016x} {url}\n", bytes.len(), fnv1a(bytes));
+    let fnv = fnv1a(bytes);
+    let meta = format!("v1 {} {fnv:016x} {url}\n", bytes.len());
     replace_file(&meta_path(entry), meta.as_bytes())?;
+    /* the SHA-256 has a file of its own. an older embr compares the last
+    field of `.meta` with the whole URL, so one more field or line there
+    reads as a mismatch and evicts the entry. the FNV ties this record to
+    the archive that `.meta` describes: an older embr that stores the entry
+    again leaves this file, and its FNV then matches no more. */
+    let sha = format!("{fnv:016x} {}\n", sha256_hex(bytes));
+    replace_file(&sha_path(entry), sha.as_bytes())?;
     replace_file(entry, bytes)
 }
 
@@ -708,13 +713,163 @@ pub(crate) fn evict_archive(url: &str) {
     }
 }
 
-fn evict_entry(entry: &Path) {
+pub(crate) fn evict_entry(entry: &Path) {
     let _ = fs::remove_file(entry);
     let _ = fs::remove_file(meta_path(entry));
+    let _ = fs::remove_file(sha_path(entry));
 }
 
 fn meta_path(entry: &Path) -> PathBuf {
     paths::with_suffix(entry, ".meta")
+}
+
+/// the SHA-256 record of an entry, see [`store_archive`].
+fn sha_path(entry: &Path) -> PathBuf {
+    paths::with_suffix(entry, ".sha256")
+}
+
+/// one entry of the archive cache: the archive file, which can be missing when only a sidecar is left.
+pub(crate) struct CachedArchive {
+    pub path: PathBuf,
+    /// the archive and its sidecars together.
+    pub bytes: u64,
+    /// the newest write to the entry.
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/** each entry of the archive cache, sorted by path. it reads no archive.
+a sidecar with no archive is an entry too, so `embr cache verify` reports
+it and `embr cache clean` removes it. */
+pub(crate) fn cached_archives() -> Vec<CachedArchive> {
+    let Ok(dir) = paths::archive_cache_dir() else {
+        return Vec::new();
+    };
+    let mut entries = std::collections::BTreeMap::<PathBuf, CachedArchive>::new();
+    for file in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let path = file.path();
+        let name = path.to_string_lossy();
+        let path = match name
+            .strip_suffix(".meta")
+            .or_else(|| name.strip_suffix(".sha256"))
+        {
+            Some(payload) => PathBuf::from(payload),
+            None => path,
+        };
+        let entry = entries.entry(path.clone()).or_insert(CachedArchive {
+            path,
+            bytes: 0,
+            modified: None,
+        });
+        entry.bytes += meta.len();
+        entry.modified = entry.modified.max(meta.modified().ok());
+    }
+    entries.into_values().collect()
+}
+
+/// what `embr cache verify` finds in one entry.
+pub(crate) struct ArchiveCheck {
+    /// the URL that the sidecar names, when it reads.
+    pub url: Option<String>,
+    /// the entry has a SHA-256 record, and the archive matches it.
+    pub sha256: bool,
+    /// why the entry is bad. None for a good entry.
+    pub bad: Option<String>,
+}
+
+/** checks the archive at `entry` against its sidecars: the length and the
+FNV of `.meta`, then the SHA-256 record when the entry has one. it reads
+only, where [`load_archive`] evicts. */
+pub(crate) fn check_archive(entry: &Path) -> ArchiveCheck {
+    let bad = |url: Option<&str>, reason: &str| ArchiveCheck {
+        url: url.map(str::to_string),
+        sha256: false,
+        bad: Some(reason.to_string()),
+    };
+    let Ok(meta) = fs::read_to_string(meta_path(entry)) else {
+        return bad(None, "the entry has no .meta sidecar");
+    };
+    let mut fields = meta.trim_end().splitn(4, ' ');
+    let (Some("v1"), Some(len), Some(fnv), Some(url)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return bad(None, "the .meta sidecar does not parse");
+    };
+    let Ok(bytes) = fs::read(entry) else {
+        return bad(Some(url), "the archive file is missing");
+    };
+    if len.parse::<usize>().ok() != Some(bytes.len()) {
+        return bad(Some(url), "the length differs from the sidecar");
+    }
+    if fnv != format!("{:016x}", fnv1a(&bytes)) {
+        return bad(Some(url), "the FNV hash differs from the sidecar");
+    }
+    let record = fs::read_to_string(sha_path(entry)).unwrap_or_default();
+    let sha256 = match record.trim_end().split_once(' ') {
+        // a record of another archive says nothing about this one
+        Some((of, sha256)) if of == fnv => {
+            if sha256 != sha256_hex(&bytes) {
+                return bad(Some(url), "the SHA-256 differs from the record");
+            }
+            true
+        }
+        _ => false,
+    };
+    ArchiveCheck {
+        url: Some(url.to_string()),
+        sha256,
+        bad: None,
+    }
+}
+
+/** the archive that `source` names and its SHA-256, from the local
+registry, the cache or the network, as an install reads it. `embr export`
+copies it. */
+pub(crate) fn archive_bytes(
+    source: &DownloadSource,
+    expect: Option<&Expect>,
+) -> Result<(Vec<u8>, String), Error> {
+    let (DownloadSource::Zip { url } | DownloadSource::TarGz { url }) = source else {
+        return Err(Error::IndexFetch {
+            url: String::new(),
+            reason: "only a registry package has an archive".to_string(),
+        });
+    };
+    let headers = archive_headers(source);
+    let entry = archive_entry(url);
+    let (bytes, sha256, _) = fetch_archive(
+        entry.as_deref(),
+        url,
+        &headers,
+        CachePolicy::Use,
+        expect,
+        &mut |_, _| {},
+    )?;
+    Ok((bytes, sha256))
+}
+
+/** puts `bytes` where an install looks for the archive of `url`: the
+archive cache, or the local registry for a `local:` URL. `embr import`
+checks the hash before it calls this. */
+pub(crate) fn import_archive(url: &str, bytes: &[u8]) -> Result<(), Error> {
+    if let Some(written) = local::write_archive(url, bytes) {
+        return written;
+    }
+    let entry = archive_entry(url).ok_or(Error::NoHomeDir)?;
+    Ok(store_archive(&entry, bytes, url)?)
+}
+
+/// the request headers of the archive of `source`.
+fn archive_headers(source: &DownloadSource) -> Vec<(&'static str, &'static str)> {
+    match source {
+        DownloadSource::Zip { .. } => vec![("Wally-Version", wally::VERSION_HEADER)],
+        _ => Vec::new(),
+    }
 }
 
 /** existing index caches were keyed with DefaultHasher, whose output is
@@ -931,6 +1086,24 @@ mod tests {
         // payload without a sidecar is not an entry
         fs::write(&entry, b"orphan").unwrap();
         assert_eq!(load_archive(&entry, url), None);
+        assert!(check_archive(&entry).bad.is_some());
+
+        // a check reads the SHA-256 record, and reports without a delete
+        store_archive(&entry, b"payload", url).unwrap();
+        let check = check_archive(&entry);
+        assert!(check.bad.is_none() && check.sha256);
+        assert_eq!(check.url.as_deref(), Some(url));
+        let record = fs::read_to_string(sha_path(&entry)).unwrap();
+        let (fnv, _) = record.split_once(' ').unwrap();
+        fs::write(sha_path(&entry), format!("{fnv} {}\n", "0".repeat(64))).unwrap();
+        assert!(check_archive(&entry).bad.is_some());
+        assert!(entry.exists());
+        // an older embr reads `.meta` alone, so the record never costs a hit
+        assert_eq!(load_archive(&entry, url), Some(b"payload".to_vec()));
+        // the record of another archive is no record
+        fs::write(sha_path(&entry), format!("{} x\n", "0".repeat(16))).unwrap();
+        let check = check_archive(&entry);
+        assert!(check.bad.is_none() && !check.sha256);
 
         let _ = fs::remove_dir_all(&dir);
     }

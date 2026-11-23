@@ -192,19 +192,41 @@ pub fn read_archive(url: &str) -> Option<Result<Vec<u8>, Error>> {
     ))
 }
 
+/** stores `bytes` as the archive that a `local:` download names, with no
+index entry. None for any other URL. `embr import` calls it, and a locked
+install then reads the archive. */
+pub fn write_archive(url: &str, bytes: &[u8]) -> Option<Result<(), Error>> {
+    let file = url.strip_prefix(SCHEME)?;
+    let write = || {
+        let path = archive_path(&paths::local_dir()?.join("archives"), url, file)?;
+        fs::create_dir_all(path.parent().expect("the path has folders"))?;
+        Ok(fs::write(path, bytes)?)
+    };
+    Some(write())
+}
+
+/// the place of `file` in `archives`, refused when it leaves that folder.
+fn archive_path(archives: &Path, url: &str, file: &str) -> Result<PathBuf, Error> {
+    // a lockfile is text a user can edit, so the path must stay in the folder
+    if file.is_empty()
+        || !Path::new(file)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(Error::IndexFetch {
+            url: url.to_string(),
+            reason: "the path leaves the local registry".to_string(),
+        });
+    }
+    Ok(archives.join(file))
+}
+
 fn read_in(archives: &Path, url: &str, file: &str) -> Result<Vec<u8>, Error> {
     let fetch_error = |reason: &str| Error::IndexFetch {
         url: url.to_string(),
         reason: reason.to_string(),
     };
-    // a lockfile is text a user can edit, so the path must stay in the folder
-    if !Path::new(file)
-        .components()
-        .all(|part| matches!(part, Component::Normal(_)))
-    {
-        return Err(fetch_error("the path leaves the local registry"));
-    }
-    fs::read(archives.join(file)).map_err(|error| match error.kind() {
+    fs::read(archive_path(archives, url, file)?).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => fetch_error(
             "the archive is not in the local registry; run `embr publish --local` in the package folder",
         ),
