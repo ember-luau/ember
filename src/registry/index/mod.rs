@@ -362,6 +362,45 @@ impl Index {
         }
     }
 
+    /// whether the index at `url` can have channels. the answer needs no open index.
+    pub fn has_channels(url: &str) -> bool {
+        url == DEFAULT_INDEX_URL || url == local::NAME
+    }
+
+    /** the version that `channel` of `name` names, from `[meta.channels]`
+    of the package file. only the ember index and the local registry have
+    channels. a private or unlisted package reads them from the API, as its
+    versions. a channel that the package does not have is an error that
+    lists the ones it has. */
+    pub fn channel(&self, name: &str, channel: &str) -> Result<semver::Version, Error> {
+        if !Index::has_channels(&self.url) {
+            return Err(Error::ChannelIndex {
+                name: name.to_string(),
+                index: self.url.clone(),
+            });
+        }
+        let file = match pesde::file(&self.root, &self.url, name) {
+            Err(missing @ Error::PackageNotFound { .. }) if self.url == DEFAULT_INDEX_URL => {
+                hidden::file(name)?.ok_or(missing)?
+            }
+            found => found?,
+        };
+        let channels = crate::registry::notices::Meta::of(&file).channels;
+        match channels.get(channel) {
+            Some(version) => Ok(semver::Version::parse(version)?),
+            None => Err(Error::ChannelMissing {
+                name: name.to_string(),
+                channel: channel.to_string(),
+                known: if channels.is_empty() {
+                    "it has no channels".to_string()
+                } else {
+                    let names: Vec<&str> = channels.keys().map(String::as_str).collect();
+                    format!("its channels are {}", names.join(", "))
+                },
+            }),
+        }
+    }
+
     /** every entry of `name`, yanked ones included, and the package-wide
     deprecation reason. it reads pesde-format indices only, which the ember
     index is. */

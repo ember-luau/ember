@@ -24,12 +24,18 @@ pub fn index_dir() -> Result<PathBuf, Error> {
 
 /** stores `archive`, the packed target that `manifest` holds, and writes
 its index entry. a version that is already here gets the new archive: a
-local package changes while its author works on it. */
-pub fn publish(manifest: &Manifest, archive: &[u8]) -> Result<(), Error> {
-    publish_in(&paths::local_dir()?, manifest, archive)
+local package changes while its author works on it. `channel` then names
+this version in `[meta.channels]`, as the registry's index file has it. */
+pub fn publish(manifest: &Manifest, archive: &[u8], channel: Option<&str>) -> Result<(), Error> {
+    publish_in(&paths::local_dir()?, manifest, archive, channel)
 }
 
-fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Error> {
+fn publish_in(
+    root: &Path,
+    manifest: &Manifest,
+    archive: &[u8],
+    channel: Option<&str>,
+) -> Result<(), Error> {
     let package = manifest.package.as_ref().ok_or(Error::PackageMissing)?;
     let target = manifest.target().expect("publish sets one target");
     let full_name = package.name.to_lowercase();
@@ -102,6 +108,17 @@ fn publish_in(root: &Path, manifest: &Manifest, archive: &[u8]) -> Result<(), Er
         Err(_) => toml::Table::new(),
     };
     entries.insert(format!("{} {id}", package.version), entry.into());
+    if let Some(channel) = channel {
+        let table = || toml::Value::Table(toml::Table::new());
+        let channels = entries
+            .entry("meta")
+            .or_insert_with(table)
+            .as_table_mut()
+            .and_then(|meta| meta.entry("channels").or_insert_with(table).as_table_mut());
+        if let Some(channels) = channels {
+            channels.insert(channel.to_string(), package.version.clone().into());
+        }
+    }
     fs::create_dir_all(index_path.parent().expect("the path has folders"))?;
     fs::write(&index_path, toml::to_string_pretty(&entries)?)?;
     Ok(())
@@ -260,7 +277,7 @@ mod tests {
              [peer-dependencies]\n\
              React = { name = \"jsdotlua/react\", version = \"^17\" }\n",
         );
-        publish_in(&root, &lib, b"first").unwrap();
+        publish_in(&root, &lib, b"first", None).unwrap();
 
         // the folder holds the index and the archives, and no settings
         let mut top: Vec<_> = fs::read_dir(&root)
@@ -323,7 +340,7 @@ mod tests {
         );
 
         // the same version again is the edit loop: the new archive wins
-        publish_in(&root, &lib, b"second").unwrap();
+        publish_in(&root, &lib, b"second", None).unwrap();
         assert_eq!(
             read_in(&root.join("archives"), url, file).unwrap(),
             b"second"
@@ -351,7 +368,7 @@ mod tests {
              trace = { name = \"me/trace\", version = \"^1\", index = \"local\", optional = true }\n\n\
              [features]\ndefault = [\"pretty\"]\npretty = [\"icons\", \"trace\", \"core/dark\"]\n",
         );
-        publish_in(&root, &ui, b"ui").unwrap();
+        publish_in(&root, &ui, b"ui", None).unwrap();
 
         let index = Index::local_at(root.join("index"));
         let file = index.file("me/ui").unwrap().unwrap();
@@ -414,7 +431,7 @@ mod tests {
              [feature-files.traits]\nentry = \"src/traits\"\nfiles = [\"src/traits\"]\n\n\
              [feature-files.bin]\nentry = \"src/bin\"\nfiles = [\"src/bin/**\"]\n",
         );
-        publish_in(&root, &forge, b"forge").unwrap();
+        publish_in(&root, &forge, b"forge", None).unwrap();
         let file = Index::local_at(root.join("index"))
             .file("me/forge")
             .unwrap()
@@ -437,7 +454,7 @@ mod tests {
              [target]\nenvironment = \"roblox\"\nmain = \"src/init.luau\"\n\n\
              [[highlight.rules]]\nlanguages = [\"alx\"]\ntype = \"keyword\"\nwords = [\"#if\"]\n",
         );
-        publish_in(&root, &blocks, b"blocks").unwrap();
+        publish_in(&root, &blocks, b"blocks", None).unwrap();
         let file = Index::local_at(root.join("index"))
             .file("me/blocks")
             .unwrap()

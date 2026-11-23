@@ -40,6 +40,8 @@ struct Row {
     link: Option<String>,
     /// the environment root that it installs under.
     context: Environment,
+    /// the channel that picked the version, see [`LockedPackage::channel`].
+    channel: Option<String>,
 }
 
 impl Row {
@@ -49,6 +51,7 @@ impl Row {
         source: &DownloadSource,
         link: Option<String>,
         context: Environment,
+        channel: Option<String>,
     ) -> Self {
         Row {
             name,
@@ -63,6 +66,7 @@ impl Row {
             },
             link,
             context,
+            channel,
         }
     }
 
@@ -74,6 +78,7 @@ impl Row {
             &package.source,
             package.link,
             context,
+            package.channel,
         )
     }
 
@@ -84,6 +89,7 @@ impl Row {
             &package.source,
             package.link,
             package.context,
+            package.channel,
         )
     }
 }
@@ -172,6 +178,8 @@ struct Change<'a> {
     /// ember.toml names the package, so it has a link file.
     direct: bool,
     environment: Environment,
+    /// the channel that the new version comes from.
+    channel: Option<&'a str>,
 }
 
 /** how far a version moved: the first part of `from` and `to` that
@@ -237,6 +245,7 @@ fn changes<'a>(before: &'a [Project], after: &'a [Project]) -> (Vec<Change<'a>>,
                 kind,
                 direct: row.link.is_some(),
                 environment: key.0,
+                channel: new_rows.get(key).and_then(|row| row.channel.as_deref()),
             });
         }
     }
@@ -262,6 +271,9 @@ pub(crate) fn document(before: &[Project], after: &[Project], dry_run: bool) -> 
             });
             if let Some(member) = change.member {
                 entry["member"] = member.into();
+            }
+            if let Some(channel) = change.channel {
+                entry["channel"] = channel.into();
             }
             entry
         })
@@ -312,7 +324,7 @@ fn print(before: &[Project], after: &[Project], dry_run: bool) {
             (Some(from), None) => format!("{} {name} {from}", "-".with(ui::rgb(ui::CRIMSON))),
             (None, None) => continue,
         };
-        let note = format!(
+        let mut note = format!(
             "{}, {}",
             change.kind,
             if change.direct {
@@ -321,6 +333,9 @@ fn print(before: &[Project], after: &[Project], dry_run: bool) {
                 "transitive"
             }
         );
+        if let Some(channel) = change.channel {
+            note.push_str(&format!(", channel {}", ui::printable(channel)));
+        }
         println!("  {moved}  {}", note.as_str().dark_grey());
     }
     let entries = |count: usize| if count == 1 { "entry" } else { "entries" };
@@ -398,6 +413,7 @@ mod tests {
             rev: None,
             link: link.map(str::to_string),
             context: Environment::Luau,
+            channel: None,
         }
     }
 

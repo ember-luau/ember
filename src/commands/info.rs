@@ -32,6 +32,97 @@ pub struct InfoArgs {
 /// the versions listed before "and N more".
 const RECENT: usize = 10;
 
+/** what only the registry's package answer says, and no index file: who
+publishes the package, and which versions have release notes. each part is
+None when embr did not get it, and the output then says nothing of it. */
+#[derive(Default)]
+struct Answer {
+    /// the package is in the ember index, where a version can have provenance.
+    ember: bool,
+    /// `trust` of the answer, as the registry gives it.
+    trust: Option<serde_json::Value>,
+    /// the versions that have release notes.
+    notes: Option<Vec<String>>,
+}
+
+impl Answer {
+    /** asks the registry about `name` in the index at `url`. only the ember
+    index has an API for this. a call that fails shows nothing: the index
+    entries still hold the rest. */
+    fn of(url: &str, name: &str) -> Self {
+        if url != DEFAULT_INDEX_URL {
+            return Answer::default();
+        }
+        let answer = (!crate::net::offline::is_enabled())
+            .then(|| crate::net::registry::package_answer(name).ok())
+            .flatten();
+        Answer {
+            ember: true,
+            trust: answer
+                .as_ref()
+                .and_then(|answer| answer.get("trust"))
+                .cloned(),
+            // the key is absent when no version has notes
+            notes: answer.map(|answer| {
+                answer["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|version| version.as_str().map(str::to_string))
+                    .collect()
+            }),
+        }
+    }
+
+    /// whether `version` has release notes. None when the registry did not say.
+    fn has_notes(&self, version: &semver::Version) -> Option<bool> {
+        let version = version.to_string();
+        Some(self.notes.as_ref()?.contains(&version))
+    }
+
+    /// the publisher line: the GitHub account or organization behind the scope.
+    fn publisher(&self) -> Option<String> {
+        let publisher = self.trust.as_ref()?.get("publisher")?;
+        let text = |key: &str| publisher.get(key)?.as_str().map(ui::strip_controls);
+        let verified = publisher.get("verified")?.as_bool()?;
+        Some(match (verified, text("github")) {
+            (true, Some(github)) if text("kind").as_deref() == Some("org") => {
+                format!("GitHub org: {github}")
+            }
+            (true, Some(github)) => format!("GitHub: {github}"),
+            _ => format!("{}, not verified", text("name")?),
+        })
+    }
+
+    /// the registry checked that the repository of the entry built the latest version.
+    fn repository_verified(&self) -> bool {
+        self.trust
+            .as_ref()
+            .and_then(|trust| trust.get("repository")?.get("verified")?.as_bool())
+            == Some(true)
+    }
+}
+
+/// the provenance line of an entry: the build that the registry verified at publish.
+fn provenance_line(entry: &Value) -> Option<String> {
+    let provenance = entry.get("provenance")?.as_table()?;
+    let text = |key: &str| match provenance.get(key)? {
+        Value::String(text) => Some(ui::strip_controls(text)),
+        Value::Integer(number) => Some(number.to_string()),
+        _ => None,
+    };
+    let mut line = format!("GitHub Actions, {}", text("repository")?);
+    if let Some(commit) = text("commit") {
+        line.push_str(&format!(" at {}", commit.get(..7).unwrap_or(&commit)));
+    }
+    for (label, key) in [("workflow", "workflow"), ("ref", "ref"), ("run", "run_id")] {
+        if let Some(value) = text(key) {
+            line.push_str(&format!(", {label} {value}"));
+        }
+    }
+    Some(line)
+}
+
 /** shows one package from its index entries. it only reads, and works
 outside a project too. */
 pub fn run(args: InfoArgs) -> Result<(), Error> {
@@ -81,8 +172,9 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
             req: req_text.to_string(),
         })?;
 
+    let answer = Answer::of(&url, &name);
     if args.json {
-        return ui::print_json(&document(&name, &entries, shown, &meta));
+        return ui::print_json(&document(&name, &entries, shown, &meta, &answer));
     }
     let mut add = format!("embr add {name}");
     if let Some(version) = &args.version {
@@ -91,7 +183,7 @@ pub fn run(args: InfoArgs) -> Result<(), Error> {
     if let Some(index) = &args.index {
         add.push_str(&format!(" --index {index}"));
     }
-    print!("{}", describe(&name, &entries, shown, &meta, &add));
+    print!("{}", describe(&name, &entries, shown, &meta, &answer, &add));
     Ok(())
 }
 
@@ -157,6 +249,9 @@ fn local_document(name: &str, source: &DownloadSource, manifest: &Value) -> serd
         "deprecated": null,
         "replacement": null,
         "notices": [],
+        "channels": {},
+        "trust": null,
+        "notes": null,
         "shown": {
             "version": field("version"),
             "yanked": false,
@@ -168,6 +263,9 @@ fn local_document(name: &str, source: &DownloadSource, manifest: &Value) -> serd
             "authors": authors,
             "published_at": null,
             "published_by": null,
+            "provenance": null,
+            "notes": null,
+            "channels": [],
             "targets": [],
             "requires": {},
             "dependencies": dependencies,
@@ -216,6 +314,7 @@ fn describe(
     entries: &[Candidate],
     shown: &Candidate,
     meta: &Meta,
+    answer: &Answer,
     add: &str,
 ) -> String {
     let entry = &shown.entry;
@@ -286,7 +385,9 @@ fn describe(
         ("Homepage", "homepage"),
     ] {
         if let Some(value) = text(key) {
-            facts.push((label, value.to_string()));
+            let verified = key == "repository" && answer.repository_verified();
+            let mark = if verified { " (verified)" } else { "" };
+            facts.push((label, format!("{value}{mark}")));
         }
     }
     // a pesde entry names its authors, an ember entry the login that published it
@@ -306,6 +407,25 @@ fn describe(
         (Some(date), None) => facts.push(("Published", date.to_string())),
         (None, Some(login)) => facts.push(("Published", format!("by {login}"))),
         (None, None) => {}
+    }
+    if let Some(publisher) = answer.publisher() {
+        facts.push(("Publisher", publisher));
+    }
+    match provenance_line(entry) {
+        Some(line) => facts.push(("Provenance", line)),
+        None if answer.ember => facts.push(("Provenance", "No build provenance".to_string())),
+        None => {}
+    }
+    if !meta.channels.is_empty() {
+        let channels: Vec<String> = meta
+            .channels
+            .iter()
+            .map(|(channel, version)| ui::strip_controls(&format!("{channel} {version}")))
+            .collect();
+        facts.push(("Channels", channels.join(", ")));
+    }
+    if answer.has_notes(&shown.version) == Some(true) {
+        facts.push(("Notes", "This version has release notes".to_string()));
     }
     facts.push((
         "Targets",
@@ -374,6 +494,10 @@ fn describe(
         if targets.iter().any(|entry| entry.deprecated.is_some()) {
             line.push_str(&" deprecated".dark_grey().to_string());
         }
+        for channel in channels_at(meta, version) {
+            let mark = format!(" channel {}", ui::strip_controls(channel));
+            line.push_str(&mark.dark_grey().to_string());
+        }
         out.push_str(&format!("{line}\n"));
     }
     if versions.len() > RECENT {
@@ -389,14 +513,25 @@ fn describe(
     out
 }
 
+/// the channels of `meta` that name `version`.
+fn channels_at<'a>(meta: &'a Meta, version: &semver::Version) -> Vec<&'a str> {
+    let version = version.to_string();
+    meta.channels
+        .iter()
+        .filter(|(_, named)| **named == version)
+        .map(|(channel, _)| channel.as_str())
+        .collect()
+}
+
 /** the `--json` details: the package-wide data, the version that the
 text shows as `shown`, and every version, newest first, with each of its
-targets. */
+targets. `trust` and `notes` are null when the registry did not say. */
 fn document(
     name: &str,
     entries: &[Candidate],
     shown: &Candidate,
     meta: &Meta,
+    answer: &Answer,
 ) -> serde_json::Value {
     let text = |entry: &Candidate, key: &str| {
         entry
@@ -489,6 +624,9 @@ fn document(
         "deprecated": clean(meta.deprecated.as_ref()),
         "replacement": meta.replacement.as_deref().map(ui::strip_controls),
         "notices": notices,
+        "channels": meta.channels,
+        "trust": answer.trust,
+        "notes": answer.notes,
         "shown": {
             "version": shown.version.to_string(),
             "yanked": shown.yanked,
@@ -500,6 +638,9 @@ fn document(
             "authors": authors,
             "published_at": text(shown, "published_at"),
             "published_by": text(shown, "published_by"),
+            "provenance": shown.entry.get("provenance").filter(|value| value.is_table()),
+            "notes": answer.has_notes(&shown.version),
+            "channels": channels_at(meta, &shown.version),
             "targets": same_version.iter().map(|entry| target(entry)).collect::<Vec<_>>(),
             "requires": requires,
             "dependencies": dependencies,
@@ -942,6 +1083,7 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
             &entries,
             shown,
             &meta,
+            &Answer::default(),
             "embr add acme/rocket",
         ));
         assert_eq!(
@@ -998,6 +1140,7 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
             &entries,
             &entries[0],
             &Meta::default(),
+            &Answer::default(),
             "embr add x",
         ));
         assert!(text.starts_with("acme/rocket 0.11.0\n\nLicense    MIT\nAuthors    Erica <e@x.dev>\nPublished  2024-11-12\n"), "{text}");
@@ -1047,6 +1190,7 @@ versions = "=1.0.0"
             &entries,
             &entries[0],
             &meta,
+            &Answer::default(),
             "embr add x",
         ));
         assert!(
@@ -1102,7 +1246,7 @@ versions = "=1.0.0"
                 })
             };
         assert_eq!(
-            document("acme/rocket", &entries, shown, &meta),
+            document("acme/rocket", &entries, shown, &meta, &Answer::default()),
             json!({
                 "version": 1,
                 "name": "acme/rocket",
@@ -1117,6 +1261,9 @@ versions = "=1.0.0"
                     "posted_by": "acme",
                     "posted_at": "2026-11-02T12:00:00Z",
                 }],
+                "channels": {},
+                "trust": null,
+                "notes": null,
                 "shown": {
                     "version": "1.1.0",
                     "yanked": false,
@@ -1128,6 +1275,9 @@ versions = "=1.0.0"
                     "authors": [],
                     "published_at": "2026-10-20T18:30:00Z",
                     "published_by": "acme",
+                    "provenance": null,
+                    "notes": null,
+                    "channels": [],
                     "targets": [target("lune", "alloy"), target("roblox", "luau")],
                     "requires": { "alloy": "^0.4.0", "lune": ">=0.9.0" },
                     "dependencies": [
@@ -1172,9 +1322,127 @@ versions = "=1.0.0"
             &entries,
             &entries[0],
             &Meta::default(),
+            &Answer::default(),
             "embr add x",
         ));
         assert!(text.starts_with("acme/rocket 2.0.0 (yanked)\n"), "{text}");
         assert!(text.ends_with("finds none to install\n"), "{text}");
+    }
+
+    /** what the registry adds to an entry: the channels of `[meta]`, the
+    provenance of the version, and `trust` and `notes` of the package
+    answer. a part that the registry did not give shows as nothing. */
+    #[test]
+    fn info_shows_trust_provenance_channels_and_notes() {
+        let file = r#"
+["1.3.0-beta.2 roblox"]
+name = "acme/rocket"
+version = "1.3.0-beta.2"
+target = "roblox"
+repository = "https://github.com/acme/rocket"
+
+["1.3.0-beta.2 roblox".provenance]
+repository = "acme/rocket"
+commit = "0123456789abcdef0123456789abcdef01234567"
+workflow = ".github/workflows/release.yml"
+ref = "refs/tags/v1.3.0-beta.2"
+run_id = "9001"
+
+["1.2.0 roblox"]
+name = "acme/rocket"
+version = "1.2.0"
+target = "roblox"
+
+[meta.channels]
+beta = "1.3.0-beta.2"
+"#;
+        let (entries, meta) = entries(file);
+        let answer = Answer {
+            ember: true,
+            trust: Some(json!({
+                "publisher": {"kind": "org", "name": "acme", "github": "acme-corp", "verified": true},
+                "repository": {"url": "https://github.com/acme/rocket", "verified": true},
+            })),
+            notes: Some(vec!["1.3.0-beta.2".to_string()]),
+        };
+        let beta = &entries[0];
+        let text = plain(&describe(
+            "acme/rocket",
+            &entries,
+            beta,
+            &meta,
+            &answer,
+            "embr add x",
+        ));
+        for line in [
+            "Repository  https://github.com/acme/rocket (verified)\n",
+            "Publisher   GitHub org: acme-corp\n",
+            "Provenance  GitHub Actions, acme/rocket at 0123456, workflow .github/workflows/release.yml, ref refs/tags/v1.3.0-beta.2, run 9001\n",
+            "Channels    beta 1.3.0-beta.2\n",
+            "Notes       This version has release notes\n",
+            "  1.3.0-beta.2  roblox channel beta\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        let document = document("acme/rocket", &entries, beta, &meta, &answer);
+        assert_eq!(document["channels"], json!({ "beta": "1.3.0-beta.2" }));
+        assert_eq!(document["trust"]["publisher"]["github"], "acme-corp");
+        assert_eq!(document["notes"], json!(["1.3.0-beta.2"]));
+        assert_eq!(document["shown"]["notes"], true);
+        assert_eq!(document["shown"]["channels"], json!(["beta"]));
+        assert_eq!(document["shown"]["provenance"]["run_id"], "9001");
+
+        // a version of the ember index with no provenance says so, and has no notes
+        let stable = &entries[1];
+        let text = plain(&describe(
+            "acme/rocket",
+            &entries,
+            stable,
+            &meta,
+            &answer,
+            "embr add x",
+        ));
+        assert!(text.contains("Provenance  No build provenance\n"), "{text}");
+        assert!(!text.contains("Notes"), "{text}");
+        let document = super::document("acme/rocket", &entries, stable, &meta, &answer);
+        assert_eq!(document["shown"]["provenance"], json!(null));
+        assert_eq!(document["shown"]["notes"], false);
+
+        // a user scope, an unverified publisher, and a registry that gave no answer
+        let user = Answer {
+            trust: Some(
+                json!({"publisher": {"kind": "user", "name": "alice", "github": "alice", "verified": true}}),
+            ),
+            ..Answer::default()
+        };
+        assert_eq!(user.publisher().as_deref(), Some("GitHub: alice"));
+        assert!(!user.repository_verified());
+        let unverified = Answer {
+            trust: Some(
+                json!({"publisher": {"kind": "org", "name": "acme", "github": null, "verified": false}}),
+            ),
+            ..Answer::default()
+        };
+        assert_eq!(
+            unverified.publisher().as_deref(),
+            Some("acme, not verified")
+        );
+        let silent = Answer::default();
+        let text = plain(&describe(
+            "acme/rocket",
+            &entries,
+            stable,
+            &meta,
+            &silent,
+            "embr add x",
+        ));
+        assert!(
+            !text.contains("Publisher") && !text.contains("Provenance"),
+            "{text}"
+        );
+        let document = super::document("acme/rocket", &entries, stable, &meta, &silent);
+        assert_eq!(document["trust"], json!(null));
+        assert_eq!(document["notes"], json!(null));
+        assert_eq!(document["shown"]["notes"], json!(null));
     }
 }

@@ -485,6 +485,10 @@ fn install_steps(
 
     let progress = Progress::start("resolve");
 
+    /* the channel that picked each entry, by package and root. a job has
+    no use for it, so it goes around the jobs to the lock that this run
+    writes */
+    let mut channels: HashMap<(String, Environment), String> = HashMap::new();
     let mut jobs: Vec<Job> = if args.locked {
         let lock = Lockfile::load()?;
         /* a v1 lock predates contexts. replaying it would scatter a
@@ -514,6 +518,9 @@ fn install_steps(
         lock.packages
             .into_iter()
             .map(|package| {
+                if let Some(channel) = &package.channel {
+                    channels.insert((package.name.clone(), package.context()), channel.clone());
+                }
                 let patch = locked_patch(&package.name, Path::new("."), package.patch)?;
                 Ok(Job {
                     name: package.name,
@@ -561,24 +568,29 @@ fn install_steps(
         ui::timing("resolve", resolve_started);
         resolved
             .into_iter()
-            .map(|package| Job {
-                name: package.name,
-                // the lock keeps no version for a path folder, see `DownloadSource::Path`
-                version: match package.source {
-                    index::DownloadSource::Path { .. } => String::new(),
-                    _ => package.version.to_string(),
-                },
-                environment: package.environment,
-                context: package.context,
-                source: package.source,
-                sha256: package.sha256,
-                sha256_in_lock: false,
-                index_url: package.index_url,
-                link: package.link,
-                redirects: package.redirects,
-                patch: None,
-                optional: package.optional,
-                features: package.features,
+            .map(|package| {
+                if let Some(channel) = package.channel {
+                    channels.insert((package.name.clone(), package.context), channel);
+                }
+                Job {
+                    name: package.name,
+                    // the lock keeps no version for a path folder, see `DownloadSource::Path`
+                    version: match package.source {
+                        index::DownloadSource::Path { .. } => String::new(),
+                        _ => package.version.to_string(),
+                    },
+                    environment: package.environment,
+                    context: package.context,
+                    source: package.source,
+                    sha256: package.sha256,
+                    sha256_in_lock: false,
+                    index_url: package.index_url,
+                    link: package.link,
+                    redirects: package.redirects,
+                    patch: None,
+                    optional: package.optional,
+                    features: package.features,
+                }
             })
             .collect()
     };
@@ -660,7 +672,10 @@ fn install_steps(
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
-    let locked = locked?;
+    let mut locked = locked?;
+    for package in &mut locked {
+        package.channel = channels.remove(&(package.name.clone(), package.context()));
+    }
     ui::timing("packages", packages_started);
 
     /* second pass now that everything is extracted, link files inside
@@ -1709,6 +1724,7 @@ fn install_packages(
                 patch: job.patch.map(|patch| patch.record),
                 optional: job.optional,
                 features: job.features,
+                channel: None,
                 source: job.source,
                 sha256,
             });
@@ -2003,6 +2019,7 @@ fn link_in_place(
         patch: None,
         optional: job.optional,
         features: job.features,
+        channel: None,
         source: job.source,
         sha256: None,
     })
@@ -2664,6 +2681,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: index::DownloadSource::Zip {
                 url: format!("https://example.com/{name}/{version}"),
             },
@@ -3128,6 +3146,7 @@ mod tests {
             patch: None,
             optional: false,
             features: Vec::new(),
+            channel: None,
             source: index::DownloadSource::Zip {
                 url: "https://example.com/thing/1.0.0".to_string(),
             },
@@ -3236,6 +3255,7 @@ mod tests {
                 patch: None,
                 optional: false,
                 features: Vec::new(),
+                channel: None,
                 source: index::DownloadSource::TarGz {
                     url: url.to_string(),
                 },

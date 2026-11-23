@@ -3,8 +3,8 @@ use crate::net::registry;
 use crate::project::hooks::{self, Lifecycle};
 use crate::project::manifest::edit::{ManifestDoc, Scope};
 use crate::project::manifest::{
-    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Environment, Language, Manifest, features,
-    parse_version_req, split_package_name,
+    DEFAULT_INDEX_URL, EMBER_INDEX_NAME, Environment, Language, Manifest, check_channel, features,
+    parse_version_req, split_package_name, takes_channel,
 };
 use crate::registry::index::{Index, Refresh, ResolvedPackage};
 use crate::registry::local;
@@ -24,6 +24,9 @@ pub struct AddArgs {
     /// Version requirement, defaults to "^" meaning latest; for one package only
     #[arg(long)]
     pub version: Option<String>,
+    /// Follow this channel of the package, such as `beta`, in place of a version requirement; for one package only
+    #[arg(long, value_name = "NAME")]
+    pub channel: Option<String>,
     /// Index key from [indices], skips the prompt
     #[arg(long)]
     pub index: Option<String>,
@@ -125,6 +128,15 @@ impl Indices {
         }
     }
 
+    /// the version that `channel` of `name` names, with the same retry as [`Indices::resolve`].
+    fn channel(&mut self, url: &str, name: &str, channel: &str) -> Result<semver::Version, Error> {
+        let index = self.get(url)?;
+        match index.channel(name, channel) {
+            Err(_) if index.ttl_skipped() => self.force(url)?.channel(name, channel),
+            result => result,
+        }
+    }
+
     /// the packages of `scope`, with the same retry as [`Indices::resolve`].
     fn scope(&mut self, url: &str, scope: &str) -> Result<Vec<String>, Error> {
         let index = self.get(url)?;
@@ -151,13 +163,22 @@ fn added(table: &str, planned: &[Planned]) -> serde_json::Value {
     let added: Vec<serde_json::Value> = planned
         .iter()
         .map(|package| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": package.name,
                 "alias": package.alias,
                 "version": package.version.to_string(),
                 "requirement": package.entry.get("version").and_then(|value| value.as_str()),
                 "table": table,
-            })
+            });
+            // `requirement` is null beside a channel that has none
+            if let Some(channel) = package
+                .entry
+                .get("channel")
+                .and_then(|value| value.as_str())
+            {
+                entry["channel"] = channel.into();
+            }
+            entry
         })
         .collect();
     serde_json::json!({ "version": ui::JSON_VERSION, "added": added })
@@ -191,6 +212,12 @@ fn add(args: &AddArgs) -> Result<serde_json::Value, Error> {
         if args.version.is_some() {
             return Err(Error::AddOneOnly { flag: "--version" });
         }
+        if args.channel.is_some() {
+            return Err(Error::AddOneOnly { flag: "--channel" });
+        }
+    }
+    if let Some(channel) = &args.channel {
+        check_channel(channel)?;
     }
     if args.version.is_some() && items.iter().any(|item| item.req.is_some()) {
         return Err(Error::AddVersionTwice(args.packages[0].clone()));
@@ -340,12 +367,26 @@ fn add(args: &AddArgs) -> Result<serde_json::Value, Error> {
         };
         let index_key = index_key(&item.package, item.key.is_some())?;
         let index_url = manifest.index_url(index_key.as_deref())?.to_string();
-        let req_text = item
-            .req
-            .clone()
-            .or_else(|| args.version.clone())
-            .unwrap_or_else(|| "^".to_string());
+        let stated = item.req.clone().or_else(|| args.version.clone());
+        let req_text = stated.clone().unwrap_or_else(|| "^".to_string());
         let req = parse_version_req(&req_text)?;
+        /* a channel picks the one version that it names now. the entry
+        keeps the channel, and a requirement only when the user gave one */
+        let req = match &args.channel {
+            Some(channel) => {
+                let version = indices.channel(&index_url, &name, channel)?;
+                if !takes_channel(&req, &version) {
+                    return Err(Error::ChannelMismatch {
+                        name,
+                        channel: channel.clone(),
+                        version: version.to_string(),
+                        req: req_text,
+                    });
+                }
+                parse_version_req(&format!("={version}"))?
+            }
+            None => req,
+        };
 
         let package = indices.resolve(&index_url, &name, &req, prefer)?;
         if let Some(allow) = allow
@@ -364,7 +405,17 @@ fn add(args: &AddArgs) -> Result<serde_json::Value, Error> {
 
         let mut entry = toml_edit::InlineTable::new();
         entry.insert("name", name.clone().into());
-        entry.insert("version", req_text.into());
+        match &args.channel {
+            Some(channel) => {
+                if let Some(stated) = stated {
+                    entry.insert("version", stated.into());
+                }
+                entry.insert("channel", channel.clone().into());
+            }
+            None => {
+                entry.insert("version", req_text.into());
+            }
+        }
         if let Some(key) = &index_key {
             entry.insert("index", key.clone().into());
         }

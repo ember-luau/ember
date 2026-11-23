@@ -24,6 +24,9 @@ struct Package {
     /// alone rather than failing the install.
     #[serde(default)]
     notices: Vec<serde_json::Value>,
+    /// `[meta.channels]`. absent when the package has no channel.
+    #[serde(default)]
+    channels: toml::Table,
 }
 
 /** `name` from the API, by the rules of the git index. None when embr has
@@ -83,6 +86,9 @@ fn file_at(api: &str, access: &Access, name: &str) -> Result<toml::Value, Error>
     if !notices.is_empty() {
         meta.insert("notices".to_string(), notices.into());
     }
+    if !package.channels.is_empty() {
+        meta.insert("channels".to_string(), package.channels.into());
+    }
     if !meta.is_empty() {
         file.insert("meta".to_string(), meta.into());
     }
@@ -128,6 +134,7 @@ mod tests {
         "2.0.0-rc.1 roblox":{"version":"2.0.0-rc.1","target":"roblox","language":"luau",
             "download":"API/v1/packages/acme/secret/files/2.0.0-rc.1/roblox.tar.gz"}},
         "deprecated":"use acme/open","replacement":"acme/open",
+        "channels":{"rc":"2.0.0-rc.1"},
         "notices":[{"id":"aaaaaaaaaaaa","level":"warning","message":"1.0 leaks","versions":"^1.0.0",
             "posted_by":"acme","posted_at":"2026-11-02T00:00:00Z","covers":["1.0.0"]},
             {"id":"bbbbbbbbbbbb","level":"notice","message":null}]}"#;
@@ -196,6 +203,7 @@ mod tests {
         let meta = crate::registry::notices::Meta::of(&file);
         assert_eq!(meta.deprecated.as_deref(), Some("use acme/open"));
         assert_eq!(meta.replacement.as_deref(), Some("acme/open"));
+        assert_eq!(meta.channels["rc"], "2.0.0-rc.1");
         assert_eq!(meta.notices.len(), 1);
         assert_eq!(meta.notices[0].message, "1.0 leaks");
         assert!(meta.notices[0].covers(&semver::Version::new(1, 0, 0)));
