@@ -1398,6 +1398,26 @@ impl Manifest {
         for target in &self.targets {
             target.check_requires()?;
         }
+        /* embr prints these names, and a script name comes before the
+        command it runs. a carriage return or an escape sequence in one
+        hides the line that follows it */
+        let tables: [(&str, Vec<&String>); 4] = [
+            ("dependencies", self.dependencies.keys().collect()),
+            ("dev-dependencies", self.dev_dependencies.keys().collect()),
+            ("peer-dependencies", self.peer_dependencies.keys().collect()),
+            ("scripts", self.scripts.keys().collect()),
+        ];
+        for (table, names) in tables {
+            if let Some(name) = names
+                .into_iter()
+                .find(|name| name.chars().any(char::is_control))
+            {
+                return Err(Error::ManifestInvalid(format!(
+                    "[{table}] has the key '{}', which holds a control character",
+                    name.escape_default()
+                )));
+            }
+        }
         let overrides = self
             .overrides
             .iter()
@@ -3591,6 +3611,21 @@ mod tests {
             let found = validated(&format!("[dependencies]\nui = {entry}\n")).unwrap_err();
             assert!(found.to_string().ends_with(error), "{found}");
         }
+    }
+
+    #[test]
+    fn a_key_with_a_control_character_is_refused() {
+        for text in [
+            "[scripts]\n\"build\\rtest\" = \"rm -rf x\"\n",
+            "[scripts]\n\"a\\u001b[2K\" = \"x\"\n",
+            "[dependencies]\n\"lib\\n\" = { name = \"acme/lib\", version = \"^1\" }\n",
+            "[dev-dependencies]\n\"lib\\t\" = { name = \"acme/lib\", version = \"^1\" }\n",
+        ] {
+            let error = validated(text).unwrap_err().to_string();
+            assert!(error.contains("control character"), "{text}: {error}");
+            assert!(!error.chars().any(char::is_control), "{error:?}");
+        }
+        assert!(validated("[scripts]\n\"build:all\" = \"x && y\"\n").is_ok());
     }
 
     #[test]

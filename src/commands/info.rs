@@ -210,16 +210,22 @@ fn local(name: &str) -> Option<(DownloadSource, Value)> {
 
 /// the info text of a path or git package: its version, its source and its dependencies.
 fn describe_local(name: &str, source: &DownloadSource, manifest: &Value) -> String {
-    let field = |key: &str| manifest.get("package")?.get(key)?.as_str();
+    let field = |key: &str| {
+        manifest
+            .get("package")?
+            .get(key)?
+            .as_str()
+            .map(ui::one_line)
+    };
     let mut out = name.bold().to_string();
     if let Some(version) = field("version") {
         out.push_str(&format!(" {}", version.with(ui::accent())));
     }
     out.push('\n');
     if let Some(description) = field("description") {
-        out.push_str(&format!("{}\n", ui::strip_controls(description).trim()));
+        out.push_str(&format!("{description}\n"));
     }
-    let source = source.local_label().unwrap_or_default();
+    let source = ui::one_line(&source.local_label().unwrap_or_default());
     out.push_str(&format!("\n{}  {source}\n", "Source".bold()));
     out.push_str(&dependency_sections(manifest));
     out
@@ -323,7 +329,7 @@ fn describe(
         entry
             .get(key)
             .and_then(Value::as_str)
-            .map(str::trim)
+            .map(ui::one_line)
             .filter(|text| !text.is_empty())
     };
     let same_version: Vec<&Candidate> = entries
@@ -366,15 +372,14 @@ fn describe(
             Level::Warning => "Warning".yellow(),
             Level::Notice => "Notice".stylize(),
         };
-        let range = notice
-            .versions
-            .as_deref()
-            .map_or(String::new(), |range| format!(" for {range}"));
+        let range = notice.versions.as_deref().map_or(String::new(), |range| {
+            format!(" for {}", ui::one_line(range))
+        });
         let message = ui::strip_controls(&notice.message);
         let message = message.trim().replace('\n', "\n  ");
         out.push_str(&format!(
             "{level} {}{range}: {message}\n",
-            notice.id.as_str().dark_grey()
+            ui::one_line(&notice.id).dark_grey()
         ));
     }
 
@@ -391,20 +396,21 @@ fn describe(
         }
     }
     // a pesde entry names its authors, an ember entry the login that published it
-    let authors: Vec<&str> = entry
+    let authors: Vec<String> = entry
         .get("authors")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(ui::one_line)
         .collect();
     if !authors.is_empty() {
         facts.push(("Authors", authors.join(", ")));
     }
-    let date = text("published_at").map(|at| at.get(..10).unwrap_or(at));
+    let date = text("published_at").map(|at| at.get(..10).unwrap_or(&at).to_string());
     match (date, text("published_by")) {
         (Some(date), Some(login)) => facts.push(("Published", format!("{date} by {login}"))),
-        (Some(date), None) => facts.push(("Published", date.to_string())),
+        (Some(date), None) => facts.push(("Published", date)),
         (None, Some(login)) => facts.push(("Published", format!("by {login}"))),
         (None, None) => {}
     }
@@ -444,7 +450,7 @@ fn describe(
             .into_iter()
             .flatten()
         {
-            let line = format!("{key} {}", req.as_str().unwrap_or("?"));
+            let line = ui::one_line(&format!("{key} {}", req.as_str().unwrap_or("?")));
             if !requires.contains(&line) {
                 requires.push(line);
             }
@@ -749,7 +755,7 @@ fn dependency_sections(entry: &Value) -> String {
 /// a target as a person reads it: the environment, and the language when it is not luau.
 fn target(entry: &Candidate) -> String {
     let environment = entry.environment.map_or_else(
-        || entry.target.clone().unwrap_or_default(),
+        || ui::one_line(entry.target.as_deref().unwrap_or_default()),
         |env| env.to_string(),
     );
     if entry.language == Language::Luau {
@@ -804,10 +810,12 @@ fn features(entry: &Value) -> Vec<Spec> {
                     owned.entry
                 ));
             }
+            // before the mark below, which is embr's own escape sequence
+            let mut text = ui::one_line(&text);
             if defaults.is_some_and(|defaults| defaults.contains(name)) {
                 text.push_str(&" (default)".dark_grey().to_string());
             }
-            (name.clone(), text)
+            (ui::one_line(name), text)
         })
         .collect()
 }
@@ -891,10 +899,11 @@ fn dependencies(entry: &Value) -> (Vec<Spec>, Vec<Spec>) {
             if table == "peer-dependencies" || kind == Some("peer") {
                 text.push_str(" (peer)");
             }
+            let line = (ui::one_line(alias), ui::one_line(&text));
             if in_dev || kind == Some("dev") {
-                dev.push((alias.clone(), text));
+                dev.push(line);
             } else {
-                runtime.push((alias.clone(), text));
+                runtime.push(line);
             }
         }
     }
@@ -1018,6 +1027,85 @@ download = "https://cdn.emberpm.dev/acme/rocket/1.0.0.tar.gz"
 "#;
 
     /// a git or path entry, ember's or pesde's `repo`, names its source in place of a version.
+    /** an index entry is text that its publisher wrote, and a pesde or
+    wally index takes what it gets. an escape sequence rewrites the lines
+    around it, and a line break starts a line that reads as a fact. */
+    #[test]
+    fn info_prints_no_control_character_and_no_line_of_an_entry() {
+        let evil =
+            "\\u001b[2K\\u001b]52;c;eA==\\u0007x\\nProvenance  Built by a workflow you trust";
+        let file = format!(
+            r#"
+["1.0.0 lune"]
+name = "acme/rocket"
+version = "1.0.0"
+target = "lune"
+description = "d{evil}"
+license = "MIT{evil}"
+repository = "https://r{evil}"
+homepage = "https://h{evil}"
+authors = ["a{evil}"]
+published_by = "p{evil}"
+published_at = "2026-10-20{evil}"
+download = "https://cdn.emberpm.dev/a.tar.gz"
+
+["1.0.0 lune".requires]
+lune = "1{evil}"
+
+["1.0.0 lune".dependencies."dep{evil}"]
+name = "acme/signal{evil}"
+version = "^1{evil}"
+index = "i{evil}"
+features = ["f{evil}"]
+
+["1.0.0 lune".dev-dependencies.git]
+git = "https://g{evil}"
+rev = "r{evil}"
+
+["1.0.0 lune".features]
+"feat{evil}" = ["dep{evil}"]
+"#
+        );
+        let (entries, meta) = entries(&file);
+        let styled = describe(
+            "acme/rocket",
+            &entries,
+            &entries[0],
+            &meta,
+            &Answer::default(),
+            "embr add acme/rocket",
+        );
+        // embr's own colours go, `ESC [ digits m` and no other sequence
+        let mut text = String::new();
+        let mut rest = styled.as_str();
+        while let Some(at) = rest.find("\u{1b}[") {
+            let tail = &rest[at + 2..];
+            let digits = tail
+                .find(|c: char| !c.is_ascii_digit() && c != ';')
+                .unwrap_or(tail.len());
+            text.push_str(&rest[..at]);
+            if tail[digits..].starts_with('m') {
+                rest = &tail[digits + 1..];
+            } else {
+                text.push_str("\u{1b}[");
+                rest = tail;
+            }
+        }
+        text.push_str(rest);
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("Provenance")),
+            "{text}"
+        );
+        // each value is there, as text
+        for value in ["MIT", "https://r", "https://h", "acme/signal", "https://g"] {
+            assert!(text.contains(value), "{value}: {text}");
+        }
+    }
+
     #[test]
     fn git_and_path_dependencies_name_their_source() {
         let entry: Value = toml::from_str(

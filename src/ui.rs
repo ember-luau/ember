@@ -215,6 +215,17 @@ pub fn printable(text: &str) -> String {
     out
 }
 
+/** `text` as one line of output with no control character. an index entry
+and the manifest of a package are text that their author wrote. an escape
+sequence there rewrites the lines around it, and a line break starts a
+line that reads as a line from embr, such as `Provenance` in `embr info`. */
+pub fn one_line(text: &str) -> String {
+    strip_controls(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /** `text` with no escape sequence and no control character but the line
 break, for registry text that embr prints as its own output, such as a
 package notice. [`printable`] shows a control as an escape. this drops the
@@ -313,17 +324,24 @@ is that output arriving next has an attributable source -- doubly so for a
 hook, which nobody typed. `package` is "scope/name@version", or None in a
 project that declares no [package] and so has no such name. */
 pub fn print_script_notice(package: Option<&str>, name: &str, commands: &[String]) {
+    /* a control character shows as an escape. a carriage return or a
+    cursor move in the command would hide what the script runs, and the
+    banner is how a person sees a hook that nobody typed */
+    let name = printable(name);
     match package {
-        Some(package) => println!("{}", format!("> {package} {name}").dark_grey()),
+        Some(package) => println!("{}", format!("> {} {name}", printable(package)).dark_grey()),
         None => println!("{}", format!("> {name}").dark_grey()),
     }
     match commands {
-        [single] => println!("{}", format!("> {single}").dark_grey()),
+        [single] => println!("{}", format!("> {}", printable(single)).dark_grey()),
         /* several, so the banner doubles as the legend for the [n] tags
         their output arrives under */
         many => {
             for (index, command) in many.iter().enumerate() {
-                println!("{}", format!("> [{}] {command}", index + 1).dark_grey());
+                println!(
+                    "{}",
+                    format!("> [{}] {}", index + 1, printable(command)).dark_grey()
+                );
             }
         }
     }
@@ -398,12 +416,16 @@ what you type, so it takes the accent; the commands are reference material
 and stay out of the way. A parallel script shows every command under the
 `[n]` tag its output will carry. */
 pub fn print_script_entry(name: &str, commands: &[String]) {
-    println!("  {}", name.with(accent()));
+    // as in `print_script_notice`: the list must show what each script runs
+    println!("  {}", printable(name).with(accent()));
     match commands {
-        [single] => println!("    {}", single.as_str().dark_grey()),
+        [single] => println!("    {}", printable(single).dark_grey()),
         many => {
             for (index, command) in many.iter().enumerate() {
-                println!("    {}", format!("[{}] {command}", index + 1).dark_grey());
+                println!(
+                    "    {}",
+                    format!("[{}] {}", index + 1, printable(command)).dark_grey()
+                );
             }
         }
     }

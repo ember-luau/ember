@@ -312,13 +312,17 @@ impl<'lock> Graph<'lock> {
     fn label(&self, node: usize, alias: &str) -> String {
         let package = &self.packages[node];
         let mut label = package.id();
+        // the lock and the manifest of a package are text that others wrote
         if !package.features.is_empty() {
-            label.push_str(&format!(" [{}]", package.features.join(", ")));
+            let features = ui::one_line(&package.features.join(", "));
+            label.push_str(&format!(" [{features}]"));
         }
         if package.name.rsplit('/').next() != Some(alias) {
+            let alias = ui::one_line(alias);
             label.push_str(&format!(" as '{alias}'").dark_grey().to_string());
         }
         if let Some(source) = package.source.local_label() {
+            let source = ui::one_line(&source);
             label.push_str(&format!(" ({source})").dark_grey().to_string());
         }
         if let Some(Some(marks)) = self.marks.get(node) {
@@ -578,7 +582,7 @@ impl<'lock> Graph<'lock> {
             let package = &self.packages[target];
             let mut head = package.id();
             if let Some(source) = package.source.local_label() {
-                head.push_str(&format!(" ({source})"));
+                head.push_str(&format!(" ({})", ui::one_line(&source)));
             }
             if grouped {
                 head.push_str(&format!(" in {}", package.context()));

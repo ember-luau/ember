@@ -559,6 +559,43 @@ fn a_tool_delete_keeps_the_binaries_of_embr() {
     assert!(!bin.join("other").exists());
 }
 
+/** L6. the banner and the list of `embr run` show what a script runs. a
+carriage return or an escape sequence in the command hid the part before
+it, so the line on the screen was not the command. */
+#[test]
+fn a_script_shows_its_control_characters_as_text() {
+    let base = scratch("scripts");
+    let project = base.join("proj");
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n\n[scripts]\n\
+         build = \"true # \\r\\u001b[2Kecho safe\"\n",
+    );
+    for args in [&["run"][..], &["run", "build"]] {
+        let output = run(&project, &base, args);
+        assert!(output.status.success(), "{args:?}: {}", text(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(stdout.contains("true # "), "{args:?}: {stdout}");
+        assert!(
+            !stdout.contains('\r') && !stdout.contains("\u{1b}[2K"),
+            "{args:?}: {stdout:?}"
+        );
+    }
+
+    // a script name comes before its command on the line, so it holds none at all
+    write(
+        &project.join("ember.toml"),
+        "[target]\nenvironment = \"luau\"\n\n[scripts]\n\"build\\rtest\" = \"true\"\n",
+    );
+    let refused = run(&project, &base, &["run"]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("control character"),
+        "{}",
+        text(&refused)
+    );
+}
+
 /** L4 and L5. `embr doctor` printed the password of EMBER_API_URL, and the
 whole token when the token was no header value. people paste this report
 into bug reports. */
