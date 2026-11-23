@@ -98,7 +98,12 @@ pub fn run(args: OutdatedArgs) -> Result<(), Error> {
         rows.push(Row {
             alias: alias.clone(),
             current: lock.as_ref().and_then(|lock| locked(lock, &name)),
-            wanted: newest(&parse_version_req(version)?),
+            /* a channel entry wants the version that its channel names. its
+            `version` can be empty, which would read as the newest release */
+            wanted: match dependency.channel() {
+                Some(channel) => index.channel(&name, channel).ok(),
+                None => newest(&parse_version_req(version)?),
+            },
             latest: newest(&semver::VersionReq::STAR),
             deprecated: None,
             yanked: None,

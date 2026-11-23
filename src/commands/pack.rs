@@ -52,6 +52,8 @@ pub fn run(args: PackArgs) -> Result<(), Error> {
         targets: args.targets,
         local: false,
         json: false,
+        channel: None,
+        notes: None,
     });
     let sink = SINK.lock().unwrap_or_else(PoisonError::into_inner).take();
     result?;
