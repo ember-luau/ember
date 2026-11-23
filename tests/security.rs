@@ -558,3 +558,27 @@ fn a_tool_delete_keeps_the_binaries_of_embr() {
     assert!(bin.join("embx").is_file(), "embx is gone");
     assert!(!bin.join("other").exists());
 }
+
+/** L4 and L5. `embr doctor` printed the password of EMBER_API_URL, and the
+whole token when the token was no header value. people paste this report
+into bug reports. */
+#[test]
+fn doctor_prints_no_token_and_no_password() {
+    let base = scratch("doctor");
+    for args in [&["doctor"][..], &["doctor", "--json"]] {
+        let output = command(&base, &base)
+            .args(args)
+            .env("EMBER_API_URL", "http://user:hunter2@127.0.0.1:1")
+            .env("EMBER_TOKEN", "ember_sec ret")
+            .output()
+            .unwrap();
+        let shown = text(&output);
+        assert!(shown.contains("127.0.0.1:1"), "{args:?}: {shown}");
+        assert!(!shown.contains("hunter2"), "{args:?}: {shown}");
+        assert!(!shown.contains("sec ret"), "{args:?}: {shown}");
+        assert!(
+            shown.contains("holds a character that no token has"),
+            "{args:?}: {shown}"
+        );
+    }
+}

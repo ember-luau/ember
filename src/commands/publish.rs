@@ -499,7 +499,7 @@ fn publish_target(
     let destination = if args.local {
         "the local registry".to_string()
     } else {
-        registry::api_url()
+        registry::without_userinfo(&registry::api_url())
     };
     // `embr pack` takes the archive here, in place of the upload
     if let Some(written) = super::pack::intercept(manifest, &id, &archive) {

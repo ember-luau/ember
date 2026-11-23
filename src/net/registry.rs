@@ -265,8 +265,10 @@ fn publish_at(
     channel: Option<&str>,
 ) -> Result<(), Error> {
     let url = format!("{api}/v1/publish");
-    // bulk agent, a package archive on a slow uplink shouldn't die at the minute mark
-    let mut request = http::bulk_agent()
+    /* no overall deadline, a package archive on a slow uplink shouldn't die
+    at the minute mark. no redirect: the OIDC token is a custom header, and
+    ureq sends those on to another host */
+    let mut request = http::manual_redirect_agent()
         .post(&url)
         .set("User-Agent", http::USER_AGENT)
         .set("Content-Type", "application/gzip");
@@ -279,7 +281,7 @@ fn publish_at(
     if let Some(channel) = channel {
         request = request.set(CHANNEL_HEADER, channel);
     }
-    let response = request.send_bytes(archive);
+    let response = http::no_redirect(request.send_bytes(archive));
 
     match response {
         Ok(_) => Ok(()),
@@ -375,7 +377,7 @@ pub fn notes(
 ) -> Result<(), Error> {
     let url = format!("{}/v1/packages/{name}/{version}/notes", api_url());
     let method = if body.is_some() { "PUT" } else { "DELETE" };
-    let mut request = http::agent()
+    let mut request = http::manual_redirect_agent()
         .request(method, &url)
         .set("User-Agent", http::USER_AGENT);
     if let Some(token) = token {
@@ -449,7 +451,7 @@ pub(crate) fn owner_call(
     if let Some(target) = target {
         url.push_str(&format!("?target={target}"));
     }
-    let request = http::agent()
+    let request = http::manual_redirect_agent()
         .request(method, &url)
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"));
@@ -470,7 +472,7 @@ pub(crate) fn owner_upload(
     path: &str,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let response = http::bulk_agent()
+    let response = http::manual_redirect_agent()
         .put(&format!("{api}{path}"))
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {token}"))
@@ -485,7 +487,7 @@ fn owner_answer(
     action: &'static str,
     response: Result<ureq::Response, ureq::Error>,
 ) -> Result<String, Error> {
-    match response {
+    match http::no_redirect(response) {
         Ok(response) => Ok(response.into_string()?),
         Err(ureq::Error::Status(status, response)) => Err(Error::OwnerActionFailed {
             action,
@@ -497,9 +499,57 @@ fn owner_answer(
 }
 
 fn error_message(status: u16, body: Option<&str>) -> String {
+    if (300..400).contains(&status) {
+        return format!(
+            "the registry answered HTTP {status}, a redirect, and embr sends no token and no upload to another address; check {API_VAR}"
+        );
+    }
     body.and_then(|body| serde_json::from_str::<ErrorBody>(body).ok())
         .map(|body| body.error)
         .unwrap_or_else(|| format!("the registry answered HTTP {status}"))
+}
+
+/** `url` without the `user:password@` of its host. EMBER_API_URL can hold
+one, and embr prints the URL in `embr doctor` and in a publish. */
+pub fn without_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
+/** whether embr may show `uri` as the page of a login and open it: an
+https address on github.com, on the host of the API `api`, or on the site
+that the API host is `api.` of. the answer of `POST /v1/cli/login` is text
+from the network, and the system opener starts a program for a `file:` or
+a custom scheme. an API on plain http, a local backend, may name its own
+host. */
+pub fn is_login_page(uri: &str, api: &str) -> bool {
+    let host_of = |url: &str| {
+        origin(url).and_then(|origin| {
+            let (scheme, authority) = origin.split_once("://")?;
+            let host = authority.rsplit('@').next()?;
+            let host = host.split(':').next()?.to_string();
+            Some((scheme.to_string(), host))
+        })
+    };
+    let (Some((scheme, host)), Some((api_scheme, api_host))) = (host_of(uri), host_of(api)) else {
+        return false;
+    };
+    if uri.chars().any(|c| c.is_control() || c.is_whitespace()) || host.is_empty() {
+        return false;
+    }
+    let site = api_host.strip_prefix("api.").unwrap_or(&api_host);
+    let ours = host == api_host || host == site;
+    match scheme.as_str() {
+        "https" => ours || host == "github.com",
+        "http" => ours && api_scheme == "http",
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +659,113 @@ mod tests {
         assert!(!followed.contains("authorization"), "{followed}");
         assert!(!followed.contains("ember-link-key"), "{followed}");
         assert!(!followed.contains("ember_abc"), "{followed}");
+    }
+
+    /** a write that the registry answers with a redirect is no success, and
+    the address of the redirect gets no request: no token, no OIDC token
+    and no upload. ureq follows a 302 as a GET with no body, and keeps a
+    custom header on the way. */
+    #[test]
+    fn a_redirected_write_fails_and_sends_nothing_on() {
+        for status in [
+            "301 Moved Permanently",
+            "302 Found",
+            "303 See Other",
+            "307 Temporary Redirect",
+            "308 Permanent Redirect",
+        ] {
+            let (other, other_log) = mock::serve(|_| mock::reply("200 OK", "{}"));
+            let redirect = format!(
+                "HTTP/1.1 {status}\r\nLocation: {other}/collect\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let (api, api_log) = mock::serve(move |_| redirect.clone());
+
+            let published = publish_at(&api, None, Some("oidc-secret"), b"archive", None);
+            assert!(
+                matches!(&published, Err(Error::PublishFailed { message, .. }) if message.contains("redirect")),
+                "{status}: {published:?}"
+            );
+            let with_token = publish_at(
+                &api,
+                Some("ember_abc"),
+                Some("oidc-secret"),
+                b"archive",
+                None,
+            );
+            assert!(with_token.is_err(), "{status}");
+            let called = owner_call(&api, "ember_abc", "yank", "PUT", "/v1/x", None, None);
+            assert!(
+                matches!(&called, Err(Error::OwnerActionFailed { message, .. }) if message.contains("redirect")),
+                "{status}: {called:?}"
+            );
+            let uploaded = owner_upload(&api, "ember_abc", "upload", "/v1/x", b"bytes");
+            assert!(uploaded.is_err(), "{status}");
+
+            assert_eq!(api_log.lock().unwrap().len(), 4, "{status}");
+            assert!(api_log.lock().unwrap()[0].contains("x-github-oidc-token: oidc-secret"));
+            let followed = other_log.lock().unwrap();
+            assert!(followed.is_empty(), "{status}: {followed:?}");
+        }
+    }
+
+    #[test]
+    fn the_api_url_shows_without_its_password() {
+        for (url, shown) in [
+            ("https://api.emberpm.dev", "https://api.emberpm.dev"),
+            (
+                "https://user:secret@host.example/v1",
+                "https://host.example/v1",
+            ),
+            ("http://token@127.0.0.1:8787", "http://127.0.0.1:8787"),
+            ("https://a:b@c@host.example", "https://host.example"),
+            ("https://host.example/path@x", "https://host.example/path@x"),
+            ("not a url", "not a url"),
+        ] {
+            assert_eq!(without_userinfo(url), shown);
+        }
+    }
+
+    #[test]
+    fn a_login_page_is_https_on_the_registry_or_on_github() {
+        let api = "https://api.emberpm.dev";
+        for page in [
+            "https://emberpm.dev/cli/connect?code=ABCD-EFGH",
+            "https://api.emberpm.dev/cli",
+            "https://github.com/login/device",
+            "HTTPS://GitHub.com/login/device",
+        ] {
+            assert!(is_login_page(page, api), "{page}");
+        }
+        for page in [
+            "http://emberpm.dev/cli/connect",
+            "https://evil.example/cli/connect",
+            "https://emberpm.dev.evil.example/",
+            "https://github.com@evil.example/",
+            "https://evil.example/https://github.com/",
+            "file:///home/user/.ssh/id_rsa",
+            "javascript:alert(1)",
+            "vscode://extension/run?x",
+            "https://emberpm.dev/\u{1b}[2K",
+            "https://emberpm.dev/ --flag",
+            "emberpm.dev/cli",
+            "",
+        ] {
+            assert!(!is_login_page(page, api), "{page}");
+        }
+        // a local backend on plain http names its own host
+        assert!(is_login_page(
+            "http://127.0.0.1:8787/cli",
+            "http://127.0.0.1:8787"
+        ));
+        assert!(!is_login_page(
+            "http://127.0.0.1:9999/cli",
+            "https://api.emberpm.dev"
+        ));
+        assert!(!is_login_page(
+            "http://evil.example/cli",
+            "http://127.0.0.1:8787"
+        ));
     }
 
     #[test]

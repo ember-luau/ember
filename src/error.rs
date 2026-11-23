@@ -53,6 +53,12 @@ pub enum Error {
     )]
     TokenRejected,
 
+    /// a token with a character that no HTTP header holds. the token is not in the message.
+    #[error(
+        "{0} holds a character that no token has, such as a space or a line break; set it again, or run `embr auth login`"
+    )]
+    TokenMalformed(&'static str),
+
     /** a publish in GitHub Actions with no Ember token and no OIDC token.
     the browser login would wait for an approval that never comes. */
     #[error(

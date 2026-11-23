@@ -439,20 +439,23 @@ fn registry(offline: bool) -> Group {
         return group;
     }
     let api = registry::api_url();
+    // EMBER_API_URL can hold a password, and this report goes into bug reports
+    let shown = registry::without_userinfo(&api);
     // an answer with an error status still shows that the host is there
     let reachable = match http::agent().get(&api).call() {
         Ok(_) | Err(ureq::Error::Status(..)) => true,
         Err(error) => {
+            let error = error.to_string().replace(&api, &shown);
             group.failure(
                 "api",
-                format!("{api} does not answer: {error}"),
+                format!("{shown} does not answer: {error}"),
                 "Check the network, then run `embr doctor` again; `embr doctor --offline` leaves this group out",
             );
             false
         }
     };
     if reachable {
-        group.ok("api", format!("{api} answers"));
+        group.ok("api", format!("{shown} answers"));
     }
 
     /* the token as it is stored. `auth::token` trades an old GitHub token
@@ -472,6 +475,13 @@ fn registry(offline: bool) -> Group {
     };
     match token {
         None => group.skipped("login", "not logged in, which only a publish needs"),
+        Some(token) if auth::check_token(token, source).is_err() => group.failure(
+            "login",
+            format!(
+                "{source} holds a character that no token has, such as a space or a line break"
+            ),
+            "Run `embr auth login`, or set a new EMBER_TOKEN",
+        ),
         Some(_) if !reachable => group.skipped("login", "the API does not answer"),
         Some(token) if !token.starts_with(auth::TOKEN_PREFIX) => group.warning(
             "login",

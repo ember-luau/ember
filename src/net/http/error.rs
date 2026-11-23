@@ -23,6 +23,13 @@ pub enum HttpError {
     #[error("rate limited")]
     RateLimited,
 
+    /** ureq names the header and its value in its own error, and the
+    value is a token. */
+    #[error(
+        "a request header holds a character that HTTP does not allow; a token in EMBER_TOKEN, GITHUB_TOKEN or the stored login has a space or a line break in it"
+    )]
+    BadHeader,
+
     #[error("{url} is not in a cache, and --offline lets embr download nothing")]
     Offline { url: String },
 
@@ -37,6 +44,9 @@ impl From<ureq::Error> for HttpError {
         match error {
             ureq::Error::Status(404, _) => HttpError::NotFound,
             ureq::Error::Status(403 | 429, _) => HttpError::RateLimited,
+            ureq::Error::Transport(transport) if transport.kind() == ureq::ErrorKind::BadHeader => {
+                HttpError::BadHeader
+            }
             // the name lookup is where `--offline` stops a request, see `net::offline`
             ureq::Error::Transport(transport)
                 if crate::net::offline::is_enabled()

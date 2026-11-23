@@ -73,13 +73,14 @@ anything at all goes wrong, missing permission, non-200, timeout, bad
 JSON. None means "publish without provenance", never an error. */
 pub fn actions_token() -> Option<String> {
     let endpoint = TokenEndpoint::from_env()?;
-    let response = http::agent()
+    // no redirect: the bearer of the runner goes to the address that the runner gave
+    let response = http::manual_redirect_agent()
         .get(&endpoint.request_url())
         .set("User-Agent", http::USER_AGENT)
         .set("Authorization", &format!("Bearer {}", endpoint.bearer))
         .timeout(TOKEN_TIMEOUT)
-        .call()
-        .ok()?;
+        .call();
+    let response = http::no_redirect(response).ok()?;
     let token: TokenResponse = response.into_json().ok()?;
     (!token.value.is_empty()).then_some(token.value)
 }
